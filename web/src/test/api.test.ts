@@ -64,4 +64,34 @@ describe('API security and market adapters', () => {
     expect(result.recalls[0].content).toBe('最新: 1500')
     expect(String(vi.mocked(fetch).mock.calls[0][0])).toContain('/search/financial?q=')
   })
+
+  it('sends model settings mutations with CSRF without expecting a returned API key', async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse({
+      configuration_id: 'config-1', version: 1, config_sha256: 'a'.repeat(64), source: 'database',
+      provider: 'openai-compatible', base_url: 'https://gateway.example/v1', api_key_configured: true,
+      search_model: 'gpt-5.6-luna', search_reasoning_effort: 'low', research_model: 'gpt-5.6-sol',
+      research_reasoning_effort: 'high', timeout_seconds: 90, enabled: true, configured: true,
+      reachable: true, degraded: false, status_message: 'ok',
+    }))
+    await api.saveModelSettings({
+      base_url: 'https://gateway.example/v1', api_key: '', search_model: 'gpt-5.6-luna',
+      search_reasoning_effort: 'low', research_model: 'gpt-5.6-sol', research_reasoning_effort: 'high',
+      timeout_seconds: 90, enabled: true,
+    })
+
+    const [, init] = vi.mocked(fetch).mock.calls[0]
+    expect(init?.method).toBe('PUT')
+    expect(new Headers(init?.headers).get('X-CSRF-Token')).toBe('csrf-value')
+    expect(String(init?.body)).toContain('"api_key":""')
+  })
+
+  it('persists user asset state with CSRF protection', async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse({ watchlist: ['600000.SH'], positions: [] }))
+    await api.saveAssets({ watchlist: ['600000.SH'], positions: [] })
+
+    const [, init] = vi.mocked(fetch).mock.calls[0]
+    expect(init?.method).toBe('PUT')
+    expect(new Headers(init?.headers).get('X-CSRF-Token')).toBe('csrf-value')
+    expect(String(init?.body)).toContain('600000.SH')
+  })
 })

@@ -31,6 +31,20 @@ export interface Quote {
   status?: MarketDataStatus
 }
 
+export interface PaperPosition {
+  symbol: string
+  name: string
+  quantity: number
+  cost: number
+  target_weight: number
+}
+
+export interface AssetState {
+  watchlist: string[]
+  positions: PaperPosition[]
+  updated_at?: string | null
+}
+
 export interface MarketDataStatus {
   source: string
   collected_at: string
@@ -54,23 +68,63 @@ export interface FinancialSearchResult {
   query: string
   provider: string
   upstream: string
-  mode: 'cli' | 'embedded'
+  mode: 'cli' | 'embedded' | 'direct' | 'ai'
   searched_at: string
   elapsed_ms: number
   entities: Array<{ name: string; code: string; [key: string]: unknown }>
   recalls: Array<{ type: string; desc: string; content: string; [key: string]: unknown }>
   raw_sha256: string
+  outcome?: Record<string, unknown>
+  interpretation?: string
+  sources?: Array<{ source: string; uri?: string; fetched_at?: string; report_date?: string | null; notice_date?: string | null }>
+  warnings?: string[]
   live_data_isolated_from_snapshots: boolean
 }
 
 export interface FinancialSearchStatus {
   provider: string
   upstream: string
-  mode: 'cli' | 'embedded'
+  mode: 'cli' | 'embedded' | 'direct' | 'ai'
   available: boolean
+  configured?: boolean
+  reachable?: boolean
+  degraded?: boolean
+  model?: string | null
   script_path?: string | null
   message: string
   live_data_isolated_from_snapshots: boolean
+}
+
+export interface ModelSettings {
+  configuration_id: string | null
+  version: number
+  config_sha256: string
+  source: string
+  provider: string
+  base_url: string
+  api_key_configured: boolean
+  search_model: string
+  search_reasoning_effort: string
+  research_model: string
+  research_reasoning_effort: string
+  timeout_seconds: number
+  enabled: boolean
+  configured: boolean
+  reachable: boolean
+  degraded: boolean
+  status_message: string
+  checked_at?: string | null
+}
+
+export interface ModelSettingsDraft {
+  base_url: string
+  api_key?: string
+  search_model: string
+  search_reasoning_effort: string
+  research_model: string
+  research_reasoning_effort: string
+  timeout_seconds: number
+  enabled: boolean
 }
 
 export interface KlineBar {

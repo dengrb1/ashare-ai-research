@@ -40,6 +40,7 @@ from ashare_ai.orchestration.akshare_bundle import (
     AKShareCanonicalProvider,
     CanonicalMarketProvider,
     FallbackCanonicalProvider,
+    MarketDataAcquisitionError,
     TushareCanonicalProvider,
 )
 from ashare_ai.orchestration.backtest_snapshot import create_backtest_snapshot
@@ -320,6 +321,7 @@ class BuiltinDailyBackend:
             bundle = self._load_source_bundle(
                 trading_date,
                 decision_at,
+                run_id=run_id,
                 required_symbols=tuple(manifest.get("tracked_symbols", ())),
             )
             digest = self._write_stage(run_id, "bundle", bundle)
@@ -451,7 +453,7 @@ class BuiltinDailyBackend:
             raise ValueError("agent stage received an unknown feature artifact")
         bundle = self._read_stage(run_id, "bundle", CanonicalDailyBundle)
         features = self._read_stage(run_id, "features", FeatureArtifact)
-        llm_client = self._resolve_llm_client()
+        llm_client = self._resolve_llm_client(run_id)
         items: list[SymbolAgentSet] = []
         for feature_item in features.items:
             evidence = self._evidence_for_symbol(bundle, feature_item.symbol)
@@ -743,9 +745,7 @@ class BuiltinDailyBackend:
             if decision.tzinfo is None:
                 decision = decision.replace(tzinfo=SHANGHAI)
             decisions[key] = decision
-            snapshot_hashes[key] = str(
-                job.manifest.get("acquired_bundle_sha256") or job.input_hash
-            )
+            snapshot_hashes[key] = str(job.manifest.get("acquired_bundle_sha256") or job.input_hash)
         signals: list[BacktestSignal] = []
         dropped_symbols: set[str] = set()
         chosen_dates: set[date] = set()
@@ -1016,6 +1016,7 @@ class BuiltinDailyBackend:
         trading_date: date,
         decision_at: datetime,
         *,
+        run_id: str | None = None,
         required_symbols: tuple[str, ...] = (),
     ) -> CanonicalDailyBundle:
         configured = os.environ.get("ASHARE_CANONICAL_BUNDLE")
@@ -1034,7 +1035,10 @@ class BuiltinDailyBackend:
         elif self._settings.canonical_bundle_mode == "akshare":
             builder = self._canonical_builder
             if builder is None:
-                provider: CanonicalMarketProvider = AKShareCanonicalProvider()
+                provider: CanonicalMarketProvider = AKShareCanonicalProvider(
+                    max_attempts=self._settings.akshare_fetch_max_attempts,
+                    backoff_seconds=self._settings.akshare_fetch_backoff_seconds,
+                )
                 if self._settings.tushare_token:
                     provider = FallbackCanonicalProvider(
                         provider,
@@ -1046,16 +1050,59 @@ class BuiltinDailyBackend:
                     bundle_size=self._settings.akshare_bundle_size,
                     history_sessions=self._settings.akshare_history_sessions,
                 )
-            bundle = builder.build(
-                trading_date,
-                decision_at,
-                required_symbols=required_symbols,
-            )
+            try:
+                bundle = builder.build(
+                    trading_date,
+                    decision_at,
+                    required_symbols=required_symbols,
+                )
+            except MarketDataAcquisitionError as exc:
+                if run_id is not None:
+                    self._record_akshare_acquisition_events(run_id, builder, fatal=exc)
+                raise
+            except Exception:
+                if run_id is not None:
+                    self._record_akshare_acquisition_events(run_id, builder)
+                raise
+            else:
+                if run_id is not None:
+                    self._record_akshare_acquisition_events(run_id, builder)
         else:
             raise RuntimeError("unsupported canonical bundle mode")
         if bundle.trading_date != trading_date or bundle.decision_at != decision_at:
             raise ValueError("canonical bundle does not match requested trading_date/decision_at")
         return bundle
+
+    def _record_akshare_acquisition_events(
+        self,
+        run_id: str,
+        builder: AKShareCanonicalBundleBuilder,
+        *,
+        fatal: MarketDataAcquisitionError | None = None,
+    ) -> None:
+        events = [dict(item) for item in getattr(builder, "acquisition_events", ())]
+        if fatal is not None:
+            events.append({**fatal.audit_details(), "outcome": "failed_required_request"})
+        if not events:
+            return
+        with self.session_factory() as session:
+            audit = AuditLogger(session)
+            for details in events:
+                skipped = details.get("outcome") == "skipped_nonessential_symbol"
+                audit.record(
+                    run_id,
+                    "AKSHARE_FETCH_SKIPPED" if skipped else "AKSHARE_FETCH_FAILED",
+                    (
+                        "A nonessential security was skipped after bounded provider attempts"
+                        if skipped
+                        else (
+                            "A required canonical market-data request failed after bounded attempts"
+                        )
+                    ),
+                    severity="WARNING" if skipped else "ERROR",
+                    details=details,
+                )
+            session.commit()
 
     def _run_context(self, run_id: str) -> tuple[date, datetime, dict[str, Any]]:
         with self.session_factory() as session:
@@ -1116,28 +1163,29 @@ class BuiltinDailyBackend:
     def _uri_for_digest(self, digest: str) -> str:
         return (self.object_root / "sha256" / digest[:2] / digest).resolve().as_uri()
 
-    def _resolve_llm_client(self) -> StructuredLLMClient | None:
+    def _resolve_llm_client(self, run_id: str) -> StructuredLLMClient | None:
         if self._injected_llm_client is not None:
             return self._injected_llm_client
-        if self._settings.agent_backend == "builtin":
-            return None
-        if self._configured_llm_client is None:
-            base_url = self._settings.llm_base_url
-            api_key = self._settings.llm_api_key
-            if not base_url or not api_key:
-                raise RuntimeError(
-                    "llm_base_url and llm_api_key are required for openai_compatible agent backend"
-                )
-            from ashare_ai.agents.openai_compatible import OpenAICompatibleStructuredLLMClient
+        from ashare_ai.agents.model_settings import ModelConfigurationService
+        from ashare_ai.agents.openai_compatible import OpenAICompatibleStructuredLLMClient
 
-            self._configured_llm_client = OpenAICompatibleStructuredLLMClient(
-                base_url=base_url,
-                api_key=api_key,
-                model=self._settings.llm_model,
-                reasoning_effort=self._settings.llm_reasoning_effort,
-                timeout_seconds=self._settings.llm_timeout_seconds,
-            )
-        return self._configured_llm_client
+        with self.session_factory() as session:
+            run = session.get(JobRun, run_id)
+            if run is None:
+                raise KeyError(run_id)
+            reference = run.manifest.get("model_configuration")
+            if not isinstance(reference, dict) or not reference.get("enabled", False):
+                return None
+            runtime = ModelConfigurationService(self._settings).resolve_pinned(session, reference)
+        if runtime is None:
+            return None
+        return OpenAICompatibleStructuredLLMClient(
+            base_url=runtime.base_url,
+            api_key=runtime.api_key,
+            model=runtime.research_model,
+            reasoning_effort=runtime.research_reasoning_effort,
+            timeout_seconds=runtime.timeout_seconds,
+        )
 
     def _run_llm_component(
         self,

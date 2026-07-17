@@ -51,9 +51,13 @@ def test_local_and_docker_environment_templates_are_separated() -> None:
     assert "@postgres:5432/ashare" in docker
     assert "redis://redis:6379/0" in docker
     assert "http://minio:9000" in docker
-    assert "http://host.docker.internal:3688/v1" in docker
+    assert "AGENT_BACKEND=" not in docker
+    assert "LLM_BASE_URL=" not in docker
+    assert "MODEL_SETTINGS_ENCRYPTION_KEYS=" in local
     assert "MARKET_KLINE_CACHE_SECONDS=300" in local
     assert "MARKET_PREFETCH_MAX_WORKERS=4" in docker
+    assert "AKSHARE_FETCH_MAX_ATTEMPTS=2" in local
+    assert "AKSHARE_FETCH_BACKOFF_SECONDS=1" in docker
 
 
 def test_container_install_uses_dependency_lock() -> None:
@@ -72,6 +76,8 @@ def test_web_container_builds_vite_assets_and_nginx_proxies_api() -> None:
     assert "npm ci" in dockerfile
     assert "npm run build" in dockerfile
     assert "try_files $uri $uri/ /index.html" in nginx
+    assert "location = /assets {" in nginx
+    assert "location = /assets/ {" in nginx
     assert "proxy_pass http://api:8000" in nginx
 
 

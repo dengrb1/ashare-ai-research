@@ -11,6 +11,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ashare_ai.agents.model_settings import ModelConfigurationService
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.hashing import sha256_bytes, stable_hash
 from ashare_ai.core.time import SHANGHAI, market_decision_time
@@ -19,6 +20,16 @@ from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import JobRun
 
 T = TypeVar("T")
+
+
+def _error_details(error: Exception, **base: Any) -> dict[str, Any]:
+    details = {**base, "error_type": type(error).__name__}
+    audit_details = getattr(error, "audit_details", None)
+    if callable(audit_details):
+        value = audit_details()
+        if isinstance(value, dict):
+            details.update(value)
+    return details
 
 
 def _execution_id() -> str:
@@ -59,7 +70,8 @@ class ApplicationPipeline:
         self.session_factory = session_factory
 
     def start_run(self, trading_date: date) -> str:
-        settings = get_settings()
+        backend_settings = getattr(self.backend, "_settings", None)
+        settings = backend_settings if backend_settings is not None else get_settings()
         decision_at = market_decision_time(
             trading_date, settings.decision_hour, settings.decision_minute
         )
@@ -68,8 +80,19 @@ class ApplicationPipeline:
             raise RuntimeError("daily research trading_date cannot be in the future")
         if trading_date == current.date():
             decision_at = current
-            if settings.canonical_bundle_mode == "akshare" and current.hour < 17:
-                raise RuntimeError("AKShare daily research is available after 17:00 Asia/Shanghai")
+            research_start = (
+                settings.daily_research_start_hour,
+                settings.daily_research_start_minute,
+            )
+            if (
+                settings.canonical_bundle_mode == "akshare"
+                and (current.hour, current.minute) < research_start
+            ):
+                earliest = (
+                    f"{settings.daily_research_start_hour:02d}:"
+                    f"{settings.daily_research_start_minute:02d}"
+                )
+                raise RuntimeError(f"AKShare 当日研究需在收盘后 {earliest}（Asia/Shanghai）启动")
         execution_id = _execution_id()
         run_id = str(uuid5(NAMESPACE_URL, f"ashare-daily:{execution_id}"))
         manifest = dict(self.backend.run_manifest(trading_date, decision_at))
@@ -87,9 +110,21 @@ class ApplicationPipeline:
             policy_config_sha256=sha256_bytes(policy_path.read_bytes()),
             random_seed=int(manifest.get("random_seed", 42)),
         )
-        input_hash = stable_hash(manifest)
-        idempotency_key = stable_hash({"execution_id": execution_id, "input_hash": input_hash})
         with self.session_factory() as session:
+            model_configuration = ModelConfigurationService(settings).resolve(session)
+            manifest["model_configuration"] = (
+                model_configuration.manifest_reference()
+                if model_configuration is not None
+                else {
+                    "source": "builtin",
+                    "configuration_id": None,
+                    "version": 0,
+                    "config_sha256": stable_hash({"agent_backend": "builtin"}),
+                    "enabled": False,
+                }
+            )
+            input_hash = stable_hash(manifest)
+            idempotency_key = stable_hash({"execution_id": execution_id, "input_hash": input_hash})
             existing = session.scalar(
                 select(JobRun).where(JobRun.idempotency_key == idempotency_key)
             )
@@ -133,7 +168,7 @@ class ApplicationPipeline:
                         "STAGE_FAILED",
                         f"Pipeline stage failed: {name}",
                         severity="ERROR",
-                        details={"stage": name, "error_type": type(exc).__name__},
+                        details=_error_details(exc, stage=name),
                     )
                     session.commit()
             raise

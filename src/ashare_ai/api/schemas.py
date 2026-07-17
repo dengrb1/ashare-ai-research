@@ -46,6 +46,112 @@ class PasswordResetRequest(BaseModel):
     password: str = Field(min_length=10, max_length=256)
 
 
+class ModelSettingsRequest(BaseModel):
+    base_url: str = Field(min_length=8, max_length=2048)
+    api_key: str | None = Field(default=None, max_length=4096)
+    search_model: str = Field(default="gpt-5.6-luna", min_length=1, max_length=128)
+    search_reasoning_effort: str = Field(default="low", pattern=r"^(low|medium|high|xhigh)$")
+    research_model: str = Field(default="gpt-5.6-sol", min_length=1, max_length=128)
+    research_reasoning_effort: str = Field(default="high", pattern=r"^(low|medium|high|xhigh)$")
+    timeout_seconds: float = Field(default=90, ge=1, le=600)
+    enabled: bool = True
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def empty_api_key_keeps_existing_secret(cls, value: object) -> object:
+        return None if isinstance(value, str) and not value.strip() else value
+
+
+class ModelSettingsResponse(BaseModel):
+    configuration_id: str | None
+    version: int
+    config_sha256: str
+    source: str
+    provider: str
+    base_url: str
+    api_key_configured: bool
+    search_model: str
+    search_reasoning_effort: str
+    research_model: str
+    research_reasoning_effort: str
+    timeout_seconds: float
+    enabled: bool
+    configured: bool
+    reachable: bool
+    degraded: bool
+    status_message: str
+    checked_at: datetime | None = None
+
+
+class ModelProbeResponse(BaseModel):
+    reachable: bool
+    message: str
+    model: str
+    checked_at: datetime
+
+
+class ModelListResponse(BaseModel):
+    models: list[str]
+
+
+class PaperPosition(BaseModel):
+    symbol: str = Field(pattern=r"^\d{6}\.(SH|SZ|BJ)$")
+    name: str = Field(default="", max_length=64)
+    quantity: int = Field(gt=0, le=1_000_000_000)
+    cost: float = Field(gt=0, le=10_000_000)
+    target_weight: float = Field(ge=0, le=1)
+
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def normalize_symbol(cls, value: object) -> object:
+        return value.strip().upper() if isinstance(value, str) else value
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def normalize_name(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
+class AssetStateRequest(BaseModel):
+    watchlist: list[str] = Field(max_length=100)
+    positions: list[PaperPosition] = Field(max_length=15)
+
+    @field_validator("watchlist", mode="before")
+    @classmethod
+    def normalize_watchlist(cls, value: object) -> object:
+        if not isinstance(value, list):
+            return value
+        normalized = [item.strip().upper() if isinstance(item, str) else item for item in value]
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("watchlist symbols must be unique")
+        return normalized
+
+    @field_validator("watchlist")
+    @classmethod
+    def validate_watchlist_symbols(cls, value: list[str]) -> list[str]:
+        import re
+
+        if any(re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", item) is None for item in value):
+            raise ValueError("watchlist contains an invalid A-share symbol")
+        return value
+
+    @field_validator("positions")
+    @classmethod
+    def validate_positions(cls, value: list[PaperPosition]) -> list[PaperPosition]:
+        symbols = [position.symbol for position in value]
+        if len(set(symbols)) != len(symbols):
+            raise ValueError("position symbols must be unique")
+        if sum(position.target_weight for position in value) > 1.000001:
+            raise ValueError("position target weights cannot exceed 100%")
+        return value
+
+
+class AssetStateResponse(BaseModel):
+    watchlist: list[str]
+    positions: list[PaperPosition]
+    updated_at: datetime | None = None
+
+
 class ScoreResponse(OrmResponse):
     symbol: str
     trading_date: date

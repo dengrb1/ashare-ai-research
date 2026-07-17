@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     allow_demo_data: bool = False
     akshare_bundle_size: int = Field(default=20, ge=15, le=100)
     akshare_history_sessions: int = Field(default=280, ge=65, le=500)
+    akshare_fetch_max_attempts: int = Field(default=2, ge=1, le=5)
+    akshare_fetch_backoff_seconds: float = Field(default=1.0, ge=0, le=60)
     worker_lease_seconds: int = Field(default=900, ge=30, le=7200)
     ashare_pipeline_factory: str | None = None
     ashare_stage_backend_factory: str | None = None
@@ -53,6 +55,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     decision_hour: int = Field(default=18, ge=0, le=23)
     decision_minute: int = Field(default=0, ge=0, le=59)
+    daily_research_start_hour: int = Field(default=15, ge=0, le=23)
+    daily_research_start_minute: int = Field(default=5, ge=0, le=59)
     minimum_listing_days: int = Field(default=120, ge=0)
     minimum_median_amount: float = Field(default=50_000_000.0, ge=0)
     agent_backend: Literal["builtin", "openai_compatible"] = "builtin"
@@ -61,6 +65,7 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-5.6-sol"
     llm_reasoning_effort: str = "high"
     llm_timeout_seconds: float = Field(default=90.0, gt=0, le=600)
+    model_settings_encryption_keys: str | None = None
 
     @field_validator("neodata_financial_search_path", mode="before")
     @classmethod

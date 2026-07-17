@@ -92,6 +92,63 @@ class UserSession(Base):
     user: Mapped[UserAccount] = relationship()
 
 
+class UserAssetState(Base):
+    """User-owned editable watchlist and simulated position state."""
+
+    __tablename__ = "user_asset_states"
+
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.user_id", ondelete="CASCADE"), primary_key=True
+    )
+    watchlist: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    positions: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ModelConfigurationVersion(Base):
+    """Immutable, encrypted model configuration revision."""
+
+    __tablename__ = "model_configuration_versions"
+    __table_args__ = (
+        UniqueConstraint("version", name="uq_model_configuration_version"),
+        UniqueConstraint("config_sha256", name="uq_model_configuration_hash"),
+    )
+
+    configuration_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    base_url: Mapped[str] = mapped_column(Text, nullable=False)
+    encrypted_api_key: Mapped[str] = mapped_column(Text, nullable=False)
+    encryption_key_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    search_model: Mapped[str] = mapped_column(String(128), nullable=False)
+    search_reasoning_effort: Mapped[str] = mapped_column(String(16), nullable=False)
+    research_model: Mapped[str] = mapped_column(String(128), nullable=False)
+    research_reasoning_effort: Mapped[str] = mapped_column(String(16), nullable=False)
+    timeout_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    config_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("user_accounts.user_id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ActiveModelConfiguration(Base):
+    """Mutable pointer and health state for the active immutable revision."""
+
+    __tablename__ = "active_model_configuration"
+
+    scope: Mapped[str] = mapped_column(String(32), primary_key=True, default="default")
+    configuration_id: Mapped[str] = mapped_column(
+        ForeignKey("model_configuration_versions.configuration_id"), nullable=False
+    )
+    activated_by: Mapped[str | None] = mapped_column(ForeignKey("user_accounts.user_id"))
+    activated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_check_status: Mapped[str] = mapped_column(String(16), nullable=False, default="UNTESTED")
+    last_check_message: Mapped[str | None] = mapped_column(Text)
+
+    configuration: Mapped[ModelConfigurationVersion] = relationship()
+
+
 class SecurityMaster(Base):
     __tablename__ = "security_master"
     __table_args__ = (

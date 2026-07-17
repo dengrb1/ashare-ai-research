@@ -22,7 +22,7 @@ const NAV = [
 const TITLES: Record<string, [string, string]> = {
   '/': ['全局仪表盘', '研究运行、市场状态与组合概览'],
   '/market': ['行情与 K 线', '活跃标的按需刷新 · 历史序列后复权'],
-  '/search': ['金融数据搜索', 'NeoData 自然语言金融查询 · 默认搜索源'],
+  '/search': ['金融数据搜索', 'AI 解析意图 · 确定性数据源返回金融事实'],
   '/assets': ['自选与持仓', '关注列表与模拟持仓实时状态'],
   '/research': ['每日研究', '基于冻结快照的可复现异步研究'],
   '/candidates': ['候选池', '确定性公式评分与风险过滤结果'],
@@ -31,13 +31,19 @@ const TITLES: Record<string, [string, string]> = {
   '/backtest': ['回测工作台', '固定快照上的事件驱动回测'],
   '/runs': ['运行与审计', '任务状态、失败原因和审计事件'],
   '/admin': ['用户管理', '账户、角色与访问控制'],
+  '/admin/models': ['模型设置', '加密凭据、模型分工、连通性与版本状态'],
+}
+
+export function titleForPathname(pathname: string): [string, string] {
+  const normalizedPath = pathname === '/' ? '/' : pathname.replace(/\/+$/, '')
+  return TITLES[normalizedPath] || TITLES['/']
 }
 
 export function AppShell() {
   const { user, logout } = useAuth()
   const { delayed, source, updatedAt } = useMarket()
   const location = useLocation()
-  const [title, subtitle] = TITLES[location.pathname] || TITLES['/']
+  const [title, subtitle] = titleForPathname(location.pathname)
   const isAdmin = user?.role?.toLowerCase() === 'admin'
 
   return <div className="app-shell">
@@ -48,7 +54,7 @@ export function AppShell() {
           <NavLink key={item.to} to={item.to!} end={item.end} className={({ isActive }) => isActive ? 'active' : ''}>
             <span>{item.icon}</span>{item.label}
           </NavLink>)}
-        {isAdmin && <><div className="nav-group">管理</div><NavLink to="/admin" className={({ isActive }) => isActive ? 'active' : ''}><span>⚙</span>用户管理</NavLink></>}
+        {isAdmin && <><div className="nav-group">管理</div><NavLink to="/admin" end className={({ isActive }) => isActive ? 'active' : ''}><span>⚙</span>用户管理</NavLink><NavLink to="/admin/models" className={({ isActive }) => isActive ? 'active' : ''}><span>◉</span>模型设置</NavLink></>}
       </nav>
       <div className="sidebar-foot">
         <div className={`feed-state ${delayed ? 'delayed' : ''}`}><i />{delayed ? '行情非实时' : `${source} 行情正常`}</div>

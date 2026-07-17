@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from importlib import import_module
+from time import sleep
 from typing import Any, Protocol
 from uuid import NAMESPACE_URL, uuid5
 
@@ -37,71 +38,162 @@ class CanonicalMarketProvider(Protocol):
     ) -> list[dict[str, Any]]: ...
 
 
+class MarketDataAcquisitionError(RuntimeError):
+    """Sanitized, auditable failure for a bounded canonical market-data request."""
+
+    def __init__(
+        self,
+        *,
+        operation: str,
+        subject: str,
+        attempt_count: int,
+        sources: tuple[str, ...],
+    ) -> None:
+        self.operation = operation
+        self.subject = subject
+        self.attempt_count = attempt_count
+        self.sources = sources
+        labels = {
+            "securities": "证券列表",
+            "daily_bars": "股票历史行情",
+            "benchmark_bars": "基准历史行情",
+        }
+        label = labels.get(operation, "市场数据")
+        source_text = "、".join(sources)
+        super().__init__(
+            f"{label}采集暂时失败（{subject}）：已受限尝试 {attempt_count} 次，"
+            f"数据源为 {source_text}；请稍后重试"
+        )
+
+    def audit_details(self) -> dict[str, Any]:
+        return {
+            "operation": self.operation,
+            "subject": self.subject,
+            "attempt_count": self.attempt_count,
+            "sources": list(self.sources),
+        }
+
+
 class AKShareCanonicalProvider:
     source = "akshare"
+
+    def __init__(
+        self,
+        *,
+        max_attempts: int = 2,
+        backoff_seconds: float = 1.0,
+        sleeper: Callable[[float], None] = sleep,
+    ) -> None:
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
+        if backoff_seconds < 0:
+            raise ValueError("backoff_seconds must be non-negative")
+        self.max_attempts = max_attempts
+        self.backoff_seconds = backoff_seconds
+        self.sleeper = sleeper
 
     @staticmethod
     def _sdk() -> Any:
         return import_module("akshare")
 
+    @staticmethod
+    def _records(frame: Any) -> list[dict[str, Any]]:
+        if frame is None:
+            return []
+        rows = frame.to_dict(orient="records")
+        return rows if isinstance(rows, list) else []
+
+    def _fetch(
+        self,
+        *,
+        operation: str,
+        subject: str,
+        fetchers: tuple[tuple[str, Callable[[], list[dict[str, Any]]]], ...],
+    ) -> list[dict[str, Any]]:
+        attempt_count = 0
+        sources = tuple(source for source, _ in fetchers)
+        for round_index in range(self.max_attempts):
+            for _, fetcher in fetchers:
+                attempt_count += 1
+                try:
+                    rows = fetcher()
+                except Exception:
+                    rows = []
+                if rows:
+                    return rows
+            if round_index + 1 < self.max_attempts and self.backoff_seconds:
+                self.sleeper(self.backoff_seconds)
+        raise MarketDataAcquisitionError(
+            operation=operation,
+            subject=subject,
+            attempt_count=attempt_count,
+            sources=sources,
+        )
+
     def securities(self) -> list[dict[str, Any]]:
         sdk = self._sdk()
-        try:
-            frame = sdk.stock_zh_a_spot_em()
-            return list(frame.to_dict(orient="records"))
-        except Exception:
-            frame = sdk.stock_zh_a_spot()
-            return [
-                {
-                    **row,
-                    "代码": _strip_market_prefix(str(row.get("代码", ""))),
-                    "_canonical_source": "akshare-sina",
-                }
-                for row in frame.to_dict(orient="records")
-            ]
+        return self._fetch(
+            operation="securities",
+            subject="A 股证券列表",
+            fetchers=(
+                ("eastmoney", lambda: self._records(sdk.stock_zh_a_spot_em())),
+                (
+                    "sina",
+                    lambda: [
+                        {
+                            **row,
+                            "代码": _strip_market_prefix(str(row.get("代码", ""))),
+                            "_canonical_source": "akshare-sina",
+                        }
+                        for row in self._records(sdk.stock_zh_a_spot())
+                    ],
+                ),
+            ),
+        )
 
-    def daily_bars(
-        self, symbol: str, start_date: date, end_date: date
-    ) -> list[dict[str, Any]]:
+    def daily_bars(self, symbol: str, start_date: date, end_date: date) -> list[dict[str, Any]]:
         sdk = self._sdk()
         normalized = str(normalize_symbol(symbol))
-        try:
-            frame = sdk.stock_zh_a_hist(
-                symbol=normalized.split(".", 1)[0],
-                period="daily",
-                start_date=start_date.strftime("%Y%m%d"),
-                end_date=end_date.strftime("%Y%m%d"),
-                adjust="hfq",
-            )
-            return list(frame.to_dict(orient="records"))
-        except Exception:
-            frame = sdk.stock_zh_a_daily(
-                symbol=_sina_symbol(normalized),
-                start_date=start_date.strftime("%Y%m%d"),
-                end_date=end_date.strftime("%Y%m%d"),
-                adjust="hfq",
-            )
-            return [
-                {**row, "_canonical_source": "akshare-sina"}
-                for row in frame.to_dict(orient="records")
-            ]
+        return self._fetch(
+            operation="daily_bars",
+            subject=normalized,
+            fetchers=(
+                (
+                    "eastmoney",
+                    lambda: self._records(
+                        sdk.stock_zh_a_hist(
+                            symbol=normalized.split(".", 1)[0],
+                            period="daily",
+                            start_date=start_date.strftime("%Y%m%d"),
+                            end_date=end_date.strftime("%Y%m%d"),
+                            adjust="hfq",
+                        )
+                    ),
+                ),
+                (
+                    "sina",
+                    lambda: [
+                        {**row, "_canonical_source": "akshare-sina"}
+                        for row in self._records(
+                            sdk.stock_zh_a_daily(
+                                symbol=_sina_symbol(normalized),
+                                start_date=start_date.strftime("%Y%m%d"),
+                                end_date=end_date.strftime("%Y%m%d"),
+                                adjust="hfq",
+                            )
+                        )
+                    ],
+                ),
+            ),
+        )
 
-    def benchmark_bars(
-        self, code: str, start_date: date, end_date: date
-    ) -> list[dict[str, Any]]:
+    def benchmark_bars(self, code: str, start_date: date, end_date: date) -> list[dict[str, Any]]:
         sdk = self._sdk()
-        try:
-            frame = sdk.index_zh_a_hist(
-                symbol=code,
-                period="daily",
-                start_date=start_date.strftime("%Y%m%d"),
-                end_date=end_date.strftime("%Y%m%d"),
-            )
-            return list(frame.to_dict(orient="records"))
-        except Exception:
+
+        def sina_rows() -> list[dict[str, Any]]:
             frame = sdk.stock_zh_index_daily(symbol=f"sh{code}")
             rows = []
-            for row in frame.to_dict(orient="records"):
+            for row in self._records(frame):
                 raw_date = row.get("date")
                 try:
                     value_date = date.fromisoformat(str(raw_date)[:10])
@@ -116,6 +208,25 @@ class AKShareCanonicalProvider:
                         }
                     )
             return rows
+
+        return self._fetch(
+            operation="benchmark_bars",
+            subject=code,
+            fetchers=(
+                (
+                    "eastmoney",
+                    lambda: self._records(
+                        sdk.index_zh_a_hist(
+                            symbol=code,
+                            period="daily",
+                            start_date=start_date.strftime("%Y%m%d"),
+                            end_date=end_date.strftime("%Y%m%d"),
+                        )
+                    ),
+                ),
+                ("sina", sina_rows),
+            ),
+        )
 
 
 class TushareCanonicalProvider:
@@ -146,9 +257,7 @@ class TushareCanonicalProvider:
             for item in master.to_dict(orient="records")
         ]
 
-    def daily_bars(
-        self, symbol: str, start_date: date, end_date: date
-    ) -> list[dict[str, Any]]:
+    def daily_bars(self, symbol: str, start_date: date, end_date: date) -> list[dict[str, Any]]:
         frame = self.sdk.pro_bar(
             api=self.client,
             ts_code=normalize_symbol(symbol),
@@ -159,9 +268,7 @@ class TushareCanonicalProvider:
         )
         return _tushare_rows(frame)
 
-    def benchmark_bars(
-        self, code: str, start_date: date, end_date: date
-    ) -> list[dict[str, Any]]:
+    def benchmark_bars(self, code: str, start_date: date, end_date: date) -> list[dict[str, Any]]:
         frame = self.client.index_daily(
             ts_code=f"{code}.SH",
             start_date=start_date.strftime("%Y%m%d"),
@@ -197,9 +304,7 @@ class FallbackCanonicalProvider:
             pass
         return self._tag(self.fallback.securities(), self.fallback.source)
 
-    def daily_bars(
-        self, symbol: str, start_date: date, end_date: date
-    ) -> list[dict[str, Any]]:
+    def daily_bars(self, symbol: str, start_date: date, end_date: date) -> list[dict[str, Any]]:
         try:
             rows = self.primary.daily_bars(symbol, start_date, end_date)
             if len(rows) >= self.minimum_history_rows:
@@ -211,9 +316,7 @@ class FallbackCanonicalProvider:
             self.fallback.source,
         )
 
-    def benchmark_bars(
-        self, code: str, start_date: date, end_date: date
-    ) -> list[dict[str, Any]]:
+    def benchmark_bars(self, code: str, start_date: date, end_date: date) -> list[dict[str, Any]]:
         try:
             rows = self.primary.benchmark_bars(code, start_date, end_date)
             if len(rows) >= self.minimum_history_rows:
@@ -224,6 +327,7 @@ class FallbackCanonicalProvider:
             self.fallback.benchmark_bars(code, start_date, end_date),
             self.fallback.source,
         )
+
 
 class AKShareCanonicalBundleBuilder:
     """Build a PIT-frozen bundle from real AKShare market data and labeled placeholders."""
@@ -240,6 +344,7 @@ class AKShareCanonicalBundleBuilder:
         self.clock = clock or (lambda: datetime.now(SHANGHAI))
         self.bundle_size = bundle_size
         self.history_sessions = history_sessions
+        self.acquisition_events: list[dict[str, Any]] = []
 
     def build(
         self,
@@ -248,6 +353,7 @@ class AKShareCanonicalBundleBuilder:
         *,
         required_symbols: tuple[str, ...] = (),
     ) -> CanonicalDailyBundle:
+        self.acquisition_events = []
         fetched_at = self.clock()
         if fetched_at.tzinfo is None:
             fetched_at = fetched_at.replace(tzinfo=SHANGHAI)
@@ -305,14 +411,16 @@ class AKShareCanonicalBundleBuilder:
         start_date = trading_date - timedelta(days=max(180, self.history_sessions * 2))
         selected: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
         for security in candidates:
-            history = self._normalized_history(
-                self.provider.daily_bars(security["symbol"], start_date, trading_date),
-                trading_date,
-            )
+            try:
+                raw_history = self.provider.daily_bars(security["symbol"], start_date, trading_date)
+            except MarketDataAcquisitionError as exc:
+                self.acquisition_events.append(
+                    {**exc.audit_details(), "outcome": "skipped_nonessential_symbol"}
+                )
+                continue
+            history = self._normalized_history(raw_history, trading_date)
             tracked_only = bool(security.get("_tracked_only"))
-            has_current_history = bool(
-                history and history[-1]["trading_date"] == trading_date
-            )
+            has_current_history = bool(history and history[-1]["trading_date"] == trading_date)
             if tracked_only:
                 if len(history) < 2:
                     continue
@@ -324,8 +432,7 @@ class AKShareCanonicalBundleBuilder:
         active_selected = [
             item
             for item in selected
-            if not item[0].get("_tracked_only")
-            and item[1][-1]["trading_date"] == trading_date
+            if not item[0].get("_tracked_only") and item[1][-1]["trading_date"] == trading_date
         ]
         if len(active_selected) < 15:
             raise RuntimeError("AKShare returned fewer than 15 securities with sufficient history")
@@ -550,9 +657,7 @@ class AKShareCanonicalBundleBuilder:
                     "symbol": symbol,
                     "name": name,
                     "amount": amount or Decimal("0"),
-                    "_canonical_source": str(
-                        item.get("_canonical_source", self.provider.source)
-                    ),
+                    "_canonical_source": str(item.get("_canonical_source", self.provider.source)),
                     "_is_st": is_st,
                     "_spot_suspended": is_delisting or price is None or price <= 0,
                 }
@@ -579,9 +684,7 @@ class AKShareCanonicalBundleBuilder:
                 "close": _decimal(item.get("收盘", item.get("close"))),
                 "volume": _decimal(item.get("成交量", item.get("volume"))),
                 "amount": _decimal(item.get("成交额", item.get("amount"))),
-                "_canonical_source": str(
-                    item.get("_canonical_source", self.provider.source)
-                ),
+                "_canonical_source": str(item.get("_canonical_source", self.provider.source)),
             }
             if any(
                 values[key] is None for key in ("open", "high", "low", "close", "volume", "amount")

@@ -12,6 +12,11 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from ashare_ai import __version__
+from ashare_ai.agents.model_settings import (
+    ModelConfigurationService,
+    ModelSettingsDraft,
+    ModelSettingsError,
+)
 from ashare_ai.api.auth import (
     AuthContext,
     authenticate,
@@ -25,6 +30,8 @@ from ashare_ai.api.auth import (
 )
 from ashare_ai.api.dependencies import get_auth_context, get_db, get_write_context
 from ashare_ai.api.schemas import (
+    AssetStateRequest,
+    AssetStateResponse,
     AuditEventResponse,
     BacktestRequest,
     BacktestResponse,
@@ -34,6 +41,10 @@ from ashare_ai.api.schemas import (
     LoginRequest,
     MarketPrefetchRequest,
     MarketPrefetchResponse,
+    ModelListResponse,
+    ModelProbeResponse,
+    ModelSettingsRequest,
+    ModelSettingsResponse,
     PasswordResetRequest,
     PortfolioResponse,
     QuoteResponse,
@@ -55,6 +66,7 @@ from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.orchestration.backtest_jobs import enqueue_backtest
 from ashare_ai.orchestration.daily import load_pipeline
 from ashare_ai.orchestration.research_jobs import enqueue_research
+from ashare_ai.portfolio.user_assets import UserAssetService
 from ashare_ai.search.service import (
     FinancialSearchBusyError,
     FinancialSearchResponse,
@@ -81,6 +93,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     with SessionLocal() as session:
         bootstrap_admin(session)
         ensure_builtin_trading_rules(session)
+        ModelConfigurationService().bootstrap_from_environment(session)
         session.commit()
     yield
 
@@ -157,6 +170,23 @@ def logout(response: Response, db: DbSession, context: Writer) -> None:
 @app.get("/api/v1/auth/me", response_model=UserResponse)
 def me(context: Current) -> UserResponse:
     return UserResponse.model_validate(context.user)
+
+
+@app.get("/api/v1/assets", response_model=AssetStateResponse)
+def asset_state(db: DbSession, context: Current) -> AssetStateResponse:
+    return AssetStateResponse.model_validate(UserAssetService(db).get(context.user.user_id))
+
+
+@app.put("/api/v1/assets", response_model=AssetStateResponse)
+def update_asset_state(
+    payload: AssetStateRequest, db: DbSession, context: Writer
+) -> AssetStateResponse:
+    state = UserAssetService(db).save(
+        context.user.user_id,
+        payload.watchlist,
+        [position.model_dump(mode="json") for position in payload.positions],
+    )
+    return AssetStateResponse.model_validate(state)
 
 
 def _list_users(db: Session, context: AuthContext) -> list[UserResponse]:
@@ -236,6 +266,106 @@ def reset_password(
     user_id: str, payload: PasswordResetRequest, db: DbSession, context: Writer
 ) -> UserResponse:
     return _change_user(user_id, UserUpdateRequest(password=payload.password), db, context)
+
+
+def _model_draft(payload: ModelSettingsRequest) -> ModelSettingsDraft:
+    return ModelSettingsDraft(**payload.model_dump())
+
+
+def _model_settings_response(db: Session) -> ModelSettingsResponse:
+    service = ModelConfigurationService()
+    runtime = service.resolve(db, require_enabled=False)
+    if runtime is None:
+        return ModelSettingsResponse(
+            configuration_id=None,
+            version=0,
+            config_sha256="",
+            source="none",
+            provider="openai-compatible",
+            base_url="",
+            api_key_configured=False,
+            search_model="gpt-5.6-luna",
+            search_reasoning_effort="low",
+            research_model="gpt-5.6-sol",
+            research_reasoning_effort="high",
+            timeout_seconds=90,
+            enabled=False,
+            configured=False,
+            reachable=False,
+            degraded=False,
+            status_message="尚未配置模型 API",
+        )
+    health = service.status(db)
+    return ModelSettingsResponse(
+        configuration_id=runtime.configuration_id,
+        version=runtime.version,
+        config_sha256=runtime.config_sha256,
+        source=runtime.source,
+        provider=runtime.provider,
+        base_url=runtime.base_url,
+        api_key_configured=True,
+        search_model=runtime.search_model,
+        search_reasoning_effort=runtime.search_reasoning_effort,
+        research_model=runtime.research_model,
+        research_reasoning_effort=runtime.research_reasoning_effort,
+        timeout_seconds=runtime.timeout_seconds,
+        enabled=runtime.enabled,
+        configured=bool(health["configured"]),
+        reachable=bool(health["reachable"]),
+        degraded=bool(health["degraded"]),
+        status_message=str(health["message"]),
+        checked_at=(health["checked_at"] if isinstance(health["checked_at"], datetime) else None),
+    )
+
+
+@app.get("/api/v1/admin/model-settings", response_model=ModelSettingsResponse)
+def get_model_settings(db: DbSession, context: Current) -> ModelSettingsResponse:
+    _admin(context)
+    try:
+        return _model_settings_response(db)
+    except ModelSettingsError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.put("/api/v1/admin/model-settings", response_model=ModelSettingsResponse)
+async def put_model_settings(
+    payload: ModelSettingsRequest, db: DbSession, context: Writer
+) -> ModelSettingsResponse:
+    _admin(context)
+    service = ModelConfigurationService()
+    draft = _model_draft(payload)
+    try:
+        probe = await service.probe(draft, db) if draft.enabled else None
+        service.save_and_activate(db, draft, user_id=context.user.user_id, probe=probe)
+        db.commit()
+        return _model_settings_response(db)
+    except ModelSettingsError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/admin/model-settings/test", response_model=ModelProbeResponse)
+async def test_model_settings(
+    payload: ModelSettingsRequest, db: DbSession, context: Writer
+) -> ModelProbeResponse:
+    _admin(context)
+    try:
+        result = await ModelConfigurationService().probe(_model_draft(payload), db)
+        return ModelProbeResponse(**result.__dict__)
+    except ModelSettingsError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/admin/model-settings/models", response_model=ModelListResponse)
+async def list_model_settings_models(
+    payload: ModelSettingsRequest, db: DbSession, context: Writer
+) -> ModelListResponse:
+    _admin(context)
+    try:
+        models = await ModelConfigurationService().list_models(_model_draft(payload), db)
+        return ModelListResponse(models=models)
+    except ModelSettingsError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/api/v1/scores/{trading_date}", response_model=list[ScoreResponse])
@@ -412,7 +542,7 @@ def submit_research(
         run_id = load_pipeline().start_run(payload.trading_date)
     except Exception as exc:
         raise HTTPException(
-            status_code=503, detail=f"research pipeline unavailable: {exc}"
+            status_code=503, detail=str(exc) or "research pipeline unavailable"
         ) from exc
     run = db.get(JobRun, run_id)
     if run is None:
@@ -731,6 +861,7 @@ def market_status(_: Current) -> dict[str, Any]:
 @app.get("/api/v1/search/financial", response_model=FinancialSearchResponse)
 def financial_search(
     service: SearchService,
+    db: DbSession,
     context: Current,
     q: str = Query(min_length=1, max_length=256),
 ) -> FinancialSearchResponse:
@@ -741,6 +872,8 @@ def financial_search(
             headers={"Retry-After": "60"},
         )
     try:
+        if isinstance(service, FinancialSearchService):
+            return service.search(q, db)
         return service.search(q)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -757,5 +890,9 @@ def financial_search(
 
 
 @app.get("/api/v1/search/status", response_model=FinancialSearchStatus)
-def financial_search_status(service: SearchService, _: Current) -> FinancialSearchStatus:
+def financial_search_status(
+    service: SearchService, db: DbSession, _: Current
+) -> FinancialSearchStatus:
+    if isinstance(service, FinancialSearchService):
+        return service.status(db)
     return service.status()

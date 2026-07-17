@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
@@ -9,6 +10,7 @@ from ashare_ai.orchestration.akshare_bundle import (
     AKShareCanonicalBundleBuilder,
     AKShareCanonicalProvider,
     FallbackCanonicalProvider,
+    MarketDataAcquisitionError,
 )
 from ashare_ai.orchestration.builtin import BuiltinDailyBackend
 
@@ -172,12 +174,135 @@ def test_akshare_provider_uses_sina_fallbacks_when_eastmoney_disconnects(monkeyp
     provider = AKShareCanonicalProvider()
 
     assert provider.securities()[0]["代码"] == "600519"
-    assert provider.daily_bars("600519.SH", date(2026, 7, 1), date(2026, 7, 16))[0][
-        "_canonical_source"
-    ] == "akshare-sina"
+    assert (
+        provider.daily_bars("600519.SH", date(2026, 7, 1), date(2026, 7, 16))[0][
+            "_canonical_source"
+        ]
+        == "akshare-sina"
+    )
     benchmarks = provider.benchmark_bars("000300", date(2026, 7, 16), date(2026, 7, 16))
     assert [item["date"] for item in benchmarks] == [date(2026, 7, 16)]
     assert benchmarks[0]["amount"] == 0
+
+
+def test_akshare_provider_uses_sina_after_eastmoney_json_decode_failure(monkeypatch) -> None:
+    class Frame:
+        def to_dict(self, *, orient):
+            assert orient == "records"
+            return [{"代码": "sh600519", "名称": "贵州茅台", "最新价": 100}]
+
+    class SDK:
+        @staticmethod
+        def stock_zh_a_spot_em():
+            raise json.JSONDecodeError("No value to decode", "", 0)
+
+        @staticmethod
+        def stock_zh_a_spot():
+            return Frame()
+
+    monkeypatch.setattr(AKShareCanonicalProvider, "_sdk", staticmethod(lambda: SDK()))
+    rows = AKShareCanonicalProvider(backoff_seconds=0).securities()
+    assert rows[0]["代码"] == "600519"
+    assert rows[0]["_canonical_source"] == "akshare-sina"
+
+
+def test_akshare_provider_retries_both_sources_in_a_second_round(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class Frame:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def to_dict(self, *, orient):
+            assert orient == "records"
+            return self.rows
+
+    class SDK:
+        @staticmethod
+        def stock_zh_a_spot_em():
+            calls.append("eastmoney")
+            return Frame([])
+
+        @staticmethod
+        def stock_zh_a_spot():
+            calls.append("sina")
+            if calls.count("sina") == 1:
+                raise TimeoutError("temporary timeout with sensitive endpoint")
+            return Frame([{"代码": "sh600519", "名称": "贵州茅台", "最新价": 100}])
+
+    monkeypatch.setattr(AKShareCanonicalProvider, "_sdk", staticmethod(lambda: SDK()))
+    rows = AKShareCanonicalProvider(max_attempts=2, backoff_seconds=0).securities()
+    assert rows[0]["代码"] == "600519"
+    assert calls == ["eastmoney", "sina", "eastmoney", "sina"]
+
+
+def test_bundle_skips_one_nonessential_stock_failure_and_still_builds() -> None:
+    trading_date = date(2026, 7, 15)
+
+    class PartiallyUnavailableProvider(Provider):
+        def securities(self):
+            return [
+                *super().securities(),
+                {"代码": "600020", "名称": "备用样本", "最新价": 12, "成交额": 1},
+            ]
+
+        def daily_bars(self, symbol, start_date, end_date):
+            if symbol == "600000.SH":
+                raise MarketDataAcquisitionError(
+                    operation="daily_bars",
+                    subject=symbol,
+                    attempt_count=4,
+                    sources=("eastmoney", "sina"),
+                )
+            return super().daily_bars(symbol, start_date, end_date)
+
+    builder = AKShareCanonicalBundleBuilder(
+        provider=PartiallyUnavailableProvider(trading_date),
+        clock=lambda: datetime(2026, 7, 15, 20, tzinfo=SHANGHAI),
+        bundle_size=20,
+        history_sessions=65,
+    )
+    bundle = builder.build(trading_date, datetime(2026, 7, 15, 18, tzinfo=SHANGHAI))
+    assert len(bundle.securities) == 20
+    assert all(item.symbol != "600000.SH" for item in bundle.securities)
+    assert builder.acquisition_events == [
+        {
+            "operation": "daily_bars",
+            "subject": "600000.SH",
+            "attempt_count": 4,
+            "sources": ["eastmoney", "sina"],
+            "outcome": "skipped_nonessential_symbol",
+        }
+    ]
+
+
+def test_bundle_fails_closed_when_all_benchmark_sources_fail() -> None:
+    trading_date = date(2026, 7, 15)
+
+    class MissingBenchmarkProvider(Provider):
+        def benchmark_bars(self, code, start_date, end_date):
+            del start_date, end_date
+            raise MarketDataAcquisitionError(
+                operation="benchmark_bars",
+                subject=code,
+                attempt_count=4,
+                sources=("eastmoney", "sina"),
+            )
+
+    builder = AKShareCanonicalBundleBuilder(
+        provider=MissingBenchmarkProvider(trading_date),
+        clock=lambda: datetime(2026, 7, 15, 20, tzinfo=SHANGHAI),
+        bundle_size=20,
+        history_sessions=65,
+    )
+    try:
+        builder.build(trading_date, datetime(2026, 7, 15, 18, tzinfo=SHANGHAI))
+    except MarketDataAcquisitionError as exc:
+        assert exc.operation == "benchmark_bars"
+        assert "sensitive" not in str(exc)
+        assert "000300" in str(exc)
+    else:
+        raise AssertionError("benchmark acquisition must fail closed")
 
 
 def test_canonical_provider_falls_back_for_missing_history_and_tracks_source() -> None:
@@ -194,7 +319,7 @@ def test_canonical_provider_falls_back_for_missing_history_and_tracks_source() -
                     "名称": "*ST承接样本",
                     "最新价": 5,
                     "成交额": 50_000_000,
-                }
+                },
             ]
 
         def daily_bars(self, symbol, start_date, end_date):
@@ -232,17 +357,15 @@ def test_canonical_provider_falls_back_for_missing_history_and_tracks_source() -
     tracked_status = next(item for item in bundle.statuses if item.symbol == "601999.SH")
     assert tracked_status.is_suspended is True
     assert bundle.data_quality["601999.SH"]["tracked_only"] is True
-    assert max(
-        item.trading_date for item in bundle.bars if item.symbol == "601999.SH"
-    ) < trading_date
+    assert (
+        max(item.trading_date for item in bundle.bars if item.symbol == "601999.SH") < trading_date
+    )
     st_status = next(item for item in bundle.statuses if item.symbol == "601998.SH")
     st_master = next(item for item in bundle.securities if item.symbol == "601998.SH")
     assert st_master.short_name == "*ST承接样本"
     assert st_status.is_st is True
     assert st_status.is_suspended is False
-    assert {item.source for item in bundle.securities if item.symbol != "601999.SH"} == {
-        "akshare"
-    }
+    assert {item.source for item in bundle.securities if item.symbol != "601999.SH"} == {"akshare"}
     assert {item.source for item in bundle.bars} == {"tushare"}
     assert {item["source"] for item in bundle.data_quality.values()} == {"tushare"}
 

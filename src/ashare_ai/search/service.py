@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -8,15 +9,18 @@ import sys
 import threading
 import time
 from collections import deque
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.orm import Session
 
 from ashare_ai.adapters.symbols import normalize_symbol
+from ashare_ai.agents.model_settings import ModelConfigurationService, ModelSettingsError
+from ashare_ai.agents.openai_compatible import OpenAICompatibleStructuredLLMClient
 from ashare_ai.core.config import Settings, get_settings
 from ashare_ai.core.hashing import stable_hash
 
@@ -65,12 +69,16 @@ class FinancialSearchResponse(BaseModel):
     query: str
     provider: str
     upstream: str
-    mode: Literal["cli", "embedded"]
+    mode: Literal["cli", "embedded", "direct", "ai"]
     searched_at: datetime
     elapsed_ms: int = Field(ge=0)
     entities: tuple[SearchEntity, ...]
     recalls: tuple[SearchRecall, ...]
     raw_sha256: str = Field(min_length=64, max_length=64)
+    outcome: dict[str, Any] = Field(default_factory=dict)
+    interpretation: str = ""
+    sources: tuple[dict[str, Any], ...] = ()
+    warnings: tuple[str, ...] = ()
     live_data_isolated_from_snapshots: bool = True
 
 
@@ -79,8 +87,12 @@ class FinancialSearchStatus(BaseModel):
 
     provider: str
     upstream: str
-    mode: Literal["cli", "embedded"]
+    mode: Literal["cli", "embedded", "direct", "ai"]
     available: bool
+    configured: bool = False
+    reachable: bool = False
+    degraded: bool = False
+    model: str | None = None
     script_path: str | None = None
     message: str
     live_data_isolated_from_snapshots: bool = True
@@ -88,6 +100,18 @@ class FinancialSearchStatus(BaseModel):
 
 class FinancialSearchBusyError(RuntimeError):
     pass
+
+
+class FinancialQueryIntent(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    entity_name: str
+    symbol: str
+    asset_type: Literal["stock", "index"]
+    data_kind: Literal["quote", "valuation", "kline", "financial"]
+    period: Literal["day", "week", "month"] | None = None
+    start_date: date | None = None
+    end_date: date | None = None
 
 
 class NeoDataFinancialSearchProvider:
@@ -172,6 +196,15 @@ class NeoDataFinancialSearchProvider:
             entities=entities,
             recalls=recalls,
             raw_sha256=stable_hash(payload),
+            outcome={"kind": "quote", "payload": payload},
+            interpretation="确定性行情源返回的最新公开行情。",
+            sources=(
+                {
+                    "source": "sina-finance",
+                    "uri": "https://hq.sinajs.cn/",
+                    "fetched_at": searched_at.isoformat(),
+                },
+            ),
         )
 
     def _search_cli(self, query: str) -> dict[str, Any]:
@@ -271,7 +304,7 @@ class FinancialSearchService:
             self.settings.financial_search_max_concurrency
         )
 
-    def search(self, query: str) -> FinancialSearchResponse:
+    def search(self, query: str, session: Session | None = None) -> FinancialSearchResponse:
         key = query.strip().casefold()
         cached = self._cached(key)
         if cached is not None:
@@ -285,7 +318,7 @@ class FinancialSearchService:
             if not self._capacity.acquire(timeout=0.25):
                 raise FinancialSearchBusyError("financial search is busy; retry shortly")
             try:
-                result = self.provider.search(query)
+                result = self._search_uncached(query, session)
             finally:
                 self._capacity.release()
             with self._guard:
@@ -322,8 +355,420 @@ class FinancialSearchService:
                 return None
             return cached[1]
 
-    def status(self) -> FinancialSearchStatus:
-        return self.provider.status()
+    def status(self, session: Session | None = None) -> FinancialSearchStatus:
+        legacy = self.provider.status()
+        if session is None:
+            return legacy
+        try:
+            runtime = ModelConfigurationService(self.settings).resolve(
+                session, require_enabled=False
+            )
+            health = ModelConfigurationService(self.settings).status(session)
+        except ModelSettingsError as exc:
+            return legacy.model_copy(
+                update={
+                    "available": False,
+                    "configured": True,
+                    "reachable": False,
+                    "degraded": True,
+                    "message": str(exc),
+                }
+            )
+        if runtime is None:
+            return legacy.model_copy(
+                update={
+                    "configured": False,
+                    "reachable": False,
+                    "degraded": False,
+                    "message": "未配置 AI 意图模型；仅支持证券代码和少量内置名称",
+                }
+            )
+        return FinancialSearchStatus(
+            provider="ai-intent-deterministic-data",
+            upstream="AKShare / EastMoney / Sina / Tencent",
+            mode="ai",
+            available=bool(runtime.enabled),
+            configured=True,
+            reachable=bool(health["reachable"]),
+            degraded=bool(health["degraded"]),
+            model=runtime.search_model,
+            message=str(health["message"]),
+        )
+
+    def _search_uncached(
+        self, query: str, session: Session | None
+    ) -> FinancialSearchResponse:
+        direct = _direct_intent(query)
+        if direct is not None:
+            if direct.data_kind == "quote" and (
+                getattr(self.provider, "mode", "embedded") == "embedded"
+                or any(name.casefold() in query.casefold() for name in _QUERY_CODES)
+            ):
+                return self.provider.search(query)
+            return _deterministic_search(query, direct, self.provider, mode="direct")
+        if session is None:
+            return self.provider.search(query)
+        runtime = ModelConfigurationService(self.settings).resolve(session)
+        if runtime is None:
+            return self.provider.search(query)
+        model, effort = runtime.model_for("search")
+        client = OpenAICompatibleStructuredLLMClient(
+            base_url=runtime.base_url,
+            api_key=runtime.api_key,
+            model=model,
+            reasoning_effort=effort,
+            timeout_seconds=runtime.timeout_seconds,
+        )
+        generation = asyncio.run(
+            client.generate_structured(
+                schema=FinancialQueryIntent,
+                messages=(
+                    {
+                        "role": "system",
+                        "content": (
+                            "把中文 A 股金融数据查询解析成一个实体和一个数据类型。"
+                            "symbol 必须是带交易所后缀的证券代码，例如 600690.SH、"
+                            "000001.SZ、000300.SH。只解析意图，不回答投资问题。"
+                        ),
+                    },
+                    {"role": "user", "content": query},
+                ),
+                idempotency_key=stable_hash(
+                    {
+                        "kind": "financial-query-intent",
+                        "query": query,
+                        "configuration": runtime.config_sha256,
+                    }
+                ),
+            )
+        )
+        intent = FinancialQueryIntent.model_validate(generation.output)
+        return _deterministic_search(query, intent, self.provider, mode="ai")
+
+
+def _direct_intent(query: str) -> FinancialQueryIntent | None:
+    code = _resolve_query_code(query)
+    if code is None:
+        return None
+    if code.startswith("s_"):
+        raw = code[2:]
+        asset_type: Literal["stock", "index"] = "index"
+    else:
+        raw = code
+        asset_type = (
+            "index"
+            if any(name in query for name in ("指数", "沪指", "沪深300"))
+            else "stock"
+        )
+    exchange = "SH" if raw.startswith("sh") else "SZ"
+    symbol = f"{raw[2:]}.{exchange}"
+    lowered = query.casefold()
+    if any(word in lowered for word in ("财报", "营收", "利润", "roe", "毛利", "负债", "eps")):
+        kind: Literal["quote", "valuation", "kline", "financial"] = "financial"
+    elif any(word in lowered for word in ("估值", "市盈", "市净", "pe", "pb", "市值")):
+        kind = "valuation"
+    elif any(word in lowered for word in ("k线", "走势", "历史", "月线", "周线")):
+        kind = "kline"
+    else:
+        kind = "quote"
+    period: Literal["day", "week", "month"] | None = None
+    if kind == "kline":
+        period = "month" if "月" in query else "week" if "周" in query else "day"
+    entity = next((name for name, value in _QUERY_CODES.items() if value == code), symbol)
+    return FinancialQueryIntent(
+        entity_name=entity,
+        symbol=symbol,
+        asset_type=asset_type,
+        data_kind=kind,
+        period=period,
+        start_date=None,
+        end_date=None,
+    )
+
+
+def _deterministic_search(
+    query: str,
+    intent: FinancialQueryIntent,
+    legacy: NeoDataFinancialSearchProvider,
+    *,
+    mode: Literal["direct", "ai"],
+) -> FinancialSearchResponse:
+    started = time.monotonic()
+    searched_at = datetime.now(UTC)
+    symbol = _validated_intent_symbol(intent.symbol)
+    if intent.data_kind == "quote":
+        payload = legacy._search_embedded(symbol)
+        api_data = payload.get("data", {}).get("apiData", {})
+        recalls = tuple(
+            SearchRecall.model_validate(item) for item in api_data.get("apiRecall", [])
+        )
+        outcome = {
+            "kind": "quote",
+            "symbol": symbol,
+            "data": [item.model_dump(mode="json") for item in recalls],
+        }
+        return FinancialSearchResponse(
+            query=query,
+            provider="ai-intent-deterministic-data",
+            upstream="sina-finance",
+            mode=mode,
+            searched_at=searched_at,
+            elapsed_ms=max(0, round((time.monotonic() - started) * 1000)),
+            entities=(SearchEntity(name=intent.entity_name, code=symbol),),
+            recalls=recalls,
+            raw_sha256=stable_hash(payload),
+            outcome=outcome,
+            interpretation=(
+                "AI 仅用于识别查询意图；行情事实由新浪公开行情接口确定性获取。"
+            ),
+            sources=(
+                {
+                    "source": "sina-finance",
+                    "uri": "https://hq.sinajs.cn/",
+                    "fetched_at": searched_at.isoformat(),
+                },
+            ),
+        )
+    if intent.data_kind == "kline":
+        from ashare_ai.market.service import get_market_data_service
+
+        payload = get_market_data_service().klines(
+            symbol,
+            intent.period or "day",
+            limit=120,
+            start=(
+                datetime.combine(intent.start_date, datetime.min.time(), tzinfo=UTC)
+                if intent.start_date
+                else None
+            ),
+            end=(
+                datetime.combine(intent.end_date, datetime.max.time(), tzinfo=UTC)
+                if intent.end_date
+                else None
+            ),
+        )
+        serializable = _json_value(payload)
+        bars = serializable.get("bars", []) if isinstance(serializable, dict) else []
+        compact = bars[-30:] if isinstance(bars, list) else bars
+        source = payload.get("status", {}).get("source", "market-adapter")
+        return _built_response(
+            query=query,
+            intent=intent,
+            symbol=symbol,
+            mode=mode,
+            searched_at=searched_at,
+            started=started,
+            upstream=str(source),
+            outcome={"kind": "kline", "symbol": symbol, "bars": serializable.get("bars", [])},
+            content=json.dumps(compact, ensure_ascii=False, indent=2),
+            source_uri="https://gu.qq.com/",
+            interpretation="K 线由确定性行情适配器获取并按查询周期展示。",
+        )
+    if intent.asset_type == "index":
+        raise ValueError("指数查询当前支持行情与 K 线，不支持估值或财务指标")
+    if intent.data_kind == "valuation":
+        facts = _akshare_valuation(symbol)
+        return _built_response(
+            query=query,
+            intent=intent,
+            symbol=symbol,
+            mode=mode,
+            searched_at=searched_at,
+            started=started,
+            upstream="eastmoney",
+            outcome={"kind": "valuation", "symbol": symbol, "facts": facts},
+            content=json.dumps(facts, ensure_ascii=False, indent=2),
+            source_uri="https://quote.eastmoney.com/",
+            interpretation="估值指标来自东方财富 A 股实时快照，模型未生成或改写数值。",
+        )
+    facts, report_date, notice_date, warnings = _akshare_financials(symbol, searched_at)
+    return _built_response(
+        query=query,
+        intent=intent,
+        symbol=symbol,
+        mode=mode,
+        searched_at=searched_at,
+        started=started,
+        upstream="eastmoney",
+        outcome={
+            "kind": "financial",
+            "symbol": symbol,
+            "report_date": report_date,
+            "notice_date": notice_date,
+            "facts": facts,
+        },
+        content=json.dumps(facts, ensure_ascii=False, indent=2),
+        source_uri="https://data.eastmoney.com/bbsj/",
+        interpretation="展示最近一期已披露核心财务指标；未来披露记录已拒绝。",
+        report_date=report_date,
+        notice_date=notice_date,
+        warnings=warnings,
+    )
+
+
+def _built_response(
+    *,
+    query: str,
+    intent: FinancialQueryIntent,
+    symbol: str,
+    mode: Literal["direct", "ai"],
+    searched_at: datetime,
+    started: float,
+    upstream: str,
+    outcome: dict[str, Any],
+    content: str,
+    source_uri: str,
+    interpretation: str,
+    report_date: str | None = None,
+    notice_date: str | None = None,
+    warnings: tuple[str, ...] = (),
+) -> FinancialSearchResponse:
+    source = {
+        "source": upstream,
+        "uri": source_uri,
+        "fetched_at": searched_at.isoformat(),
+        "report_date": report_date,
+        "notice_date": notice_date,
+    }
+    raw = {"intent": intent.model_dump(mode="json"), "outcome": outcome, "source": source}
+    return FinancialSearchResponse(
+        query=query,
+        provider="ai-intent-deterministic-data",
+        upstream=upstream,
+        mode=mode,
+        searched_at=searched_at,
+        elapsed_ms=max(0, round((time.monotonic() - started) * 1000)),
+        entities=(SearchEntity(name=intent.entity_name, code=symbol),),
+        recalls=(SearchRecall(type=intent.data_kind, desc="金融数据", content=content),),
+        raw_sha256=stable_hash(raw),
+        outcome=outcome,
+        interpretation=interpretation,
+        sources=(source,),
+        warnings=warnings,
+    )
+
+
+def _validated_intent_symbol(value: str) -> str:
+    match = re.fullmatch(r"(\d{6})[.\-]?(SH|SZ|BJ)", value.strip(), re.IGNORECASE)
+    if match is None:
+        raise ValueError("AI 返回了无效证券代码")
+    return f"{match.group(1)}.{match.group(2).upper()}"
+
+
+def _akshare_valuation(symbol: str) -> dict[str, Any]:
+    import akshare as ak
+
+    frame = ak.stock_zh_a_spot_em()
+    number = symbol.split(".", 1)[0]
+    rows = frame.loc[frame["代码"].astype(str).str.zfill(6) == number]
+    if rows.empty:
+        raise RuntimeError(f"东方财富未返回 {symbol} 的估值数据")
+    row = rows.iloc[0].to_dict()
+    mapping = {
+        "name": "名称",
+        "price": "最新价",
+        "pe_dynamic": "市盈率-动态",
+        "pb": "市净率",
+        "turnover_rate": "换手率",
+        "total_market_cap": "总市值",
+        "float_market_cap": "流通市值",
+    }
+    return {key: _json_value(row.get(column)) for key, column in mapping.items()}
+
+
+def _akshare_financials(
+    symbol: str, decision_at: datetime
+) -> tuple[dict[str, Any], str | None, str | None, tuple[str, ...]]:
+    import akshare as ak
+
+    number = symbol.split(".", 1)[0]
+    frame = ak.stock_financial_analysis_indicator_em(
+        symbol=number, start_year=str(decision_at.year - 3)
+    )
+    if frame.empty:
+        raise RuntimeError(f"东方财富未返回 {symbol} 的财务指标")
+    records = [_json_value(item) for item in frame.to_dict(orient="records")]
+    visible = []
+    for row in records:
+        notice = _first_value(row, "NOTICE_DATE", "公告日期", "最新公告日期")
+        parsed = _parse_optional_date(notice)
+        if parsed is None or parsed <= decision_at.date():
+            visible.append(row)
+    if not visible:
+        raise RuntimeError("财务指标仅包含查询时点之后披露的数据，已拒绝返回")
+    visible.sort(
+        key=lambda item: _date_text(
+            _first_value(item, "REPORT_DATE", "报告期", "日期")
+        )
+        or "",
+        reverse=True,
+    )
+    row = visible[0]
+    report_date = _date_text(_first_value(row, "REPORT_DATE", "报告期", "日期"))
+    notice_date = _date_text(_first_value(row, "NOTICE_DATE", "公告日期", "最新公告日期"))
+    mapping = {
+        "revenue": ("TOTALOPERATEREVE", "营业总收入"),
+        "parent_net_profit": ("PARENTNETPROFIT", "归属母公司净利润"),
+        "revenue_yoy": ("TOTALOPERATEREVETZ", "营业总收入同比增长"),
+        "profit_yoy": ("PARENTNETPROFITTZ", "归属母公司净利润同比增长"),
+        "eps": ("EPSJB", "基本每股收益"),
+        "roe": ("ROEJQ", "净资产收益率(加权)"),
+        "gross_margin": ("XSMLL", "销售毛利率"),
+        "debt_ratio": ("ZCFZL", "资产负债率"),
+    }
+    facts = {key: _first_value(row, *columns) for key, columns in mapping.items()}
+    warnings = () if notice_date else ("上游记录未提供公告日期，已保留报告期与抓取时间。",)
+    return facts, report_date, notice_date, warnings
+
+
+def _first_value(row: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = row.get(key)
+        if value not in (None, "", "--"):
+            return value
+    return None
+
+
+def _parse_optional_date(value: Any) -> date | None:
+    text = _date_text(value)
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
+def _date_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return str(value.isoformat())
+    text = str(value).strip()
+    return text[:10] if text and text.casefold() != "nat" else None
+
+
+def _json_value(value: Any) -> Any:
+    if type(value).__name__ in {"NAType", "NaTType"}:
+        return None
+    if isinstance(value, dict):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_value(item) for item in value]
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if hasattr(value, "item"):
+        try:
+            return _json_value(value.item())
+        except (TypeError, ValueError):
+            pass
+    try:
+        missing = value != value
+        if isinstance(missing, bool) and missing:
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value
 
 
 def _resolve_query_code(query: str) -> str | None:

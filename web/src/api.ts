@@ -1,4 +1,4 @@
-import type { AuditEvent, Candidate, DataEnvelope, FinancialSearchResult, FinancialSearchStatus, KlineBar, MarketPrefetchResponse, Portfolio, Quote, Report, Run, Score, Snapshot, User } from './types'
+import type { AssetState, AuditEvent, Candidate, DataEnvelope, FinancialSearchResult, FinancialSearchStatus, KlineBar, MarketPrefetchResponse, ModelSettings, ModelSettingsDraft, Portfolio, Quote, Report, Run, Score, Snapshot, User } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api/v1').replace(/\/$/, '')
 
@@ -56,6 +56,8 @@ export const api = {
   login: (username: string, password: string) => request<User>('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
   logout: () => request<void>('/auth/logout', { method: 'POST' }),
   me: () => request<User>('/auth/me'),
+  assets: () => request<AssetState>('/assets'),
+  saveAssets: (payload: AssetState) => request<AssetState>('/assets', { method: 'PUT', body: JSON.stringify(payload) }),
 
   quotes: async (symbols: string[]) => {
     const rows = await request<Array<Quote & { change_percent?: number; previous_close?: number }>>(`/market/quotes${params({ symbols: symbols.join(',') })}`)
@@ -120,6 +122,10 @@ export const api = {
   createUser: (payload: { username: string; password: string; role: string }) => request<User>('/admin/users', { method: 'POST', body: JSON.stringify({ ...payload, role: payload.role.toUpperCase() }) }),
   setUserDisabled: (id: string, disabled: boolean) => request<User>(`/admin/users/${id}`, { method: 'PATCH', body: JSON.stringify({ enabled: !disabled }) }),
   resetPassword: (id: string, password: string) => request<User>(`/admin/users/${id}`, { method: 'PATCH', body: JSON.stringify({ password }) }),
+  modelSettings: () => request<ModelSettings>('/admin/model-settings'),
+  testModelSettings: (payload: ModelSettingsDraft) => request<{ reachable: boolean; message: string; model: string; checked_at: string }>('/admin/model-settings/test', { method: 'POST', body: JSON.stringify(payload) }),
+  saveModelSettings: (payload: ModelSettingsDraft) => request<ModelSettings>('/admin/model-settings', { method: 'PUT', body: JSON.stringify(payload) }),
+  listModels: (payload: ModelSettingsDraft) => request<{ models: string[] }>('/admin/model-settings/models', { method: 'POST', body: JSON.stringify(payload) }),
 }
 
 export function unwrapList<T>(payload: T[] | { items?: T[]; data?: T[] }) {

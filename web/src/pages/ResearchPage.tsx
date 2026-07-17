@@ -29,7 +29,7 @@ export function ResearchPage() {
         <div className="snapshot-callout"><span>▣</span><div><strong>冻结快照模式</strong><p>研究仅读取该交易日在决策时点可用的数据；实时行情不会写入本次快照。</p></div></div>
         <button className="primary large" onClick={() => void submit()} disabled={submitting || Boolean(active)}>{submitting ? '正在提交…' : active ? '任务执行中' : '启动每日研究'}<span>→</span></button>
         <ErrorNotice message={submitError} />
-        <p className="form-hint">同一交易日重复提交会返回已有进行中任务，不会重复消耗上游数据与计算资源。</p>
+        <p className="form-hint">当日 AKShare 研究默认在 15:05 收盘后开放；同一交易日重复提交会返回已有进行中任务。</p>
       </div>
     </Panel>
     <Panel title="运行状态" eyebrow="LIVE PROGRESS" action={task && <StatusPill status={task.status} />}>

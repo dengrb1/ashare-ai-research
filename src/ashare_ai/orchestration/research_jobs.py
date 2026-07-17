@@ -17,6 +17,16 @@ QUEUE_NAME = "ashare:research:pending"
 PROCESSING_QUEUE_NAME = "ashare:research:processing"
 
 
+def _error_details(error: Exception) -> dict[str, Any]:
+    details: dict[str, Any] = {"error_type": type(error).__name__}
+    audit_details = getattr(error, "audit_details", None)
+    if callable(audit_details):
+        value = audit_details()
+        if isinstance(value, dict):
+            details.update(value)
+    return details
+
+
 def enqueue_research(run_id: str, redis_url: str | None = None) -> None:
     import redis
 
@@ -48,7 +58,7 @@ def mark_research_failed(
             "RESEARCH_FAILED",
             "Daily research execution failed",
             severity="ERROR",
-            details={"error_type": type(error).__name__},
+            details=_error_details(error),
         )
         session.commit()
 

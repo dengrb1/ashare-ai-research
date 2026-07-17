@@ -71,7 +71,7 @@ export function MarketPage() {
         <div className="instrument-head">
           <div><span className="eyebrow">{symbol}</span><h2>{quote?.name || symbol}</h2></div>
           <div className={`instrument-price ${(quote?.change_pct || 0) >= 0 ? 'price-up' : 'price-down'}`}><strong>{formatNumber(quote?.price)}</strong><span>{quote ? `${quote.change_pct >= 0 ? '+' : ''}${formatNumber(quote.change)}  ${quote.change_pct >= 0 ? '+' : ''}${formatNumber(quote.change_pct)}%` : '等待行情'}</span></div>
-          <button className={isWatched ? 'secondary active' : 'secondary'} onClick={() => isWatched ? removeWatch(symbol) : addWatch(symbol)}>{isWatched ? '★ 已自选' : '☆ 加自选'}</button>
+          <button className={isWatched ? 'secondary active' : 'secondary'} onClick={() => { void (isWatched ? removeWatch(symbol) : addWatch(symbol)).catch(() => undefined) }}>{isWatched ? '★ 已自选' : '☆ 加自选'}</button>
         </div>
         <div className="quote-stats">{stats.map(([label, value]) => <div key={label as string}><span>{label}</span><strong>{label === '成交量' || label === '成交额' ? formatAmount(value as number) : formatNumber(value as number)}</strong></div>)}</div>
       </Panel>

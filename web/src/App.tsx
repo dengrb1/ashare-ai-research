@@ -14,6 +14,7 @@ import { RunsPage } from './pages/RunsPage'
 import { BacktestPage } from './pages/BacktestPage'
 import { AdminPage } from './pages/AdminPage'
 import { FinancialSearchPage } from './pages/FinancialSearchPage'
+import { ModelSettingsPage } from './pages/ModelSettingsPage'
 import { ThemeProvider } from './context/ThemeContext'
 
 function ProtectedApp() {
@@ -40,6 +41,7 @@ function AppRoutes() {
         <Route path="runs" element={<RunsPage />} />
         <Route path="backtest" element={<BacktestPage />} />
         <Route path="admin" element={<AdminPage />} />
+        <Route path="admin/models" element={<ModelSettingsPage />} />
       </Route>
     </Route>
     <Route path="*" element={<Navigate to="/" replace />} />

@@ -10,8 +10,28 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 function ThemeProbe() {
-  const { theme } = useTheme()
-  return <><span data-testid="theme">{theme}</span><ThemeToggle /></>
+  const { theme, resolvedTheme } = useTheme()
+  return <><span data-testid="theme">{theme}</span><span data-testid="resolved-theme">{resolvedTheme}</span><ThemeToggle /></>
+}
+
+function installColorScheme(initialDark = false) {
+  let matches = initialDark
+  const listeners = new Set<(event: MediaQueryListEvent) => void>()
+  const media = {
+    media: '(prefers-color-scheme: dark)',
+    get matches() { return matches },
+    onchange: null,
+    addEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) => listeners.add(listener),
+    removeEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) => listeners.delete(listener),
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  } as MediaQueryList
+  vi.stubGlobal('matchMedia', vi.fn(() => media))
+  return (dark: boolean) => {
+    matches = dark
+    listeners.forEach((listener) => listener({ matches: dark, media: media.media } as MediaQueryListEvent))
+  }
 }
 
 function MarketProbe() {
@@ -30,21 +50,44 @@ describe('theme system', () => {
   beforeEach(() => {
     localStorage.clear()
     document.documentElement.removeAttribute('data-theme')
+    installColorScheme(false)
   })
-  afterEach(cleanup)
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
 
-  it('defaults to light and persists theme changes', async () => {
+  it('defaults to system and cycles through light, dark, and system', async () => {
     render(<ThemeProvider><ThemeProbe /></ThemeProvider>)
-    expect(screen.getByTestId('theme')).toHaveTextContent('light')
+    expect(screen.getByTestId('theme')).toHaveTextContent('system')
+    expect(screen.getByTestId('resolved-theme')).toHaveTextContent('light')
     expect(document.documentElement).toHaveAttribute('data-theme', 'light')
-    await userEvent.click(screen.getByRole('button', { name: '切换深色主题' }))
+    await userEvent.click(screen.getByRole('button', { name: /切换浅色主题/ }))
+    expect(screen.getByTestId('theme')).toHaveTextContent('light')
+    expect(localStorage.getItem('ashare-theme')).toBe('light')
+    await userEvent.click(screen.getByRole('button', { name: /切换深色主题/ }))
     expect(screen.getByTestId('theme')).toHaveTextContent('dark')
     expect(localStorage.getItem('ashare-theme')).toBe('dark')
     expect(document.documentElement).toHaveAttribute('data-theme', 'dark')
+    await userEvent.click(screen.getByRole('button', { name: /切换跟随系统主题/ }))
+    expect(screen.getByTestId('theme')).toHaveTextContent('system')
+    expect(localStorage.getItem('ashare-theme')).toBe('system')
   })
 
-  it('restores a saved dark theme', () => {
+  it('reacts to system theme changes immediately while in system mode', async () => {
+    const setDark = installColorScheme(false)
+    render(<ThemeProvider><ThemeProbe /></ThemeProvider>)
+    setDark(true)
+    await waitFor(() => expect(document.documentElement).toHaveAttribute('data-theme', 'dark'))
+    expect(screen.getByTestId('resolved-theme')).toHaveTextContent('dark')
+  })
+
+  it('restores legacy explicit preferences and keeps them across remounts', () => {
     localStorage.setItem('ashare-theme', 'dark')
+    const first = render(<ThemeProvider><ThemeProbe /></ThemeProvider>)
+    expect(screen.getByTestId('theme')).toHaveTextContent('dark')
+    expect(document.documentElement).toHaveAttribute('data-theme', 'dark')
+    first.unmount()
     render(<ThemeProvider><ThemeProbe /></ThemeProvider>)
     expect(screen.getByTestId('theme')).toHaveTextContent('dark')
   })
@@ -64,6 +107,8 @@ describe('market prefetch and client cache', () => {
   it('prefetches watchlist plus holdings and reruns after watchlist changes', async () => {
     const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
+      if (url.endsWith('/assets') && (!init?.method || init.method === 'GET')) return jsonResponse({ watchlist: ['600519.SH'], positions: [{ symbol: '300750.SZ', name: '宁德时代', quantity: 100, cost: 200, target_weight: .2 }] })
+      if (url.endsWith('/assets') && init?.method === 'PUT') return jsonResponse(JSON.parse(String(init.body)))
       if (url.includes('/market/quotes')) return jsonResponse([])
       if (url.endsWith('/market/prefetch')) return jsonResponse({ quotes: [], klines: {}, errors: {} })
       throw new Error(`unexpected request ${url} ${init?.method}`)
@@ -74,7 +119,7 @@ describe('market prefetch and client cache', () => {
     await waitFor(() => expect(mockFetch.mock.calls.some(([url]) => String(url).endsWith('/market/prefetch'))).toBe(true))
     const first = mockFetch.mock.calls.find(([url]) => String(url).endsWith('/market/prefetch'))
     const firstBody = JSON.parse(String(first?.[1]?.body))
-    expect(firstBody.symbols).toEqual(expect.arrayContaining(['600519.SH', '300750.SZ', '601318.SH']))
+    expect(firstBody.symbols).toEqual(expect.arrayContaining(['600519.SH', '300750.SZ']))
 
     await userEvent.click(screen.getByRole('button', { name: '添加自选' }))
     await waitFor(() => {
@@ -89,6 +134,7 @@ describe('market prefetch and client cache', () => {
     const now = new Date().toISOString()
     const mockFetch = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
+      if (url.endsWith('/assets')) return jsonResponse({ watchlist: ['600519.SH'], positions: [] })
       if (url.includes('/market/quotes')) return jsonResponse([])
       if (url.endsWith('/market/prefetch')) return jsonResponse({
         quotes: [], errors: {}, klines: { '600519.SH': { day: {
@@ -112,6 +158,7 @@ describe('market prefetch and client cache', () => {
     const old = '2020-01-01T00:00:00Z'
     const mockFetch = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
+      if (url.endsWith('/assets')) return jsonResponse({ watchlist: ['600519.SH'], positions: [] })
       if (url.includes('/market/quotes')) return jsonResponse([])
       if (url.endsWith('/market/prefetch')) return jsonResponse({
         quotes: [], errors: {}, klines: { '600519.SH': { day: {

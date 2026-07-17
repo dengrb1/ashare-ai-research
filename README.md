@@ -101,18 +101,22 @@ npm ci
 npm run dev
 ```
 
-访问 `http://localhost:5173` 登录。全站默认浅色主题，登录页和主界面均可切换深色主题；选择保存在 `localStorage`，页面首屏脚本会在 React 启动前同步 `data-theme` 和浏览器 `theme-color`，避免主题闪烁。
+访问 `http://localhost:5173` 登录。主题支持“跟随系统 / 浅色 / 深色”三态并按此顺序循环；没有保存偏好时默认跟随系统，系统配色变化会实时生效。选择保存在 `localStorage`，已有的 `ashare-theme=light/dark` 会继续作为显式覆盖；页面首屏脚本会在 React 启动前同步实际渲染主题和浏览器 `theme-color`，避免主题闪烁。
 
 登录后前端会把“自选股 + 模拟持仓”合并去重，在后台调用行情预取接口。报价仍按 15 秒刷新，后复权日 K 预热和缓存周期为 5 分钟；1/5/15/30/60 分钟线只在首次选择时按需加载并使用短期客户端缓存。实时行情缓存始终与研究、评分、报告和回测的不可变快照隔离。
+自选和模拟持仓按登录用户保存到 PostgreSQL，可在“自选与持仓”页新增、编辑或删除。Cookie 只承载认证会话，清除 Cookie 后重新登录同一账户仍会恢复资产数据；部署前仅存在浏览器内存中的自定义数据无法追溯，新表上线后从默认值开始并在首次修改后永久保存。这些手工数据只用于页面记账与行情预取，不会覆盖研究生成的版本化组合，也不会触发真实下单。
 
 ### 完整 Docker 栈
 
-Compose 先读取未跟踪的 `.env` 以保留管理员和 LLM 凭据，再读取独立的 `.env.docker` 覆盖容器地址。Docker 内调用宿主机 LLM 网关时固定使用 `host.docker.internal`，避免把容器内 `127.0.0.1` 误认为宿主机。
+Compose 先读取未跟踪的 `.env` 以保留管理员、模型 API 和配置加密密钥，再读取独立的
+`.env.docker` 覆盖数据库、Redis、对象存储等容器地址。外部 HTTPS 模型网关无需容器侧
+覆盖；只有模型网关运行在宿主机时才使用 `host.docker.internal`。
 
 ```powershell
 Copy-Item .env.local.example .env
 Copy-Item .env.docker.example .env.docker
-# 在 .env 中填写 ADMIN_PASSWORD、LLM_API_KEY 等真实凭据
+# 在 .env 中填写 ADMIN_PASSWORD、LLM_API_KEY，并生成 Fernet 格式的
+# MODEL_SETTINGS_ENCRYPTION_KEYS（真实凭据均不得提交）
 docker compose up --build
 ```
 
@@ -193,8 +197,10 @@ MARKET_STALE_SECONDS=900
 MARKET_TIMEOUT_SECONDS=10
 ```
 
-交互式金融搜索默认使用 `neodata-financial-search`。系统会优先发现并调用其 `query.py`；
-若本机或容器没有安装该 CLI，则自动使用相同新浪财经响应契约的内置兼容模式。配置示例：
+交互式金融搜索采用“AI 解析意图 + 确定性数据源取数”：标准证券代码和内置名称走直接
+快速路径，其余自然语言由搜索模型生成严格校验的 `FinancialQueryIntent`，随后由 AKShare、
+东方财富、新浪或腾讯适配器获取事实。首版支持单只股票或指数的行情、估值、K 线和最近
+一期已披露核心财务指标，不回答开放式投资问题，也不支持板块或多实体比较。兼容配置：
 
 ```env
 FINANCIAL_SEARCH_PROVIDER=neodata-financial-search
@@ -206,11 +212,10 @@ FINANCIAL_SEARCH_MAX_CONCURRENCY=4
 FINANCIAL_SEARCH_RATE_LIMIT_PER_MINUTE=30
 ```
 
-`neodate-financial-search` 作为常见误拼也会映射到正式 Provider 名称。搜索结果属于实时、
-非 PIT 的交互数据，不会进入冻结研究、确定性评分或回测快照。响应会分别标注 Provider
-和实际上游 `sina-finance`，避免把兼容层误写成数据来源。生产镜像固定下载并校验
-NeoData 提交 `369fd3961d3a1482005e9673a5fc635a7595e710`；CLI 子进程仅继承网络、证书和
-临时目录所需的最小环境，不会继承数据库、管理员、对象存储、Tushare 或 LLM 密钥。
+`neodata-financial-search` 仍作为代码/新浪兼容回退层，`neodate-financial-search` 误拼也会
+映射到正式名称。搜索结果属于实时、非 PIT 的交互数据，不会进入冻结研究、确定性评分或
+回测快照。响应明确给出意图结果、实际上游、抓取时间、报告期/公告日、来源和警告；财务
+记录会拒绝查询时点之后披露的数据。NeoData CLI 子进程仍使用最小环境且不会继承 LLM 密钥。
 API 还对相同查询执行 15 秒缓存和 single-flight 合并，默认最多并行 4 个上游查询，
 每个登录用户每分钟最多 30 次，以免搜索子进程挤占业务线程。
 
@@ -218,13 +223,17 @@ API 还对相同查询执行 15 秒缓存和 single-flight 合并，默认最多
 供应商和版本配置，真实证券、后复权历史与基准数据由 Research Worker 异步采集后写入
 不可变对象和 Manifest。AKShare 无法提供可靠 PIT 基本面、公告或新闻时，系统写入明确
 标注的中性占位证据并自动进入 `OBSERVE_ONLY/FUSED`，不会伪装成真实基本面结论。
+当日任务默认在上海时间 15:05 后允许提交，可通过 `DAILY_RESEARCH_START_HOUR` 和
+`DAILY_RESEARCH_START_MINUTE` 调整；实际提交时刻会写入 `decision_at` 并继续执行 PIT 校验。
 配置 `TUSHARE_TOKEN` 后，Research Worker 也只在 AKShare 失败或历史缺失时补用 Tushare，
 并把每条证券与 K 线的实际来源写入冻结记录。
 Demo 数据必须同时显式设置 `CANONICAL_BUNDLE_MODE=demo` 和 `ALLOW_DEMO_DATA=true`。
-Docker 模板默认使用确定性的 `AGENT_BACKEND=builtin`，因此宿主机 LLM 网关未启动时日研
-仍可完成合规验收；需要启用模型 Agent 时改为 `openai_compatible`。此时容器侧
-`LLM_BASE_URL` 必须使用 `host.docker.internal`，不能使用指向容器自身的 `127.0.0.1`。
-AKShare 东方财富端点不可用时会自动降级到同一 SDK 的新浪证券、后复权日线和指数日线；
+管理员可在 WebGUI 的“模型设置”页配置 OpenAI-compatible Responses API。配置以不可变
+版本保存，API Key 使用 `MODEL_SETTINGS_ENCRYPTION_KEYS` 加密且永不回传；搜索模型与研究
+模型可分别设置。启用新版本前必须通过严格 JSON Schema 连通性探测，失败时旧版本继续
+生效。每次日研会把配置 ID、版本和哈希固定到 Manifest，排队或运行中的任务不会跟随
+后续热切换。未启用模型配置时仍可使用确定性的内置 Agent 完成合规验收。
+AKShare 每个证券列表、股票历史或基准历史逻辑请求默认执行两轮受限尝试，每轮依次访问东方财富和新浪；空响应、连接中断、超时和 JSON 解码失败均会触发备用源或下一轮。可通过 `AKSHARE_FETCH_MAX_ATTEMPTS=2` 和 `AKSHARE_FETCH_BACKOFF_SECONDS=1` 调整轮数与轮间退避。单个非必需股票失败会脱敏记录并跳过，但有效标的仍不得少于 15；证券列表或基准在全部尝试后失败时任务安全终止，不会使用前一日缓存或不完整数据冒充当日快照。
 历史采集只允许在下一工作日 09:00 前冻结最近一个已完成交易日，更早日期必须提供已冻结
 canonical 文件，防止用当前截面回构历史证券池。
 

@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { api, unwrapEnvelope } from '../api'
-import { DEFAULT_WATCHLIST, marketPrefetchSymbols } from '../marketAssets'
-import type { KlineBar, KlinePayload, MarketDataStatus, Quote } from '../types'
+import { marketPrefetchSymbols } from '../marketAssets'
+import type { KlineBar, KlinePayload, MarketDataStatus, PaperPosition, Quote } from '../types'
 
 const PREFETCH_INTERVAL_MS = 5 * 60 * 1000
 const DAILY_CACHE_MS = 5 * 60 * 1000
@@ -20,13 +20,17 @@ export interface KlineCacheEntry {
 interface MarketValue {
   quotes: Record<string, Quote>
   watchlist: string[]
+  positions: PaperPosition[]
+  assetsLoading: boolean
   delayed: boolean
   source: string
   updatedAt?: string
   error?: string
   klineVersion: number
-  addWatch: (symbol: string) => void
-  removeWatch: (symbol: string) => void
+  addWatch: (symbol: string) => Promise<void>
+  removeWatch: (symbol: string) => Promise<void>
+  upsertPosition: (position: PaperPosition, previousSymbol?: string) => Promise<void>
+  removePosition: (symbol: string) => Promise<void>
   subscribe: (symbols: string[]) => () => void
   refresh: () => Promise<void>
   prefetch: () => Promise<void>
@@ -35,15 +39,6 @@ interface MarketValue {
 }
 
 const MarketContext = createContext<MarketValue | null>(null)
-
-function savedWatchlist() {
-  try {
-    const value = JSON.parse(localStorage.getItem('ashare-watchlist') || 'null')
-    return Array.isArray(value) ? value : DEFAULT_WATCHLIST
-  } catch {
-    return DEFAULT_WATCHLIST
-  }
-}
 
 function klineKey(symbol: string, period: string, limit: number) {
   return `${symbol.toUpperCase()}:${period.toLowerCase()}:${limit}`
@@ -65,7 +60,9 @@ function entryFromPayload(payload: KlinePayload, fallbackPeriod: string, now = D
 }
 
 export function MarketProvider({ children }: { children: ReactNode }) {
-  const [watchlist, setWatchlist] = useState<string[]>(savedWatchlist)
+  const [watchlist, setWatchlist] = useState<string[]>([])
+  const [positions, setPositions] = useState<PaperPosition[]>([])
+  const [assetsLoading, setAssetsLoading] = useState(true)
   const [quotes, setQuotes] = useState<Record<string, Quote>>({})
   const [meta, setMeta] = useState<{ delayed: boolean; source: string; updatedAt?: string; error?: string }>({ delayed: false, source: 'AKShare' })
   const subscribers = useRef(new Map<string, number>())
@@ -75,7 +72,20 @@ export function MarketProvider({ children }: { children: ReactNode }) {
   const prefetchInflight = useRef<Promise<void> | null>(null)
   const [klineVersion, setKlineVersion] = useState(0)
   const activeSymbols = useMemo(() => Array.from(new Set([...watchlist, ...subscribers.current.keys()])).sort(), [watchlist, subscriptionVersion])
-  const prefetchSymbols = useMemo(() => marketPrefetchSymbols(watchlist), [watchlist])
+  const prefetchSymbols = useMemo(() => marketPrefetchSymbols(watchlist, positions), [watchlist, positions])
+
+  useEffect(() => {
+    let active = true
+    void api.assets().then((state) => {
+      if (!active) return
+      setWatchlist(state.watchlist || [])
+      setPositions(state.positions || [])
+    }).catch((error) => {
+      if (!active) return
+      setMeta((current) => ({ ...current, error: error instanceof Error ? error.message : '自选与持仓加载失败' }))
+    }).finally(() => { if (active) setAssetsLoading(false) })
+    return () => { active = false }
+  }, [])
 
   const mergeQuotes = useCallback((rows: Quote[]) => {
     setQuotes((current) => {
@@ -155,15 +165,44 @@ export function MarketProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const updateWatchlist = useCallback((updater: (items: string[]) => string[]) => {
-    setWatchlist((current) => {
-      const next = updater(current)
-      localStorage.setItem('ashare-watchlist', JSON.stringify(next))
-      return next
-    })
+  const saveAssets = useCallback(async (nextWatchlist: string[], nextPositions: PaperPosition[]) => {
+    try {
+      const saved = await api.saveAssets({ watchlist: nextWatchlist, positions: nextPositions })
+      setWatchlist(saved.watchlist)
+      setPositions(saved.positions)
+    } catch (error) {
+      setMeta((current) => ({ ...current, error: error instanceof Error ? error.message : '自选与持仓保存失败' }))
+      throw error
+    }
   }, [])
-  const addWatch = useCallback((symbol: string) => updateWatchlist((items) => Array.from(new Set([...items, symbol.toUpperCase()]))), [updateWatchlist])
-  const removeWatch = useCallback((symbol: string) => updateWatchlist((items) => items.filter((item) => item !== symbol)), [updateWatchlist])
+
+  const addWatch = useCallback(async (symbol: string) => {
+    const normalized = symbol.trim().toUpperCase()
+    const next = Array.from(new Set([...watchlist, normalized]))
+    if (next.length === watchlist.length) return
+    setWatchlist(next)
+    try { await saveAssets(next, positions) } catch (error) { setWatchlist(watchlist); throw error }
+  }, [positions, saveAssets, watchlist])
+
+  const removeWatch = useCallback(async (symbol: string) => {
+    const next = watchlist.filter((item) => item !== symbol)
+    setWatchlist(next)
+    try { await saveAssets(next, positions) } catch (error) { setWatchlist(watchlist); throw error }
+  }, [positions, saveAssets, watchlist])
+
+  const upsertPosition = useCallback(async (position: PaperPosition, previousSymbol?: string) => {
+    const normalized = { ...position, symbol: position.symbol.trim().toUpperCase(), name: position.name.trim() }
+    const replaced = positions.filter((item) => item.symbol !== (previousSymbol || normalized.symbol))
+    const next = [...replaced, normalized].sort((left, right) => left.symbol.localeCompare(right.symbol))
+    setPositions(next)
+    try { await saveAssets(watchlist, next) } catch (error) { setPositions(positions); throw error }
+  }, [positions, saveAssets, watchlist])
+
+  const removePosition = useCallback(async (symbol: string) => {
+    const next = positions.filter((item) => item.symbol !== symbol)
+    setPositions(next)
+    try { await saveAssets(watchlist, next) } catch (error) { setPositions(positions); throw error }
+  }, [positions, saveAssets, watchlist])
 
   const getKline = useCallback((symbol: string, period: string, limit = 160) => {
     const entry = klineCache.current.get(klineKey(symbol, period, limit))
@@ -205,7 +244,7 @@ export function MarketProvider({ children }: { children: ReactNode }) {
     return work
   }, [])
 
-  const value = useMemo(() => ({ quotes, watchlist, ...meta, klineVersion, addWatch, removeWatch, subscribe, refresh, prefetch, getKline, loadKline }), [quotes, watchlist, meta, klineVersion, addWatch, removeWatch, subscribe, refresh, prefetch, getKline, loadKline])
+  const value = useMemo(() => ({ quotes, watchlist, positions, assetsLoading, ...meta, klineVersion, addWatch, removeWatch, upsertPosition, removePosition, subscribe, refresh, prefetch, getKline, loadKline }), [quotes, watchlist, positions, assetsLoading, meta, klineVersion, addWatch, removeWatch, upsertPosition, removePosition, subscribe, refresh, prefetch, getKline, loadKline])
   return <MarketContext.Provider value={value}>{children}</MarketContext.Provider>
 }
 
