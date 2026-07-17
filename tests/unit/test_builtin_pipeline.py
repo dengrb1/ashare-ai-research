@@ -1,0 +1,326 @@
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping
+from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+from pydantic import BaseModel
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from ashare_ai.agents.protocols import GenerationMetadata, StructuredGeneration
+from ashare_ai.agents.validation import ComponentAnalysis
+from ashare_ai.core.config import get_settings
+from ashare_ai.core.time import SHANGHAI, market_decision_time
+from ashare_ai.orchestration.builtin import BuiltinDailyBackend
+from ashare_ai.orchestration.bundle import make_demo_bundle
+from ashare_ai.orchestration.daily import daily_research_flow
+from ashare_ai.orchestration.production import ApplicationPipeline
+from ashare_ai.storage.models import (
+    AgentCall,
+    AuditEvent,
+    Base,
+    CandidateRow,
+    JobRun,
+    PortfolioRow,
+    ReportRow,
+    ScoreRow,
+)
+
+
+@pytest.fixture(autouse=True)
+def _use_builtin_agents_in_tests(monkeypatch: pytest.MonkeyPatch):
+    """Keep deterministic pipeline tests independent of a developer's local LLM settings."""
+    monkeypatch.setenv("AGENT_BACKEND", "builtin")
+    monkeypatch.setenv("CANONICAL_BUNDLE_MODE", "demo")
+    monkeypatch.setenv("ALLOW_DEMO_DATA", "true")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+class FakeStructuredLLMClient:
+    def __init__(self, *, future_evidence: bool = False) -> None:
+        self.future_evidence = future_evidence
+        self.requests: list[dict[str, Any]] = []
+
+    async def generate_structured(
+        self,
+        *,
+        schema: type[BaseModel],
+        messages: tuple[Mapping[str, str], ...],
+        idempotency_key: str,
+    ) -> StructuredGeneration:
+        assert schema is ComponentAnalysis
+        request = json.loads(messages[1]["content"])
+        self.requests.append(request)
+        evidence = dict(request["evidence"][0])
+        if self.future_evidence:
+            evidence["available_at"] = (
+                datetime.fromisoformat(request["decision_at"]) + timedelta(seconds=1)
+            ).isoformat()
+        scores = {"fundamental": 71.0, "technical": 62.0, "sentiment": 53.0}
+        return StructuredGeneration(
+            output={
+                "component": request["component"],
+                "score": scores[request["component"]],
+                "confidence": 0.75,
+                "evidence": [evidence],
+                "positive_factors": ["fake evidence-grounded factor"],
+                "negative_factors": [],
+                "risk_flags": [],
+            },
+            metadata=GenerationMetadata(
+                provider="fake-provider",
+                model_name="fake-model",
+                reasoning_effort="high",
+                input_tokens=12,
+                output_tokens=8,
+                duration_ms=3,
+                retry_count=0,
+            ),
+        )
+
+
+def test_run_context_normalizes_postgres_utc_timestamp_to_shanghai(tmp_path) -> None:
+    run = SimpleNamespace(
+        trading_date=date(2026, 7, 16),
+        decision_at=datetime(2026, 7, 16, 10, tzinfo=UTC),
+        manifest={"source": "test"},
+    )
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            del exc_type, exc, traceback
+
+        def get(self, model, run_id):
+            del model, run_id
+            return run
+
+    backend = BuiltinDailyBackend(
+        session_factory=FakeSession,  # type: ignore[arg-type]
+        object_root=tmp_path / "objects",
+        state_root=tmp_path / "state",
+        policy_path="configs/first_release.v1.json",
+    )
+
+    trading_date, decision_at, manifest = backend._run_context("run-id")
+
+    assert trading_date == date(2026, 7, 16)
+    assert decision_at == datetime(2026, 7, 16, 18, tzinfo=SHANGHAI)
+    assert manifest == {"source": "test"}
+
+
+def _prepared_llm_backend(tmp_path, client: FakeStructuredLLMClient):
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    backend = BuiltinDailyBackend(
+        session_factory=factory,
+        object_root=tmp_path / "objects",
+        state_root=tmp_path / "state",
+        policy_path="configs/first_release.v1.json",
+        app_env="development",
+        llm_client=client,
+    )
+    pipeline = ApplicationPipeline(backend, session_factory=factory)
+    run_id = pipeline.start_run(date(2026, 7, 14))
+    pipeline.sync_reference_data(run_id)
+    snapshots = pipeline.ingest_and_verify(run_id)
+    universe_id = pipeline.build_universe(run_id, snapshots)
+    feature_snapshot_id = pipeline.build_features(run_id, universe_id)
+    return backend, factory, pipeline, run_id, feature_snapshot_id
+
+
+class ReloadingPipeline:
+    def __init__(self, factory, object_root, state_root, policy_path) -> None:
+        self.factory = factory
+        self.object_root = object_root
+        self.state_root = state_root
+        self.policy_path = policy_path
+
+    def _application(self) -> ApplicationPipeline:
+        backend = BuiltinDailyBackend(
+            session_factory=self.factory,
+            object_root=self.object_root,
+            state_root=self.state_root,
+            policy_path=self.policy_path,
+            app_env="development",
+        )
+        return ApplicationPipeline(backend, session_factory=self.factory)
+
+    def start_run(self, trading_date):
+        return self._application().start_run(trading_date)
+
+    def sync_reference_data(self, run_id):
+        return self._application().sync_reference_data(run_id)
+
+    def ingest_and_verify(self, run_id):
+        return self._application().ingest_and_verify(run_id)
+
+    def build_universe(self, run_id, snapshot_ids):
+        return self._application().build_universe(run_id, snapshot_ids)
+
+    def build_features(self, run_id, universe_id):
+        return self._application().build_features(run_id, universe_id)
+
+    def run_research_agents(self, run_id, feature_snapshot_id):
+        return self._application().run_research_agents(run_id, feature_snapshot_id)
+
+    def calculate_scores(self, run_id, agent_bundle_id):
+        return self._application().calculate_scores(run_id, agent_bundle_id)
+
+    def qlib_filter(self, run_id, score_snapshot_id):
+        return self._application().qlib_filter(run_id, score_snapshot_id)
+
+    def risk_state(self, run_id):
+        return self._application().risk_state(run_id)
+
+    def build_portfolio(self, run_id, candidate_snapshot_id):
+        return self._application().build_portfolio(run_id, candidate_snapshot_id)
+
+    def publish_report(self, run_id, portfolio_id, risk_state):
+        return self._application().publish_report(run_id, portfolio_id, risk_state)
+
+    def complete_run(self, run_id, report_id, status):
+        return self._application().complete_run(run_id, report_id, status)
+
+
+def test_builtin_demo_runs_full_daily_flow_and_is_reproducible(tmp_path) -> None:
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    object_root = tmp_path / "objects"
+    state_root = tmp_path / "state"
+    policy_path = "configs/first_release.v1.json"
+    pipeline = ReloadingPipeline(factory, object_root, state_root, policy_path)
+    trading_date = date(2026, 7, 14)
+
+    first = daily_research_flow(trading_date, pipeline)
+    second = daily_research_flow(trading_date, pipeline)
+    assert first["status"] == second["status"] == "SUCCEEDED"
+
+    backend = BuiltinDailyBackend(
+        session_factory=factory,
+        object_root=object_root,
+        state_root=state_root,
+        policy_path=policy_path,
+        app_env="development",
+    )
+    stable_stages = (
+        "bundle",
+        "universe",
+        "features",
+        "agents",
+        "scores",
+        "candidates",
+        "portfolio",
+    )
+    first_state = backend.state_for_run(first["run_id"])
+    second_state = backend.state_for_run(second["run_id"])
+    assert {stage: first_state[stage]["sha256"] for stage in stable_stages} == {
+        stage: second_state[stage]["sha256"] for stage in stable_stages
+    }
+
+    with factory() as session:
+        first_run = session.get(JobRun, first["run_id"])
+        assert first_run is not None and first_run.status == "SUCCEEDED"
+        scores = session.scalars(select(ScoreRow).where(ScoreRow.run_id == first["run_id"])).all()
+        assert len(scores) == 20
+        assert (
+            len(
+                session.scalars(
+                    select(CandidateRow).where(CandidateRow.run_id == first["run_id"])
+                ).all()
+            )
+            == 20
+        )
+        portfolio = session.scalar(
+            select(PortfolioRow).where(PortfolioRow.run_id == first["run_id"])
+        )
+        assert portfolio is not None and len(portfolio.positions) == 15
+        report = session.scalar(select(ReportRow).where(ReportRow.run_id == first["run_id"]))
+        assert report is not None
+        assert backend.object_store.get(report.object_uri).startswith(b"<!doctype html>")
+        event_types = set(
+            session.scalars(
+                select(AuditEvent.event_type).where(AuditEvent.run_id == first["run_id"])
+            ).all()
+        )
+        assert {"RUN_STARTED", "STAGE_COMPLETED", "RUN_COMPLETED"} <= event_types
+        assert (
+            len(session.scalars(select(AgentCall).where(AgentCall.run_id == first["run_id"])).all())
+            == 60
+        )
+
+
+def test_builtin_production_requires_canonical_bundle_and_accepts_json(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.delenv("ASHARE_CANONICAL_BUNDLE", raising=False)
+    monkeypatch.setenv("CANONICAL_BUNDLE_MODE", "file")
+    get_settings.cache_clear()
+    backend = BuiltinDailyBackend(
+        object_root=tmp_path / "objects",
+        state_root=tmp_path / "state",
+        policy_path="configs/first_release.v1.json",
+        app_env="production",
+    )
+    trading_date = date(2026, 7, 15)
+    with pytest.raises(RuntimeError, match="ASHARE_CANONICAL_BUNDLE"):
+        backend.run_manifest(trading_date, market_decision_time(trading_date))
+
+    bundle_path = tmp_path / "bundle.json"
+    bundle_path.write_text(make_demo_bundle(trading_date).model_dump_json(), encoding="utf-8")
+    monkeypatch.setenv("ASHARE_CANONICAL_BUNDLE", str(bundle_path))
+    manifest = backend.run_manifest(trading_date, market_decision_time(trading_date))
+    assert manifest["backend"] == "builtin-deterministic-v1"
+    assert len(manifest["canonical_file_sha256"]) == 64
+
+
+def test_llm_component_results_are_audited_with_transport_metadata(tmp_path) -> None:
+    client = FakeStructuredLLMClient()
+    _, factory, pipeline, run_id, feature_snapshot_id = _prepared_llm_backend(tmp_path, client)
+
+    pipeline.run_research_agents(run_id, feature_snapshot_id)
+
+    assert len(client.requests) == 60
+    for request in client.requests:
+        assert request["features"]
+        assert all(
+            value is None or isinstance(value, (str, bool, int, float))
+            for value in request["features"].values()
+        )
+        assert len(request["evidence"]) == 1
+    with factory() as session:
+        calls = session.scalars(select(AgentCall).where(AgentCall.run_id == run_id)).all()
+        assert len(calls) == 60
+        assert {call.model_provider for call in calls} == {"fake-provider"}
+        assert {call.model_name for call in calls} == {"fake-model"}
+        assert {call.result["score"] for call in calls if call.component == "fundamental"} == {71.0}
+        assert all(call.result["prompt_version"] == "builtin-llm-v1" for call in calls)
+
+
+def test_llm_component_rejects_future_evidence(tmp_path) -> None:
+    client = FakeStructuredLLMClient(future_evidence=True)
+    _, factory, pipeline, run_id, feature_snapshot_id = _prepared_llm_backend(tmp_path, client)
+
+    with pytest.raises(ValueError, match="future information"):
+        pipeline.run_research_agents(run_id, feature_snapshot_id)
+    with factory() as session:
+        assert session.scalars(select(AgentCall).where(AgentCall.run_id == run_id)).all() == []

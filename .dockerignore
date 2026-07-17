@@ -1,0 +1,15 @@
+.git
+.codex
+.env
+.venv
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+web/node_modules
+web/dist
+data
+artifacts
+htmlcov
+*.db
+*.duckdb

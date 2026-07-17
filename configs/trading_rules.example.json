@@ -1,0 +1,30 @@
+{
+  "rule_version": "example-only-2026-01",
+  "notice": "示例参数仅用于测试结构；生产规则必须附交易所正式来源、原文哈希和准确生效日期。",
+  "portfolio": {
+    "target_count": 15,
+    "max_single_weight": 0.08,
+    "max_industry_weight": 0.25,
+    "max_one_way_turnover": 0.20,
+    "cash_buffer": 0.02,
+    "style_exposure_limits": {
+      "beta": 0.5,
+      "size": 0.5,
+      "value": 0.5,
+      "momentum": 0.5,
+      "volatility": 0.5,
+      "liquidity": 0.5
+    }
+  },
+  "execution": {
+    "participation_rate": 0.05,
+    "impact_eta": 0.5,
+    "max_slippage_bps": 100.0
+  },
+  "risk": {
+    "derisk_drawdown": 0.08,
+    "observe_only_drawdown": 0.12,
+    "minimum_observation_sessions": 5
+  },
+  "rules": []
+}

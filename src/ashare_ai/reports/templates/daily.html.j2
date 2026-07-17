@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ trading_date }} A股 AI 投研日报</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 1100px; color: #17202a; }
+    table { width: 100%; border-collapse: collapse; margin: 1rem 0 2rem; }
+    th, td { border-bottom: 1px solid #d5d8dc; padding: .55rem; text-align: right; }
+    th:first-child, td:first-child { text-align: left; }
+    .warning { background: #fff3cd; padding: 1rem; border-left: 4px solid #f0ad4e; }
+    .audit { color: #566573; font-size: .9rem; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <h1>{{ trading_date }} A股 AI 投研日报</h1>
+  <p>决策时点：{{ decision_at }}；运行状态：{{ run_status }}</p>
+  {% if fused %}<p class="warning">最大回撤熔断已触发：仅输出观察报告，不生成新增模拟仓位。</p>{% endif %}
+  <h2>候选池</h2>
+  <table>
+    <thead><tr><th>证券</th><th>综合分</th><th>Qlib 分位</th><th>行业</th><th>事件乘数</th></tr></thead>
+    <tbody>{% for row in candidates %}<tr><td>{{ row.symbol }}</td><td>{{ "%.2f"|format(row.total_score) }}</td><td>{{ "%.2f"|format(row.prediction_percentile) }}</td><td>{{ row.industry_code }}</td><td>{{ "%.2f"|format(row.event_risk_multiplier) }}</td></tr>{% endfor %}</tbody>
+  </table>
+  <h2>下一交易日模拟组合</h2>
+  <table>
+    <thead><tr><th>证券</th><th>权重</th><th>目标股数</th><th>参考价</th></tr></thead>
+    <tbody>{% for row in positions %}<tr><td>{{ row.symbol }}</td><td>{{ "%.2f%%"|format(row.weight * 100) }}</td><td>{{ row.target_shares }}</td><td>{{ row.reference_price }}</td></tr>{% endfor %}</tbody>
+  </table>
+  <h2>风险与审计</h2>
+  <ul>{% for risk in risks %}<li>{{ risk }}</li>{% endfor %}</ul>
+  <p class="audit">run_id={{ run_id }} · input_hash={{ input_hash }} · formula={{ formula_version }} · rule={{ trade_rule_version }}</p>
+  <p>本报告为模拟研究输出，不构成投资建议，不接入自动实盘下单。</p>
+</body>
+</html>
+

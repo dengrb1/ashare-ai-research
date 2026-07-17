@@ -1,0 +1,8 @@
+name = "ashare_explorer"
+description = "Fast read-only codebase scanner and dependency investigator."
+model = "gpt-5.6-terra"
+model_reasoning_effort = "high"
+sandbox_mode = "read-only"
+developer_instructions = """
+Perform read-only investigation. Locate relevant code, dependencies, tests, configuration, and risks quickly. Do not edit files or spawn subagents. Return concise, evidence-backed findings with file paths and line references where useful.
+"""

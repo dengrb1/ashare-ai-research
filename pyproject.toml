@@ -1,0 +1,85 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ashare-ai-research"
+version = "0.1.0"
+description = "Point-in-time safe A-share AI research, backtesting, and paper portfolio system"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = { text = "Proprietary" }
+dependencies = [
+  "alembic>=1.13,<2",
+  "akshare==1.18.64",
+  "argon2-cffi>=23.1,<26",
+  "boto3==1.42.90",
+  "duckdb>=1.1,<2",
+  "fastapi>=0.115,<1",
+  "fsspec==2026.6.0",
+  "httpx>=0.27,<1",
+  "jinja2>=3.1,<4",
+  "numpy>=1.26,<3",
+  "orjson>=3.10,<4",
+  "pandas>=2.2,<3",
+  "psycopg[binary]>=3.2,<4",
+  "pyarrow>=17,<20",
+  "pydantic>=2.9,<3",
+  "pydantic-settings>=2.5,<3",
+  "python-multipart>=0.0.12,<1",
+  "scipy>=1.14,<2",
+  "sqlalchemy>=2.0,<3",
+  "structlog>=24.4,<26",
+  "tenacity>=9,<10",
+  "tushare==1.4.29",
+  "tzdata>=2024.1",
+  "uvicorn[standard]>=0.30,<1",
+]
+
+[project.optional-dependencies]
+orchestration = ["prefect==3.7.8", "redis>=5,<6"]
+providers = []
+quant = ["pyqlib>=0.9.6"]
+object-store = ["s3fs==2026.6.0"]
+dev = [
+  "freezegun>=1.5,<2",
+  "hypothesis>=6.112,<7",
+  "mypy>=1.11,<2",
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.24,<1",
+  "pytest-cov>=5,<7",
+  "respx>=0.21,<1",
+  "ruff>=0.8,<1",
+]
+
+[project.scripts]
+ashare-ai = "ashare_ai.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ashare_ai"]
+
+[tool.pytest.ini_options]
+addopts = "-q --strict-markers --disable-warnings"
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+  "integration: tests requiring external services",
+  "slow: computationally expensive tests",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["ashare_ai"]
+
+[[tool.mypy.overrides]]
+module = ["prefect.*", "redis.*", "boto3.*", "botocore.*", "pyarrow.*"]
+ignore_missing_imports = true
