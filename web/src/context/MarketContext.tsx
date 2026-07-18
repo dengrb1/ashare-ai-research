@@ -1,7 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { api, unwrapEnvelope } from '../api'
 import { marketPrefetchSymbols } from '../marketAssets'
-import type { KlineBar, KlinePayload, MarketDataStatus, PaperPosition, Quote } from '../types'
+import { mergeKlineBars } from '../marketKlines'
+import type { KlineBar, KlineLoadOptions, KlinePayload, KlineRange, MarketDataStatus, PaperPosition, Quote } from '../types'
 
 const PREFETCH_INTERVAL_MS = 5 * 60 * 1000
 const DAILY_CACHE_MS = 5 * 60 * 1000
@@ -15,13 +16,19 @@ export interface KlineCacheEntry {
   fetchedAt: number
   stale: boolean
   error?: string
+  range?: KlineRange
+  requestedStart?: string
+  requestedEnd?: string
+  chunks?: Array<{ key: string; start: string; end: string }>
 }
 
 interface MarketValue {
   quotes: Record<string, Quote>
   watchlist: string[]
   positions: PaperPosition[]
+  totalAssets: number | null
   assetsLoading: boolean
+  assetsSaving: boolean
   delayed: boolean
   source: string
   updatedAt?: string
@@ -29,19 +36,29 @@ interface MarketValue {
   klineVersion: number
   addWatch: (symbol: string) => Promise<void>
   removeWatch: (symbol: string) => Promise<void>
+  reorderWatchlist: (nextOrder: string[]) => Promise<void>
   upsertPosition: (position: PaperPosition, previousSymbol?: string) => Promise<void>
   removePosition: (symbol: string) => Promise<void>
+  saveTotalAssets: (totalAssets: number | null) => Promise<void>
   subscribe: (symbols: string[]) => () => void
-  refresh: () => Promise<void>
+  refresh: (force?: boolean) => Promise<void>
   prefetch: () => Promise<void>
-  getKline: (symbol: string, period: string, limit?: number) => KlineCacheEntry | undefined
-  loadKline: (symbol: string, period: string, limit?: number) => Promise<KlineCacheEntry>
+  getKline: (symbol: string, period: string, request?: number | { range: KlineRange }) => KlineCacheEntry | undefined
+  loadKline: (symbol: string, period: string, request?: number | KlineLoadOptions, force?: boolean) => Promise<KlineCacheEntry>
 }
 
 const MarketContext = createContext<MarketValue | null>(null)
 
 function klineKey(symbol: string, period: string, limit: number) {
   return `${symbol.toUpperCase()}:${period.toLowerCase()}:${limit}`
+}
+
+function klineSeriesKey(symbol: string, period: string, range: KlineRange) {
+  return `${symbol.toUpperCase()}:${period.toLowerCase()}:range:${range}`
+}
+
+function klineChunkKey(symbol: string, period: string, request: KlineLoadOptions) {
+  return `${klineSeriesKey(symbol, period, request.range)}:chunk:${request.chunk || `${request.start || ''}|${request.end || ''}`}:${request.limit || 1200}`
 }
 
 function cacheLifetime(period: string) {
@@ -62,13 +79,17 @@ function entryFromPayload(payload: KlinePayload, fallbackPeriod: string, now = D
 export function MarketProvider({ children }: { children: ReactNode }) {
   const [watchlist, setWatchlist] = useState<string[]>([])
   const [positions, setPositions] = useState<PaperPosition[]>([])
+  const [totalAssets, setTotalAssets] = useState<number | null>(null)
   const [assetsLoading, setAssetsLoading] = useState(true)
+  const [assetsSaving, setAssetsSaving] = useState(false)
   const [quotes, setQuotes] = useState<Record<string, Quote>>({})
   const [meta, setMeta] = useState<{ delayed: boolean; source: string; updatedAt?: string; error?: string }>({ delayed: false, source: 'AKShare' })
   const subscribers = useRef(new Map<string, number>())
   const [subscriptionVersion, setSubscriptionVersion] = useState(0)
   const klineCache = useRef(new Map<string, KlineCacheEntry>())
+  const klineSeriesCache = useRef(new Map<string, KlineCacheEntry>())
   const klineInflight = useRef(new Map<string, Promise<KlineCacheEntry>>())
+  const assetMutation = useRef(false)
   const prefetchInflight = useRef<Promise<void> | null>(null)
   const [klineVersion, setKlineVersion] = useState(0)
   const activeSymbols = useMemo(() => Array.from(new Set([...watchlist, ...subscribers.current.keys()])).sort(), [watchlist, subscriptionVersion])
@@ -80,6 +101,7 @@ export function MarketProvider({ children }: { children: ReactNode }) {
       if (!active) return
       setWatchlist(state.watchlist || [])
       setPositions(state.positions || [])
+      setTotalAssets(state.total_assets ?? null)
     }).catch((error) => {
       if (!active) return
       setMeta((current) => ({ ...current, error: error instanceof Error ? error.message : '自选与持仓加载失败' }))
@@ -102,10 +124,10 @@ export function MarketProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (force = false) => {
     if (!activeSymbols.length) return
     try {
-      const rows = await api.quotes(activeSymbols)
+      const rows = await api.quotes(activeSymbols, force)
       mergeQuotes(rows)
     } catch (error) {
       setMeta((current) => ({ ...current, delayed: true, error: error instanceof Error ? error.message : '行情服务暂不可用' }))
@@ -165,59 +187,165 @@ export function MarketProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const saveAssets = useCallback(async (nextWatchlist: string[], nextPositions: PaperPosition[]) => {
+  const saveAssets = useCallback(async (nextWatchlist: string[], nextPositions: PaperPosition[], nextTotalAssets = totalAssets) => {
     try {
-      const saved = await api.saveAssets({ watchlist: nextWatchlist, positions: nextPositions })
+      const saved = await api.saveAssets({ watchlist: nextWatchlist, positions: nextPositions, total_assets: nextTotalAssets })
       setWatchlist(saved.watchlist)
       setPositions(saved.positions)
+      setTotalAssets(saved.total_assets ?? null)
     } catch (error) {
       setMeta((current) => ({ ...current, error: error instanceof Error ? error.message : '自选与持仓保存失败' }))
       throw error
     }
+  }, [totalAssets])
+
+  const beginAssetMutation = useCallback(() => {
+    if (assetMutation.current) throw new Error('自选与持仓正在保存，请稍候')
+    assetMutation.current = true
+    setAssetsSaving(true)
+  }, [])
+
+  const endAssetMutation = useCallback(() => {
+    assetMutation.current = false
+    setAssetsSaving(false)
   }, [])
 
   const addWatch = useCallback(async (symbol: string) => {
     const normalized = symbol.trim().toUpperCase()
     const next = Array.from(new Set([...watchlist, normalized]))
     if (next.length === watchlist.length) return
+    beginAssetMutation()
     setWatchlist(next)
-    try { await saveAssets(next, positions) } catch (error) { setWatchlist(watchlist); throw error }
-  }, [positions, saveAssets, watchlist])
+    try { await saveAssets(next, positions) } catch (error) { setWatchlist(watchlist); throw error } finally { endAssetMutation() }
+  }, [beginAssetMutation, endAssetMutation, positions, saveAssets, watchlist])
 
   const removeWatch = useCallback(async (symbol: string) => {
     const next = watchlist.filter((item) => item !== symbol)
+    if (next.length === watchlist.length) return
+    beginAssetMutation()
     setWatchlist(next)
-    try { await saveAssets(next, positions) } catch (error) { setWatchlist(watchlist); throw error }
-  }, [positions, saveAssets, watchlist])
+    try { await saveAssets(next, positions) } catch (error) { setWatchlist(watchlist); throw error } finally { endAssetMutation() }
+  }, [beginAssetMutation, endAssetMutation, positions, saveAssets, watchlist])
+
+  const reorderWatchlist = useCallback(async (nextOrder: string[]) => {
+    const normalized = nextOrder.map((symbol) => symbol.trim().toUpperCase())
+    if (normalized.length !== watchlist.length || new Set(normalized).size !== normalized.length || normalized.some((symbol) => !watchlist.includes(symbol))) {
+      throw new Error('自选排序必须包含当前全部证券且不能重复')
+    }
+    if (normalized.every((symbol, index) => symbol === watchlist[index])) return
+    beginAssetMutation()
+    setWatchlist(normalized)
+    try { await saveAssets(normalized, positions) } catch (error) { setWatchlist(watchlist); throw error } finally { endAssetMutation() }
+  }, [beginAssetMutation, endAssetMutation, positions, saveAssets, watchlist])
 
   const upsertPosition = useCallback(async (position: PaperPosition, previousSymbol?: string) => {
     const normalized = { ...position, symbol: position.symbol.trim().toUpperCase(), name: position.name.trim() }
     const replaced = positions.filter((item) => item.symbol !== (previousSymbol || normalized.symbol))
     const next = [...replaced, normalized].sort((left, right) => left.symbol.localeCompare(right.symbol))
+    beginAssetMutation()
     setPositions(next)
-    try { await saveAssets(watchlist, next) } catch (error) { setPositions(positions); throw error }
-  }, [positions, saveAssets, watchlist])
+    try { await saveAssets(watchlist, next) } catch (error) { setPositions(positions); throw error } finally { endAssetMutation() }
+  }, [beginAssetMutation, endAssetMutation, positions, saveAssets, watchlist])
 
   const removePosition = useCallback(async (symbol: string) => {
     const next = positions.filter((item) => item.symbol !== symbol)
+    if (next.length === positions.length) return
+    beginAssetMutation()
     setPositions(next)
-    try { await saveAssets(watchlist, next) } catch (error) { setPositions(positions); throw error }
-  }, [positions, saveAssets, watchlist])
+    try { await saveAssets(watchlist, next) } catch (error) { setPositions(positions); throw error } finally { endAssetMutation() }
+  }, [beginAssetMutation, endAssetMutation, positions, saveAssets, watchlist])
 
-  const getKline = useCallback((symbol: string, period: string, limit = 160) => {
-    const entry = klineCache.current.get(klineKey(symbol, period, limit))
+  const saveTotalAssets = useCallback(async (nextTotalAssets: number | null) => {
+    beginAssetMutation()
+    setTotalAssets(nextTotalAssets)
+    try { await saveAssets(watchlist, positions, nextTotalAssets) } catch (error) { setTotalAssets(totalAssets); throw error } finally { endAssetMutation() }
+  }, [beginAssetMutation, endAssetMutation, positions, saveAssets, totalAssets, watchlist])
+
+  const getKline = useCallback((symbol: string, period: string, request: number | { range: KlineRange } = 160) => {
+    const entry = typeof request === 'number'
+      ? klineCache.current.get(klineKey(symbol, period, request))
+      : klineSeriesCache.current.get(klineSeriesKey(symbol, period, request.range))
     if (!entry) return undefined
     return { ...entry, stale: entry.stale || Date.now() - entry.fetchedAt >= cacheLifetime(period) }
   }, [])
 
-  const loadKline = useCallback(async (symbol: string, period: string, limit = 160) => {
+  const loadKline = useCallback(async (symbol: string, period: string, request: number | KlineLoadOptions = 160, force = false) => {
     const normalized = symbol.toUpperCase()
+    if (typeof request !== 'number') {
+      const limit = request.limit || 1200
+      const seriesKey = klineSeriesKey(normalized, period, request.range)
+      const chunkKey = klineChunkKey(normalized, period, request)
+      const cachedChunk = klineCache.current.get(chunkKey)
+      const mergeChunk = (chunk: KlineCacheEntry) => {
+        const current = klineSeriesCache.current.get(seriesKey)
+        const chunks = [...(current?.chunks || [])]
+        const nextChunk = { key: chunkKey, start: request.start || '', end: request.end || '' }
+        const chunkIndex = chunks.findIndex((item) => item.key === chunkKey)
+        if (chunkIndex >= 0) chunks[chunkIndex] = nextChunk
+        else chunks.push(nextChunk)
+        chunks.sort((left, right) => Date.parse(left.start) - Date.parse(right.start))
+        const entry: KlineCacheEntry = {
+          symbol: normalized,
+          period,
+          range: request.range,
+          bars: mergeKlineBars(current?.bars || [], chunk.bars),
+          status: chunk.status || current?.status || null,
+          fetchedAt: Math.max(current?.fetchedAt || 0, chunk.fetchedAt),
+          stale: chunk.stale || Boolean(current?.stale),
+          error: chunk.error,
+          requestedStart: chunks[0]?.start,
+          requestedEnd: chunks[chunks.length - 1]?.end,
+          chunks,
+        }
+        klineSeriesCache.current.set(seriesKey, entry)
+        return entry
+      }
+      if (!request.refresh && cachedChunk) return mergeChunk(cachedChunk)
+      const existing = klineInflight.current.get(chunkKey)
+      if (existing) return existing
+      const work = api.kline(normalized, period, limit, request).then((payload) => {
+        const { data, meta } = unwrapEnvelope(payload, ['bars', 'items', 'data'])
+        const chunk: KlineCacheEntry = {
+          symbol: normalized,
+          period,
+          range: request.range,
+          bars: Array.isArray(data) ? data : [],
+          status: meta.status || null,
+          fetchedAt: Date.now(),
+          stale: false,
+        }
+        klineCache.current.set(chunkKey, chunk)
+        const entry = mergeChunk(chunk)
+        setKlineVersion((value) => value + 1)
+        return entry
+      }).catch((reason) => {
+        const message = reason instanceof Error ? reason.message : 'K 线加载失败'
+        if (cachedChunk) {
+          const fallback = { ...cachedChunk, stale: true, error: message }
+          klineCache.current.set(chunkKey, fallback)
+          const entry = mergeChunk(fallback)
+          setKlineVersion((value) => value + 1)
+          return entry
+        }
+        const current = klineSeriesCache.current.get(seriesKey)
+        if (current) {
+          const fallback = { ...current, stale: true, error: message }
+          klineSeriesCache.current.set(seriesKey, fallback)
+          setKlineVersion((value) => value + 1)
+          return fallback
+        }
+        throw reason
+      }).finally(() => { klineInflight.current.delete(chunkKey) })
+      klineInflight.current.set(chunkKey, work)
+      return work
+    }
+    const limit = request
     const key = klineKey(normalized, period, limit)
     const cached = klineCache.current.get(key)
-    if (cached && Date.now() - cached.fetchedAt < cacheLifetime(period)) return { ...cached }
+    if (!force && cached && Date.now() - cached.fetchedAt < cacheLifetime(period)) return { ...cached }
     const existing = klineInflight.current.get(key)
     if (existing) return existing
-    const work = api.kline(normalized, period, limit).then((payload) => {
+    const work = api.kline(normalized, period, limit, force).then((payload) => {
       const { data, meta } = unwrapEnvelope(payload, ['bars', 'items', 'data'])
       const entry: KlineCacheEntry = {
         symbol: normalized,
@@ -244,7 +372,7 @@ export function MarketProvider({ children }: { children: ReactNode }) {
     return work
   }, [])
 
-  const value = useMemo(() => ({ quotes, watchlist, positions, assetsLoading, ...meta, klineVersion, addWatch, removeWatch, upsertPosition, removePosition, subscribe, refresh, prefetch, getKline, loadKline }), [quotes, watchlist, positions, assetsLoading, meta, klineVersion, addWatch, removeWatch, upsertPosition, removePosition, subscribe, refresh, prefetch, getKline, loadKline])
+  const value = useMemo(() => ({ quotes, watchlist, positions, totalAssets, assetsLoading, assetsSaving, ...meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, subscribe, refresh, prefetch, getKline, loadKline }), [quotes, watchlist, positions, totalAssets, assetsLoading, assetsSaving, meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, subscribe, refresh, prefetch, getKline, loadKline])
   return <MarketContext.Provider value={value}>{children}</MarketContext.Provider>
 }
 

@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+import numpy as np
+import pandas as pd
 import pytest
 from pydantic import ValidationError
 
-from ashare_ai.adapters._vendor import make_envelope
+from ashare_ai.adapters._vendor import make_envelope, serialize_vendor_result, vendor_records
 from ashare_ai.adapters.protocols import DisclosureVerification, FetchRequest
 from ashare_ai.adapters.symbols import normalize_symbol
 from ashare_ai.core.contracts import (
@@ -85,6 +88,38 @@ def test_vendor_envelope_records_response_time_not_request_start() -> None:
     assert before <= envelope.fetched_at <= after
     assert envelope.fetched_at != requested_at
     assert envelope.request_metadata["requested_at"] == requested_at.isoformat()
+
+
+def test_vendor_records_and_payload_normalize_non_finite_values_recursively() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "python_nan": float("nan"),
+                "numpy_inf": np.float64("inf"),
+                "pandas_missing": pd.NA,
+                "finite": np.float64("12.5"),
+                "nested": {"negative_inf": float("-inf"), "values": [1, np.nan]},
+            }
+        ]
+    )
+
+    records = vendor_records(frame)
+    assert records == [
+        {
+            "python_nan": None,
+            "numpy_inf": None,
+            "pandas_missing": None,
+            "finite": 12.5,
+            "nested": {"negative_inf": None, "values": [1, None]},
+        }
+    ]
+    payload = serialize_vendor_result(frame)
+    assert serialize_vendor_result(frame) == payload
+    assert b"NaN" not in payload and b"Infinity" not in payload
+    decoded = json.loads(
+        payload.decode("utf-8"), parse_constant=lambda value: pytest.fail(value)
+    )
+    assert decoded == records
 
 
 def test_available_at_policy_is_conservative_and_prioritized() -> None:

@@ -1,23 +1,66 @@
 from __future__ import annotations
 
 import json
+import math
+from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import Any, cast
+from decimal import Decimal
+from numbers import Real
+from typing import Any
 
 from ashare_ai.adapters.protocols import FetchRequest
 from ashare_ai.core.contracts import RawEnvelope
 from ashare_ai.core.hashing import sha256_bytes, stable_hash
 
 
+def normalize_vendor_value(value: Any) -> Any:
+    """Return vendor data with missing/non-finite scalars made JSON-safe."""
+    if value is None or type(value).__name__ in {"NAType", "NaTType"}:
+        return None
+    if isinstance(value, Decimal):
+        return value if value.is_finite() else None
+    if isinstance(value, Real):
+        return value if math.isfinite(float(value)) else None
+    if isinstance(value, Mapping):
+        return {str(key): normalize_vendor_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [normalize_vendor_value(item) for item in value]
+
+    # NumPy scalars/arrays expose one of these without requiring the adapter
+    # boundary to import either NumPy or pandas directly.
+    item_method = getattr(value, "item", None)
+    if callable(item_method):
+        try:
+            scalar = item_method()
+        except (TypeError, ValueError):
+            scalar = value
+        if scalar is not value:
+            return normalize_vendor_value(scalar)
+    tolist_method = getattr(value, "tolist", None)
+    if callable(tolist_method):
+        return normalize_vendor_value(tolist_method())
+    return value
+
+
+def vendor_records(frame: Any) -> list[dict[str, Any]]:
+    if frame is None:
+        return []
+    rows = frame.to_dict(orient="records")
+    if not isinstance(rows, list):
+        return []
+    return [
+        normalized
+        for row in rows
+        if isinstance(row, Mapping)
+        and isinstance((normalized := normalize_vendor_value(row)), dict)
+    ]
+
+
 def serialize_vendor_result(result: Any) -> bytes:
-    if hasattr(result, "to_json"):
-        serialized = cast(
-            str,
-            result.to_json(orient="records", force_ascii=False, date_format="iso"),
-        )
-        return serialized.encode("utf-8")
+    if hasattr(result, "to_dict"):
+        result = vendor_records(result)
     return json.dumps(
-        result,
+        normalize_vendor_value(result),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),

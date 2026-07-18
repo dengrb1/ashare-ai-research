@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+pysqlite:///./data/ashare.db"
     redis_url: str = "redis://localhost:6379/0"
     lake_root: Path = Path("data/lake")
-    policy_config_path: Path = Path("configs/first_release.v1.json")
+    policy_config_path: Path = Path("configs/first_release.v2.json")
     object_store_endpoint: str | None = None
     object_store_bucket: str = "ashare-research"
     object_store_access_key: str | None = None
@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     session_cookie_name: str = "ashare_session"
     csrf_cookie_name: str = "ashare_csrf"
     session_ttl_hours: int = Field(default=24, ge=1, le=24 * 30)
+    access_token_ttl_minutes: int = Field(default=15, ge=1, le=24 * 60)
+    refresh_token_ttl_days: int = Field(default=30, ge=1, le=365)
     cookie_secure: bool = False
     market_cache_seconds: int = Field(default=15, ge=1, le=300)
     market_kline_cache_seconds: int = Field(default=300, ge=15, le=3600)
@@ -57,6 +59,8 @@ class Settings(BaseSettings):
     decision_minute: int = Field(default=0, ge=0, le=59)
     daily_research_start_hour: int = Field(default=15, ge=0, le=23)
     daily_research_start_minute: int = Field(default=5, ge=0, le=59)
+    daily_research_retry_minutes: int = Field(default=5, ge=1, le=60)
+    daily_research_retry_limit_minutes: int = Field(default=120, ge=5, le=24 * 60)
     minimum_listing_days: int = Field(default=120, ge=0)
     minimum_median_amount: float = Field(default=50_000_000.0, ge=0)
     agent_backend: Literal["builtin", "openai_compatible"] = "builtin"

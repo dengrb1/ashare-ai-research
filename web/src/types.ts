@@ -11,6 +11,14 @@ export interface User {
   created_at?: string
 }
 
+export interface TokenPair {
+  access_token: string
+  token_type: 'bearer'
+  expires_in: number
+  refresh_token: string
+  refresh_expires_in: number
+}
+
 export interface Quote {
   symbol: string
   name?: string
@@ -36,12 +44,14 @@ export interface PaperPosition {
   name: string
   quantity: number
   cost: number
-  target_weight: number
+  /** Legacy manual target, kept so older saved records remain readable. */
+  target_weight?: number | null
 }
 
 export interface AssetState {
   watchlist: string[]
   positions: PaperPosition[]
+  total_assets?: number | null
   updated_at?: string | null
 }
 
@@ -138,6 +148,21 @@ export interface KlineBar {
   close: number
   volume: number
   amount?: number
+  turnover_rate?: number | null
+}
+
+export type KlineRange = '1d' | '5d' | '1m' | '3m' | '6m' | '1y'
+
+export interface KlineQueryOptions {
+  start?: string
+  end?: string
+  refresh?: boolean
+}
+
+export interface KlineLoadOptions extends KlineQueryOptions {
+  limit?: number
+  range: KlineRange
+  chunk?: string
 }
 
 export interface KlinePayload {
@@ -184,6 +209,49 @@ export interface Run {
   name?: string
   start_date?: string
   end_date?: string
+  phase?: string
+  progress?: number
+  report_id?: string | null
+  report_type?: string | null
+  report_created_at?: string | null
+  retry_count?: number
+  research_scope?: ResearchScope
+  target_symbols?: string[]
+  total_budget?: number | string | null
+  per_symbol_budget?: number | string | null
+  max_stock_price?: number | string | null
+  portfolio_requested?: boolean
+  portfolio_generated?: boolean
+  reason_code?: string | null
+  reason_message?: string | null
+  formal_eligible_count?: number | null
+  excluded_symbol_count?: number
+  trigger_source?: 'AUTO' | 'MANUAL'
+  requested_date?: string | null
+  reused?: boolean
+}
+
+export type ResearchScope = 'MARKET' | 'WATCHLIST' | 'CUSTOM'
+
+export interface ResearchSubmission {
+  trading_date: string
+  scope: ResearchScope
+  symbols?: string[]
+  total_budget?: number
+  per_symbol_budget?: number
+  max_stock_price?: number
+}
+
+export interface ResearchSettings {
+  auto_enabled: boolean
+  updated_at?: string | null
+  automatic_scope: 'MARKET'
+  automatic_total_budget: number | string
+  automatic_per_symbol_budget: number | string
+  automatic_max_stock_price?: number | string | null
+  schedule_timezone: 'Asia/Shanghai'
+  schedule_time: '15:05'
+  snapshot_mode: 'SYSTEM_ENFORCED'
 }
 
 export interface Score {
@@ -193,20 +261,27 @@ export interface Score {
   technical_score?: number
   sentiment_score?: number
   quality_confidence_score?: number
+  base_total_score?: number
+  dividend_bonus?: number
+  event_risk_multiplier?: number
   formula_version?: string
+  prediction_percentile?: number
+  rank?: number
 }
 
 export interface Candidate {
   symbol: string
   rank: number
   total_score: number
+  base_total_score?: number | null
+  dividend_bonus?: number
   prediction_percentile?: number
   industry_code?: string
   event_risk_multiplier?: number
 }
 
 export interface Portfolio {
-  portfolio_id: string
+  portfolio_id?: string | null
   run_id: string
   trading_date: string
   effective_trading_date?: string
@@ -215,6 +290,12 @@ export interface Portfolio {
   cash_weight?: number
   positions: Array<Record<string, unknown>>
   rejection_reasons?: string[]
+  observation_only?: boolean
+  research_only?: boolean
+  message?: string | null
+  reason_code?: string | null
+  formal_eligible_symbols?: string[]
+  excluded_symbols?: Record<string, string[]>
 }
 
 export interface AuditEvent {
@@ -236,4 +317,32 @@ export interface Report {
   body?: string
   object_uri?: string
   created_at?: string
+}
+
+export interface TradePlan {
+  plan_id: string
+  user_id: string
+  report_id: string
+  run_id: string
+  trading_date: string
+  decision_at: string
+  available_at: string
+  status: string
+  objective: 'RISK_ADJUSTED_RETURN' | string
+  symbols: string[]
+  budget_override?: number | string | null
+  snapshot_ids: string[]
+  optimizer_version: string
+  config_version: string
+  prompt_version?: string | null
+  deterministic_result?: Record<string, unknown> | null
+  ai_explanation?: Record<string, unknown> | null
+  input_hash: string
+  output_hash?: string | null
+  object_uri?: string | null
+  object_sha256?: string | null
+  created_at: string
+  started_at?: string | null
+  completed_at?: string | null
+  error_message?: string | null
 }

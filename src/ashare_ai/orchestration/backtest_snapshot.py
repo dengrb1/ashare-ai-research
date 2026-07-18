@@ -73,8 +73,8 @@ def create_backtest_snapshot(
         "trading_date": run.trading_date.isoformat(),
         "parquet_file_sha256": file_hash,
         "bundle_payload_sha256": logical_hash,
-        "research_price_basis": "HFQ",
-        "execution_price_basis": "HFQ",
+        "research_price_basis": "RAW",
+        "execution_price_basis": "RAW",
         "phase": phase,
         "signal_count": len(fixed_bundle.signals),
         "executable_signal_count": sum(
@@ -83,6 +83,13 @@ def create_backtest_snapshot(
         ),
         "calendar_start": fixed_bundle.trading_calendar[0].isoformat(),
         "calendar_end": fixed_bundle.trading_calendar[-1].isoformat(),
+        "future_trading_dates": [
+            value.isoformat()
+            for value in bundle.trading_calendar
+            if value > bundle.trading_date
+        ][:3],
+        "calendar_source": bundle.calendar_source,
+        "calendar_version": bundle.calendar_version,
         "data_quality": bundle.data_quality,
         "prior_snapshot_id": prior_snapshot_id,
         **(extra_details or {}),
@@ -216,7 +223,7 @@ def _build_bundle(
                         if status is not None and status.is_suspended
                         else bar.trade_status
                     ),
-                    price_basis="HFQ",
+                    price_basis="RAW",
                 )
             )
             rules.append(

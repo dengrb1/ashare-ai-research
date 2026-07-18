@@ -289,6 +289,12 @@ class BuiltinBacktestExecutor:
                         item.model_dump(mode="json") for item in result.industry_attribution
                     ],
                     "costs": result.cost_attribution.model_dump(mode="json"),
+                    "industry_classification_changes": [
+                        item.model_dump(mode="json")
+                        for item in result.industry_classification_changes
+                    ],
+                    "attribution_method": result.attribution_method,
+                    "warnings": list(result.warnings),
                 },
             ),
             "result": _put_json(object_store, result.model_dump(mode="json")),
@@ -306,6 +312,12 @@ class BuiltinBacktestExecutor:
                     item.model_dump(mode="json") for item in result.industry_attribution
                 ],
                 "cost_attribution": result.cost_attribution.model_dump(mode="json"),
+                "industry_classification_changes": [
+                    item.model_dump(mode="json")
+                    for item in result.industry_classification_changes
+                ],
+                "attribution_method": result.attribution_method,
+                "warnings": list(result.warnings),
                 "manifest_hash": result.manifest_hash,
                 "input_hash": result.input_hash,
                 "output_hash": result.output_hash,

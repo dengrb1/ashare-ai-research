@@ -46,6 +46,28 @@ function MarketProbe() {
   </div>
 }
 
+function SegmentedKlineProbe() {
+  const { loadKline, getKline } = useMarket()
+  const [result, setResult] = React.useState('')
+  const loadSegments = async () => {
+    const latest = { range: '1y' as const, start: '2026-07-10T00:00:00Z', end: '2026-07-17T00:00:00Z', chunk: 'latest', limit: 1200 }
+    await loadKline('600519.SH', '1m', latest)
+    await loadKline('600519.SH', '1m', latest)
+    const merged = await loadKline('600519.SH', '1m', { range: '1y', start: '2026-07-03T00:00:00Z', end: '2026-07-10T00:00:00Z', chunk: 'earlier', limit: 1200 })
+    setResult(merged.bars.map((bar) => bar.close).join(','))
+  }
+  const refreshLatest = async () => {
+    const refreshed = await loadKline('600519.SH', '1m', { range: '1y', start: '2026-07-10T00:00:00Z', end: '2026-07-17T00:00:00Z', chunk: 'latest', limit: 1200, refresh: true })
+    setResult(refreshed.bars.map((bar) => bar.close).join(','))
+  }
+  return <>
+    <button onClick={() => void loadSegments()}>加载分段</button>
+    <button onClick={() => void refreshLatest()}>刷新最新分段</button>
+    <span data-testid="segmented-result">{result}</span>
+    <span data-testid="segmented-cache">{getKline('600519.SH', '1m', { range: '1y' })?.chunks?.length || 0}</span>
+  </>
+}
+
 describe('theme system', () => {
   beforeEach(() => {
     localStorage.clear()
@@ -175,5 +197,50 @@ describe('market prefetch and client cache', () => {
     expect(await screen.findByText('1', { selector: '[data-testid="cached-bars"]' })).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: '加载日线' }))
     expect(await screen.findByText('1:upstream unavailable')).toBeInTheDocument()
+  })
+
+  it('isolates and merges range chunks, deduplicates timestamps, and refreshes only the latest chunk', async () => {
+    let latestCalls = 0
+    const mockFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/assets')) return jsonResponse({ watchlist: [], positions: [] })
+      if (url.includes('/market/klines/')) {
+        const parsed = new URL(url, 'http://localhost')
+        const start = parsed.searchParams.get('start')
+        if (start === '2026-07-10T00:00:00Z') {
+          latestCalls += 1
+          return jsonResponse({
+            symbol: '600519.SH', period: '1m', adjustment: 'hfq',
+            bars: [
+              { timestamp: '2026-07-10T01:31:00Z', open: 10, high: 10, low: 10, close: 10, volume: 1 },
+              { timestamp: '2026-07-11T01:31:00Z', open: 11, high: 11, low: 11, close: latestCalls > 1 ? 99 : 11, volume: 1 },
+            ],
+            status: { source: 'fixture', collected_at: '2026-07-17T00:00:00Z', cached_at: '2026-07-17T00:00:00Z', delayed: false },
+          })
+        }
+        return jsonResponse({
+          symbol: '600519.SH', period: '1m', adjustment: 'hfq',
+          bars: [
+            { timestamp: '2026-07-05T01:31:00Z', open: 5, high: 5, low: 5, close: 5, volume: 1 },
+            { timestamp: '2026-07-10T01:31:00Z', open: 9, high: 9, low: 9, close: 9, volume: 1 },
+          ],
+          status: { source: 'fixture', collected_at: '2026-07-17T00:00:00Z', cached_at: '2026-07-17T00:00:00Z', delayed: false },
+        })
+      }
+      throw new Error(`unexpected request ${url}`)
+    })
+    vi.stubGlobal('fetch', mockFetch)
+    render(<MarketProvider><SegmentedKlineProbe /></MarketProvider>)
+
+    await userEvent.click(screen.getByRole('button', { name: '加载分段' }))
+    expect(await screen.findByText('5,9,11')).toBeInTheDocument()
+    expect(screen.getByTestId('segmented-cache')).toHaveTextContent('2')
+    expect(mockFetch.mock.calls.filter(([url]) => String(url).includes('/market/klines/'))).toHaveLength(2)
+
+    await userEvent.click(screen.getByRole('button', { name: '刷新最新分段' }))
+    expect(await screen.findByText('5,10,99')).toBeInTheDocument()
+    const klineUrls = mockFetch.mock.calls.filter(([url]) => String(url).includes('/market/klines/')).map(([url]) => String(url))
+    expect(klineUrls).toHaveLength(3)
+    expect(klineUrls[2]).toContain('refresh=true')
   })
 })

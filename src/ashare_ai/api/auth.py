@@ -22,6 +22,15 @@ _PASSWORD_HASHER = PasswordHasher()
 class AuthContext:
     user: UserAccount
     session: UserSession
+    scheme: str = "COOKIE"
+
+
+@dataclass(frozen=True)
+class TokenPair:
+    access_token: str
+    refresh_token: str
+    access_expires_in: int
+    refresh_expires_in: int
 
 
 def _digest(value: str) -> str:
@@ -96,6 +105,7 @@ def create_session(
         user_id=user.user_id,
         token_hash=_digest(token),
         csrf_hash=_digest(csrf),
+        session_type="WEB",
         user_session_version=user.session_version,
         created_at=now,
         last_seen_at=now,
@@ -124,7 +134,101 @@ def create_session(
         max_age=effective.session_ttl_hours * 3600,
         path="/",
     )
-    return AuthContext(user=user, session=row)
+    return AuthContext(user=user, session=row, scheme="COOKIE")
+
+
+def create_token_session(
+    db: Session,
+    user: UserAccount,
+    request: Request,
+    settings: Settings | None = None,
+) -> TokenPair:
+    effective = settings or get_settings()
+    access_token = secrets.token_urlsafe(48)
+    refresh_token = secrets.token_urlsafe(64)
+    access_seconds = effective.access_token_ttl_minutes * 60
+    refresh_seconds = effective.refresh_token_ttl_days * 24 * 3600
+    now = datetime.now(UTC)
+    db.add(
+        UserSession(
+            user_id=user.user_id,
+            token_hash=_digest(access_token),
+            csrf_hash=_digest(""),
+            session_type="APP",
+            refresh_token_hash=_digest(refresh_token),
+            refresh_expires_at=now + timedelta(seconds=refresh_seconds),
+            user_session_version=user.session_version,
+            created_at=now,
+            last_seen_at=now,
+            expires_at=now + timedelta(seconds=access_seconds),
+            user_agent=request.headers.get("user-agent", "")[:512] or None,
+            client_ip=request.client.host if request.client else None,
+        )
+    )
+    db.commit()
+    return TokenPair(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        access_expires_in=access_seconds,
+        refresh_expires_in=refresh_seconds,
+    )
+
+
+def rotate_refresh_token(
+    db: Session,
+    refresh_token: str,
+    settings: Settings | None = None,
+) -> TokenPair:
+    effective = settings or get_settings()
+    row = db.scalar(
+        select(UserSession).where(
+            UserSession.refresh_token_hash == _digest(refresh_token),
+            UserSession.session_type == "APP",
+        )
+    )
+    now = datetime.now(UTC)
+    if (
+        row is None
+        or row.revoked_at is not None
+        or row.refresh_expires_at is None
+        or _aware(row.refresh_expires_at) <= now
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="refresh token invalid"
+        )
+    user = db.get(UserAccount, row.user_id)
+    if user is None or not user.enabled or user.session_version != row.user_session_version:
+        row.revoked_at = now
+        db.commit()
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="session invalid")
+    access_token = secrets.token_urlsafe(48)
+    next_refresh_token = secrets.token_urlsafe(64)
+    access_seconds = effective.access_token_ttl_minutes * 60
+    refresh_seconds = effective.refresh_token_ttl_days * 24 * 3600
+    row.token_hash = _digest(access_token)
+    row.refresh_token_hash = _digest(next_refresh_token)
+    row.expires_at = now + timedelta(seconds=access_seconds)
+    row.refresh_expires_at = now + timedelta(seconds=refresh_seconds)
+    row.last_seen_at = now
+    db.commit()
+    return TokenPair(
+        access_token=access_token,
+        refresh_token=next_refresh_token,
+        access_expires_in=access_seconds,
+        refresh_expires_in=refresh_seconds,
+    )
+
+
+def revoke_refresh_token(db: Session, refresh_token: str) -> None:
+    row = db.scalar(
+        select(UserSession).where(
+            UserSession.refresh_token_hash == _digest(refresh_token),
+            UserSession.session_type == "APP",
+        )
+    )
+    if row is not None and row.revoked_at is None:
+        row.revoked_at = datetime.now(UTC)
+        db.commit()
 
 
 def clear_auth_cookies(response: Response, settings: Settings | None = None) -> None:
@@ -135,12 +239,28 @@ def clear_auth_cookies(response: Response, settings: Settings | None = None) -> 
 
 def require_auth(request: Request, db: Session) -> AuthContext:
     settings = get_settings()
-    token = request.cookies.get(settings.session_cookie_name)
+    authorization = request.headers.get("authorization", "")
+    scheme = "COOKIE"
+    token: str | None
+    if authorization:
+        prefix, separator, credential = authorization.partition(" ")
+        if prefix.casefold() != "bearer" or not separator or not credential.strip():
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid authorization header"
+            )
+        token = credential.strip()
+        scheme = "BEARER"
+    else:
+        token = request.cookies.get(settings.session_cookie_name)
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="authentication required"
         )
-    row = db.scalar(select(UserSession).where(UserSession.token_hash == _digest(token)))
+    statement = select(UserSession).where(UserSession.token_hash == _digest(token))
+    statement = statement.where(
+        UserSession.session_type == ("APP" if scheme == "BEARER" else "WEB")
+    )
+    row = db.scalar(statement)
     now = datetime.now(UTC)
     if row is None or row.revoked_at is not None or _aware(row.expires_at) <= now:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="session expired")
@@ -148,11 +268,13 @@ def require_auth(request: Request, db: Session) -> AuthContext:
     if user is None or not user.enabled or user.session_version != row.user_session_version:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="session invalid")
     row.last_seen_at = now
-    return AuthContext(user=user, session=row)
+    return AuthContext(user=user, session=row, scheme=scheme)
 
 
 def require_csrf(request: Request, context: AuthContext) -> None:
     if request.method in {"GET", "HEAD", "OPTIONS"}:
+        return
+    if context.scheme == "BEARER":
         return
     settings = get_settings()
     cookie = request.cookies.get(settings.csrf_cookie_name, "")

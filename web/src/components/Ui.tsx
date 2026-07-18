@@ -13,9 +13,10 @@ export function Panel({ title, eyebrow, action, children, className = '' }: { ti
 export function StatusPill({ status }: { status: string }) {
   const normalized = status.toUpperCase()
   const tone = ['SUCCESS', 'COMPLETED', 'SUCCEEDED', 'ACTIVE'].includes(normalized) ? 'success'
-    : ['FAILED', 'ERROR', 'DISABLED'].includes(normalized) ? 'danger'
+    : normalized === 'FUSED' ? 'warning'
+    : ['FAILED', 'ERROR', 'DISABLED', 'CANCELLED'].includes(normalized) ? 'danger'
       : ['RUNNING', 'PROCESSING'].includes(normalized) ? 'running' : 'pending'
-  const labels: Record<string, string> = { SUCCESS: '已完成', COMPLETED: '已完成', SUCCEEDED: '已完成', FAILED: '失败', ERROR: '异常', RUNNING: '运行中', PROCESSING: '处理中', PENDING: '等待中', QUEUED: '排队中', ACTIVE: '启用', DISABLED: '禁用' }
+  const labels: Record<string, string> = { SUCCESS: '已完成', COMPLETED: '已完成', SUCCEEDED: '已完成', FUSED: '观察模式', FAILED: '失败', ERROR: '异常', RUNNING: '运行中', PROCESSING: '处理中', PENDING: '等待中', QUEUED: '排队中', CANCEL_REQUESTED: '正在停止', CANCELLED: '已停止', ACTIVE: '启用', DISABLED: '禁用' }
   return <span className={`status-pill ${tone}`}><i />{labels[normalized] || status}</span>
 }
 

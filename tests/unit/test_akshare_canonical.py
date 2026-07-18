@@ -4,7 +4,11 @@ import json
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
+import numpy as np
+import pandas as pd
+
 from ashare_ai.core.config import Settings
+from ashare_ai.core.hashing import stable_hash
 from ashare_ai.core.time import SHANGHAI
 from ashare_ai.orchestration.akshare_bundle import (
     AKShareCanonicalBundleBuilder,
@@ -59,6 +63,63 @@ class Provider:
         return self.daily_bars(code, start_date, end_date)
 
 
+def _financial_rows() -> list[dict[str, object]]:
+    common = {"公告日期": "2026-04-25", "更新日期": "2026-04-25 10:30:00"}
+    return [
+        {
+            **common,
+            "报告日": "2026-03-31",
+            "_statement_type": "利润表",
+            "_canonical_source": "akshare-sina",
+            "营业总收入": 120,
+            "归属于母公司股东的净利润": 12,
+        },
+        {
+            **common,
+            "报告日": "2025-03-31",
+            "_statement_type": "利润表",
+            "_canonical_source": "akshare-sina",
+            "营业总收入": 100,
+            "归属于母公司股东的净利润": 10,
+        },
+        {
+            **common,
+            "报告日": "2026-03-31",
+            "_statement_type": "资产负债表",
+            "_canonical_source": "akshare-sina",
+            "资产总计": 300,
+            "负债合计": 100,
+            "归属于母公司股东权益合计": 200,
+        },
+        {
+            **common,
+            "报告日": "2026-03-31",
+            "_statement_type": "现金流量表",
+            "_canonical_source": "akshare-sina",
+            "经营活动产生的现金流量净额": 15,
+        },
+    ]
+
+
+class CompleteProvider(Provider):
+    def financial_reports(self, symbol):
+        del symbol
+        return _financial_rows()
+
+    def disclosures(self, symbol, start_date, end_date):
+        del start_date, end_date
+        return [
+            {
+                "代码": symbol.split(".", 1)[0],
+                "公告标题": "2026 年第一季度报告及风险提示",
+                "公告时间": "2026-04-25 18:30:00",
+                "公告链接": "http://www.cninfo.com.cn/new/disclosure/detail?id=1",
+                "announcementId": f"ann-{symbol}",
+                "_canonical_source": "cninfo",
+            }
+        ]
+
+
 def test_akshare_bundle_uses_real_market_history_and_labeled_neutral_placeholders() -> None:
     trading_date = date(2026, 7, 15)
     provider = Provider(trading_date)
@@ -84,6 +145,91 @@ def test_akshare_bundle_uses_real_market_history_and_labeled_neutral_placeholder
         "CSI1000",
         "EQUAL_WEIGHT_UNIVERSE",
     }
+
+
+def test_free_financial_and_cninfo_data_remove_symbol_placeholders() -> None:
+    trading_date = date(2026, 7, 15)
+    builder = AKShareCanonicalBundleBuilder(
+        provider=CompleteProvider(trading_date),
+        clock=lambda: datetime(2026, 7, 15, 20, tzinfo=SHANGHAI),
+        bundle_size=20,
+        history_sessions=65,
+    )
+
+    bundle = builder.build(trading_date, datetime(2026, 7, 15, 18, tzinfo=SHANGHAI))
+
+    assert all(not item["fundamental_placeholder"] for item in bundle.data_quality.values())
+    assert all(not item["sentiment_placeholder"] for item in bundle.data_quality.values())
+    assert {item.source for item in bundle.financial_facts} == {"akshare-sina"}
+    assert {item.official_source for item in bundle.disclosures} == {"CNINFO"}
+    assert bundle.news == ()
+    assert all(bundle.events_by_symbol[symbol] for symbol in bundle.data_quality)
+
+
+def test_free_multi_source_news_and_official_dividends_are_pit_frozen() -> None:
+    trading_date = date(2026, 7, 15)
+
+    class MultiSourceProvider(CompleteProvider):
+        def news(self, symbol, start_date, end_date):
+            del start_date, end_date
+            return [
+                {
+                    "新闻标题": "公司涉及重大诉讼",
+                    "新闻内容": "免费媒体报道",
+                    "发布时间": "2026-07-14 10:00:00",
+                    "文章来源": "东方财富",
+                    "新闻链接": f"https://example.test/{symbol}",
+                    "_canonical_source": "eastmoney",
+                },
+                {
+                    "新闻标题": "未来新闻",
+                    "新闻内容": "不得进入快照",
+                    "发布时间": "2026-07-16 10:00:00",
+                    "文章来源": "免费媒体",
+                    "新闻链接": f"https://example.test/future/{symbol}",
+                    "_canonical_source": "caixin",
+                },
+            ]
+
+        def dividends(self, symbol):
+            del symbol
+            return [
+                {
+                    "实施方案公告日期": "2026-05-01",
+                    "派息比例": 10,
+                    "派息日": "2026-06-01",
+                    "股权登记日": "2026-05-28",
+                    "报告时间": "2025年报",
+                    "_canonical_source": "cninfo",
+                },
+                {
+                    "公告日期": "2026-05-01",
+                    "派息": 10,
+                    "除权除息日": "2026-06-01",
+                    "进度": "实施",
+                    "_canonical_source": "sina",
+                },
+            ]
+
+    bundle = AKShareCanonicalBundleBuilder(
+        provider=MultiSourceProvider(trading_date),
+        clock=lambda: datetime(2026, 7, 15, 20, tzinfo=SHANGHAI),
+        bundle_size=20,
+        history_sessions=65,
+    ).build(trading_date, datetime(2026, 7, 15, 18, tzinfo=SHANGHAI))
+
+    assert len(bundle.news) == 20
+    assert {item.source for item in bundle.news} == {"eastmoney"}
+    assert all(item.available_at <= bundle.decision_at for item in bundle.news)
+    assert len(bundle.dividends) == 20
+    assert all(item.official_verified for item in bundle.dividends)
+    assert all(item.cash_dividend_per_share == Decimal("1") for item in bundle.dividends)
+    assert all(
+        any(event.severity.value == "MEDIUM" for event in bundle.events_by_symbol[symbol])
+        for symbol in bundle.data_quality
+    )
+    assert all(item.available_at <= bundle.decision_at for item in bundle.financial_facts)
+    assert all(item.available_at <= bundle.decision_at for item in bundle.disclosures)
 
 
 def test_akshare_bundle_rejects_historical_live_reconstruction() -> None:
@@ -183,6 +329,40 @@ def test_akshare_provider_uses_sina_fallbacks_when_eastmoney_disconnects(monkeyp
     benchmarks = provider.benchmark_bars("000300", date(2026, 7, 16), date(2026, 7, 16))
     assert [item["date"] for item in benchmarks] == [date(2026, 7, 16)]
     assert benchmarks[0]["amount"] == 0
+
+
+def test_canonical_dataframe_boundary_normalizes_non_finite_and_drops_missing_bar() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "date": "2026-07-15",
+                "open": np.float64(10),
+                "high": 11,
+                "low": 9,
+                "close": float("inf"),
+                "volume": 100,
+                "amount": 1000,
+                "nested": {"missing": pd.NA},
+            },
+            {
+                "date": "2026-07-16",
+                "open": 10,
+                "high": 11,
+                "low": 9,
+                "close": 10.5,
+                "volume": 100,
+                "amount": 1000,
+            },
+        ]
+    )
+    rows = AKShareCanonicalProvider._records(frame)
+    assert rows[0]["close"] is None
+    assert rows[0]["nested"] == {"missing": None}
+    assert stable_hash(rows) == stable_hash(AKShareCanonicalProvider._records(frame))
+
+    builder = AKShareCanonicalBundleBuilder(provider=Provider(date(2026, 7, 16)))
+    normalized = builder._normalized_history(rows, date(2026, 7, 16))
+    assert [item["trading_date"] for item in normalized] == [date(2026, 7, 16)]
 
 
 def test_akshare_provider_uses_sina_after_eastmoney_json_decode_failure(monkeypatch) -> None:
@@ -368,6 +548,37 @@ def test_canonical_provider_falls_back_for_missing_history_and_tracks_source() -
     assert {item.source for item in bundle.securities if item.symbol != "601999.SH"} == {"akshare"}
     assert {item.source for item in bundle.bars} == {"tushare"}
     assert {item["source"] for item in bundle.data_quality.values()} == {"tushare"}
+
+
+def test_canonical_provider_uses_tushare_for_incomplete_financials_and_announcements(
+) -> None:
+    trading_date = date(2026, 7, 15)
+
+    class IncompletePrimary(Provider):
+        def financial_reports(self, symbol):
+            del symbol
+            return [{"报告日": "2026-03-31", "营业总收入": 120}]
+
+        def disclosures(self, symbol, start_date, end_date):
+            del symbol, start_date, end_date
+            return []
+
+    class CompleteFallback(CompleteProvider):
+        source = "tushare"
+
+    provider = FallbackCanonicalProvider(
+        IncompletePrimary(trading_date),
+        CompleteFallback(trading_date),
+        minimum_history_rows=65,
+    )
+
+    facts = provider.financial_reports("600000.SH")
+    disclosures = provider.disclosures(
+        "600000.SH", date(2026, 1, 1), trading_date
+    )
+
+    assert facts and {item["_canonical_source"] for item in facts} == {"tushare"}
+    assert disclosures and {item["_canonical_source"] for item in disclosures} == {"tushare"}
 
 
 def test_run_manifest_freezes_acquisition_plan_without_calling_akshare(tmp_path) -> None:

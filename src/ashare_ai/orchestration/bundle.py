@@ -10,6 +10,7 @@ from pydantic import AwareDatetime, Field, model_validator
 from ashare_ai.core.contracts import (
     AvailabilityBasis,
     Board,
+    CashDividend,
     DailyBar,
     Disclosure,
     Exchange,
@@ -37,7 +38,11 @@ class CanonicalDailyBundle(FrozenModel):
     bars: tuple[DailyBar, ...] = Field(min_length=15)
     financial_facts: tuple[FinancialFact, ...] = Field(min_length=1)
     disclosures: tuple[Disclosure, ...] = Field(min_length=1)
-    news: tuple[NewsItem, ...] = Field(min_length=1)
+    news: tuple[NewsItem, ...] = ()
+    dividends: tuple[CashDividend, ...] = ()
+    trading_calendar: tuple[date, ...] = ()
+    calendar_source: str = "UNSPECIFIED"
+    calendar_version: str = "UNSPECIFIED"
     events_by_symbol: dict[str, tuple[ActiveEventRisk, ...]] = Field(default_factory=dict)
     style_exposures: dict[str, dict[str, float]] = Field(default_factory=dict)
     nav: Decimal = Field(gt=0)
@@ -54,6 +59,16 @@ class CanonicalDailyBundle(FrozenModel):
             raise ValueError("bundle decision_at must fall on trading_date")
         if self.next_trading_date <= self.trading_date:
             raise ValueError("next_trading_date must be after trading_date")
+        if self.trading_calendar:
+            if tuple(sorted(set(self.trading_calendar))) != self.trading_calendar:
+                raise ValueError("bundle trading_calendar must be sorted and unique")
+            if self.trading_date not in self.trading_calendar:
+                raise ValueError("bundle trading_calendar must contain trading_date")
+            following = next(
+                (item for item in self.trading_calendar if item > self.trading_date), None
+            )
+            if following != self.next_trading_date:
+                raise ValueError("next_trading_date must come from the frozen trading calendar")
         symbols = [item.symbol for item in self.securities]
         if len(symbols) != len(set(symbols)):
             raise ValueError("bundle securities must be unique by symbol")
@@ -76,6 +91,7 @@ class CanonicalDailyBundle(FrozenModel):
             *self.financial_facts,
             *self.disclosures,
             *self.news,
+            *self.dividends,
         )
         future = [
             f"{item.symbol}:{item.source_record_id}"
@@ -94,6 +110,7 @@ def evidence_payload(source: str, source_record_id: str) -> bytes:
 def make_demo_bundle(trading_date: date) -> CanonicalDailyBundle:
     decision_at = market_decision_time(trading_date)
     next_date = _next_weekday(trading_date)
+    third_future_date = _next_weekday(_next_weekday(next_date))
     ingestion_run_id = uuid5(NAMESPACE_URL, f"builtin-demo:{trading_date.isoformat()}")
     sessions = _weekdays_ending(trading_date, 65)
     securities: list[SecurityMasterRecord] = []
@@ -292,6 +309,9 @@ def make_demo_bundle(trading_date: date) -> CanonicalDailyBundle:
         financial_facts=tuple(facts),
         disclosures=tuple(disclosures),
         news=tuple(news_items),
+        trading_calendar=tuple(_weekdays_ending(third_future_date, 68)),
+        calendar_source="builtin-demo",
+        calendar_version="builtin-weekdays-v1",
         events_by_symbol=events,
         style_exposures=styles,
         nav=Decimal("10000000"),

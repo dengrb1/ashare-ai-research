@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
-import { api } from '../api'
+import { api, unwrapList } from '../api'
 import { ErrorNotice, formatNumber, formatTime, Panel, StatusPill, today } from '../components/Ui'
 import { usePollingTask } from '../hooks/usePollingTask'
 import type { Snapshot } from '../types'
@@ -11,11 +11,18 @@ export function BacktestPage() {
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState('')
   const [snapshots, setSnapshots] = useState<Snapshot[]>([])
+  const [statusBusy, setStatusBusy] = useState(false)
   const loadBacktest = useCallback((id: string) => api.backtest(id), [])
   const { task, error, watch, setTask } = usePollingTask(loadBacktest, 3000)
 
   useEffect(() => {
     api.snapshots().then(setSnapshots).catch((reason) => setSubmitError(reason instanceof Error ? reason.message : '快照列表加载失败'))
+    api.backtests().then((payload) => {
+      const latest = unwrapList(payload)[0]
+      if (!latest) return
+      setTask(latest)
+      if (['PENDING', 'QUEUED', 'RUNNING', 'PROCESSING'].includes(latest.status.toUpperCase())) void watch(latest.backtest_id || latest.run_id)
+    }).catch(() => undefined)
   }, [])
 
   function addSnapshot(snapshotId: string) {
@@ -46,6 +53,25 @@ export function BacktestPage() {
   const metrics = task?.metrics || {}
   const active = task && ['PENDING', 'QUEUED', 'RUNNING', 'PROCESSING'].includes(task.status.toUpperCase())
   const selectedSnapshot = snapshots.find((snapshot) => snapshot.snapshot_id === form.snapshots)
+  const currentId = task?.backtest_id || task?.run_id
+
+  async function refreshStatus() {
+    if (!currentId || statusBusy) return
+    setStatusBusy(true)
+    try { setTask(await api.backtest(currentId)) }
+    catch (reason) { setSubmitError(reason instanceof Error ? reason.message : '回测状态刷新失败') }
+    finally { setStatusBusy(false) }
+  }
+
+  async function retry() {
+    if (!currentId || statusBusy) return
+    setStatusBusy(true); setSubmitError('')
+    try {
+      const next = await api.retryBacktest(currentId)
+      setTask(next); void watch(currentId)
+    } catch (reason) { setSubmitError(reason instanceof Error ? reason.message : '回测重新运行失败') }
+    finally { setStatusBusy(false) }
+  }
   return <div className="backtest-layout">
     <Panel title="回测配置" eyebrow="EVENT-DRIVEN BACKTEST">
       <form className="backtest-form" onSubmit={submit}>
@@ -62,8 +88,8 @@ export function BacktestPage() {
       </form>
     </Panel>
     <div className="backtest-result">
-      <Panel title="任务状态" eyebrow="EXECUTION" action={task && <StatusPill status={task.status} />}>
-        {task ? <div className="task-detail"><div className="task-id"><span>BACKTEST ID</span><code>{task.backtest_id || task.run_id}</code></div>{active && <div className="processing-note"><i />Redis Worker 正在处理固定快照</div>}<div className="task-meta"><div><span>开始日期</span><strong>{task.start_date || form.start}</strong></div><div><span>结束日期</span><strong>{task.end_date || form.end}</strong></div><div><span>完成时间</span><strong>{formatTime(task.completed_at || undefined)}</strong></div></div>{task.error_message && <div className="failure-box"><strong>回测失败</strong><p>{task.error_message}</p></div>}<ErrorNotice message={error} /></div> : <div className="run-await"><span>⟲</span><strong>等待回测任务</strong><p>提交后将持续轮询状态与结果。</p></div>}
+      <Panel title="任务状态" eyebrow="EXECUTION" action={<div className="task-actions">{task && <StatusPill status={task.status} />}<button className="secondary compact-action" onClick={() => void refreshStatus()} disabled={!currentId || statusBusy}>{statusBusy ? '刷新中' : '手动刷新'}</button></div>}>
+        {task ? <div className="task-detail"><div className="task-id"><span>BACKTEST ID</span><code>{task.backtest_id || task.run_id}</code></div>{active && <div className="processing-note"><i />Redis Worker 正在处理固定快照</div>}<div className="task-meta"><div><span>开始日期</span><strong>{task.start_date || form.start}</strong></div><div><span>结束日期</span><strong>{task.end_date || form.end}</strong></div><div><span>完成时间</span><strong>{formatTime(task.completed_at || undefined)}</strong></div></div>{task.error_message && <div className="failure-box"><strong>回测失败</strong><p>{task.error_message}</p><button className="primary" onClick={() => void retry()} disabled={statusBusy}>{statusBusy ? '正在重新排队…' : '重新运行'}</button></div>}<ErrorNotice message={error} /></div> : <div className="run-await"><span>⟲</span><strong>等待回测任务</strong><p>提交后将持续轮询状态与结果。</p></div>}
       </Panel>
       <Panel title="绩效摘要" eyebrow="METRICS">
         {Object.keys(metrics).length ? <div className="metrics-board">{Object.entries(metrics).slice(0, 12).map(([key, value]) => <div key={key}><span>{key.replaceAll('_', ' ')}</span><strong>{typeof value === 'number' ? formatNumber(value, 4) : String(value)}</strong></div>)}</div> : <div className="metric-placeholder">回测完成后展示收益、回撤、风险和三基准对比指标</div>}

@@ -54,6 +54,7 @@ class PipelineBackend(Protocol):
     def calculate_scores(self, run_id: str, agent_bundle_id: str) -> str: ...
     def qlib_filter(self, run_id: str, score_snapshot_id: str) -> str: ...
     def risk_state(self, run_id: str) -> str: ...
+    def portfolio_requested(self, run_id: str) -> bool: ...
     def build_portfolio(self, run_id: str, candidate_snapshot_id: str) -> str | None: ...
     def publish_report(self, run_id: str, portfolio_id: str | None, risk_state: str) -> str: ...
 
@@ -160,15 +161,20 @@ class ApplicationPipeline:
             with self.session_factory() as session:
                 run = session.get(JobRun, run_id)
                 if run is not None:
-                    run.status = "FAILED"
-                    run.error_message = str(exc)
-                    run.completed_at = datetime.now(UTC)
+                    cancel_requested = run.status == "CANCEL_REQUESTED"
+                    if not cancel_requested:
+                        run.status = "FAILED"
+                        run.error_message = str(exc)
+                        run.completed_at = datetime.now(UTC)
                     AuditLogger(session).record(
                         run_id,
                         "STAGE_FAILED",
                         f"Pipeline stage failed: {name}",
-                        severity="ERROR",
-                        details=_error_details(exc, stage=name),
+                        severity="WARNING" if cancel_requested else "ERROR",
+                        details={
+                            **_error_details(exc, stage=name),
+                            **({"cancel_requested": True} if cancel_requested else {}),
+                        },
                     )
                     session.commit()
             raise
@@ -222,6 +228,10 @@ class ApplicationPipeline:
     def risk_state(self, run_id: str) -> str:
         return self._stage(run_id, "risk_state", lambda: self.backend.risk_state(run_id))
 
+    def portfolio_requested(self, run_id: str) -> bool:
+        method = getattr(self.backend, "portfolio_requested", None)
+        return bool(method(run_id)) if callable(method) else True
+
     def build_portfolio(self, run_id: str, candidate_snapshot_id: str) -> str | None:
         return self._stage(
             run_id,
@@ -242,6 +252,19 @@ class ApplicationPipeline:
             run = session.get(JobRun, run_id)
             if run is None:
                 raise KeyError(run_id)
+            if run.status in {"CANCEL_REQUESTED", "CANCELLED"}:
+                run.status = "CANCELLED"
+                run.active_research_key = None
+                run.error_message = None
+                run.completed_at = datetime.now(UTC)
+                AuditLogger(session).record(
+                    run_id,
+                    "RESEARCH_CANCELLED",
+                    "Daily research stopped before final completion",
+                    details={"boundary": "complete_run"},
+                )
+                session.commit()
+                return {"run_id": run_id, "status": "CANCELLED"}
             run.status = status
             run.error_message = None
             run.output_hash = stable_hash(output)

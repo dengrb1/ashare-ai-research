@@ -6,13 +6,26 @@ import { Empty, formatAmount, formatNumber, formatTime, Panel, StatusPill, today
 import { Sparkline } from '../components/Sparkline'
 
 export function DashboardPage() {
-  const { quotes, watchlist } = useMarket()
+  const { quotes, watchlist, positions, totalAssets, subscribe } = useMarket()
   const [runs, setRuns] = useState<Run[]>([])
   useEffect(() => { api.runs().then((data) => setRuns(unwrapList(data))).catch(() => setRuns([])) }, [])
+  useEffect(() => subscribe(positions.map((position) => position.symbol)), [positions.map((position) => position.symbol).sort().join(','), subscribe])
   const latest = runs[0]
   const quoteRows = watchlist.map((symbol) => quotes[symbol]).filter(Boolean).slice(0, 4)
-  const completed = runs.filter((run) => ['COMPLETED', 'SUCCESS', 'SUCCEEDED'].includes(run.status.toUpperCase())).length
+  const completed = runs.filter((run) => ['COMPLETED', 'SUCCESS', 'SUCCEEDED', 'FUSED'].includes(run.status.toUpperCase())).length
   const running = runs.filter((run) => ['PENDING', 'RUNNING', 'PROCESSING', 'QUEUED'].includes(run.status.toUpperCase())).length
+  const positionRows = positions.map((position) => {
+    const livePrice = quotes[position.symbol]?.price
+    const estimated = !(livePrice && livePrice > 0)
+    const referencePrice = estimated ? position.cost : livePrice
+    const costValue = position.cost * position.quantity
+    const marketValue = referencePrice * position.quantity
+    return { ...position, referencePrice, costValue, marketValue, pnl: marketValue - costValue, estimated }
+  })
+  const totalCost = positionRows.reduce((sum, position) => sum + position.costValue, 0)
+  const totalMarketValue = positionRows.reduce((sum, position) => sum + position.marketValue, 0)
+  const totalPnl = totalMarketValue - totalCost
+  const totalReturn = totalCost > 0 ? totalPnl / totalCost * 100 : 0
 
   return <div className="page-stack">
     <div className="hero-strip">
@@ -29,6 +42,11 @@ export function DashboardPage() {
       </div>) : <><div className="skeleton quote-card" /><div className="skeleton quote-card" /><div className="skeleton quote-card" /><div className="skeleton quote-card" /></>}
     </div>
     <div className="dashboard-grid">
+      <Panel title="模拟持仓盈亏" eyebrow="PAPER HOLDINGS" className="full-span">
+        <div className="hero-strip portfolio-summary-strip"><div className="hero-stat"><span>总成本</span><strong>{formatAmount(totalCost)}</strong></div><div className="hero-stat"><span>持仓总市值</span><strong>{formatAmount(totalMarketValue)}</strong><small>{totalAssets ? `账户总资金 ${formatAmount(totalAssets)}` : '未设置账户总资金'}</small></div><div className="hero-stat"><span>总浮动盈亏</span><strong className={totalPnl >= 0 ? 'price-up' : 'price-down'}>{totalPnl >= 0 ? '+' : ''}{formatAmount(totalPnl)}</strong></div><div className="hero-stat"><span>持仓收益率</span><strong className={totalReturn >= 0 ? 'price-up' : 'price-down'}>{totalReturn >= 0 ? '+' : ''}{formatNumber(totalReturn)}%</strong></div></div>
+        {positionRows.length ? <div className="table-wrap"><table><thead><tr><th>证券</th><th>数量</th><th>参考价</th><th>市值</th><th>浮动盈亏</th><th>收益率</th></tr></thead><tbody>{positionRows.map((position) => <tr key={position.symbol}><td><strong>{quotes[position.symbol]?.name || position.name || position.symbol}</strong><small>{position.symbol}</small></td><td>{position.quantity} 股</td><td>{formatNumber(position.referencePrice)}{position.estimated ? <small>成本价估算</small> : null}</td><td>{formatAmount(position.marketValue)}</td><td className={position.pnl >= 0 ? 'price-up' : 'price-down'}>{position.pnl >= 0 ? '+' : ''}{formatAmount(position.pnl)}</td><td className={position.pnl >= 0 ? 'price-up' : 'price-down'}>{position.costValue > 0 ? `${position.pnl >= 0 ? '+' : ''}${formatNumber(position.pnl / position.costValue * 100)}%` : '—'}</td></tr>)}</tbody></table></div> : <Empty title="暂无模拟持仓" description="在“我的资产”中录入持仓后，这里会每 15 秒刷新参考市值与盈亏" />}
+        <p className="form-hint">行情缺失时按持仓成本价估算并明确标注；实时行情不会写入研究快照。</p>
+      </Panel>
       <Panel title="研究流水线" eyebrow="DAILY PIPELINE" action={latest && <StatusPill status={latest.status} />}>
         {latest ? <div className="pipeline">
           {['冻结数据快照', '特征与 Agent 分析', '确定性综合评分', '候选过滤', '模拟组合与报告'].map((step, index) => <div className="pipeline-step" key={step}><span>{index + 1}</span><div><strong>{step}</strong><small>{index < 4 ? '依赖前序产物与哈希验证' : '发布可追溯结果'}</small></div><i /></div>)}

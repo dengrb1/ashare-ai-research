@@ -81,6 +81,11 @@ class UserSession(Base):
     )
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
     csrf_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    session_type: Mapped[str] = mapped_column(String(16), nullable=False, default="WEB")
+    refresh_token_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, unique=True, index=True
+    )
+    refresh_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     user_session_version: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -102,6 +107,19 @@ class UserAssetState(Base):
     )
     watchlist: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     positions: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    total_assets: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class UserResearchPreference(Base):
+    """Per-user automatic daily-research preference; automatic runs are opt-in."""
+
+    __tablename__ = "user_research_preferences"
+
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.user_id", ondelete="CASCADE"), primary_key=True
+    )
+    auto_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -389,8 +407,11 @@ class ScoreRow(Base):
     technical_score: Mapped[float] = mapped_column(Float, nullable=False)
     sentiment_score: Mapped[float] = mapped_column(Float, nullable=False)
     quality_confidence_score: Mapped[float] = mapped_column(Float, nullable=False)
+    base_total_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    dividend_bonus: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    event_risk_multiplier: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
     total_score: Mapped[float] = mapped_column(Float, nullable=False)
-    formula_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    formula_version: Mapped[str] = mapped_column(String(64), nullable=False)
     agent_bundle_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     evidence_bundle_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     feature_snapshot_id: Mapped[str] = mapped_column(String(36), nullable=False)
@@ -452,6 +473,7 @@ class BacktestRun(Base):
     artifacts: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     output_hash: Mapped[str | None] = mapped_column(String(64))
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -467,6 +489,45 @@ class ReportRow(Base):
     object_uri: Mapped[str] = mapped_column(Text, nullable=False)
     content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class TradePlanRow(Base):
+    __tablename__ = "trade_plans"
+    __table_args__ = (
+        Index("ix_trade_plan_user_report_created", "user_id", "report_id", "created_at"),
+        UniqueConstraint("active_trade_plan_key", name="uq_active_trade_plan_key"),
+    )
+
+    plan_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.user_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    report_id: Mapped[str] = mapped_column(ForeignKey("reports.report_id"), nullable=False)
+    run_id: Mapped[str] = mapped_column(ForeignKey("job_runs.run_id"), nullable=False)
+    trading_date: Mapped[date] = mapped_column(Date, nullable=False)
+    decision_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    objective: Mapped[str] = mapped_column(String(32), nullable=False)
+    symbols: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    budget_override: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    request_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    snapshot_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    optimizer_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    config_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt_version: Mapped[str | None] = mapped_column(String(64))
+    model_configuration: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    deterministic_result: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    ai_explanation: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    output_hash: Mapped[str | None] = mapped_column(String(64))
+    active_trade_plan_key: Mapped[str | None] = mapped_column(String(64), index=True)
+    object_uri: Mapped[str | None] = mapped_column(Text)
+    object_sha256: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_message: Mapped[str | None] = mapped_column(Text)
 
 
 class AuditEvent(Base):

@@ -59,6 +59,7 @@ def test_user_can_persist_editable_watchlist_and_simulated_positions() -> None:
 
         payload: dict[str, Any] = {
             "watchlist": ["600000.sh", "000001.SZ"],
+            "total_assets": 200_000,
             "positions": [
                 {
                     "symbol": "600000.sh",
@@ -73,15 +74,17 @@ def test_user_can_persist_editable_watchlist_and_simulated_positions() -> None:
         assert updated.status_code == 200
         assert updated.json()["watchlist"] == ["600000.SH", "000001.SZ"]
         assert updated.json()["positions"][0]["quantity"] == 300
+        assert updated.json()["total_assets"] == 200_000
 
         persisted = session.get(UserAssetState, "asset-user")
         assert persisted is not None
         assert persisted.positions[0]["symbol"] == "600000.SH"
+        assert persisted.total_assets == 200_000
         reloaded = client.get("/api/v1/assets").json()
         assert reloaded["watchlist"] == updated.json()["watchlist"]
         assert reloaded["positions"] == updated.json()["positions"]
 
-        invalid = client.put(
+        legacy_overallocation = client.put(
             "/api/v1/assets",
             json={
                 "watchlist": [],
@@ -97,7 +100,37 @@ def test_user_can_persist_editable_watchlist_and_simulated_positions() -> None:
                 ],
             },
         )
-        assert invalid.status_code == 422
+        assert legacy_overallocation.status_code == 200
+
+        without_target_weight = client.put(
+            "/api/v1/assets",
+            json={
+                "watchlist": ["600000.SH"],
+                "positions": [
+                    {
+                        "symbol": "600000.SH",
+                        "name": "浦发银行",
+                        "quantity": 300,
+                        "cost": 10.25,
+                    }
+                ],
+            },
+        )
+        assert without_target_weight.status_code == 200
+        assert without_target_weight.json()["positions"][0]["target_weight"] is None
+        assert without_target_weight.json()["total_assets"] == 200_000
+
+        cleared_total = client.put(
+            "/api/v1/assets",
+            json={
+                "watchlist": ["600000.SH"],
+                "positions": [],
+                "total_assets": None,
+            },
+        )
+        assert cleared_total.status_code == 200
+        assert cleared_total.json()["total_assets"] is None
+
         invalid_payloads = [
             {"watchlist": ["600000.SH", "600000.SH"], "positions": []},
             {"watchlist": ["not-a-symbol"], "positions": []},
@@ -133,6 +166,7 @@ def test_user_can_persist_editable_watchlist_and_simulated_positions() -> None:
                     for index in range(16)
                 ],
             },
+            {"watchlist": [], "positions": [], "total_assets": 0},
         ]
         for invalid_payload in invalid_payloads:
             assert client.put("/api/v1/assets", json=invalid_payload).status_code == 422
@@ -277,3 +311,34 @@ def test_user_asset_state_migration_creates_and_drops_expected_table() -> None:
         assert foreign_keys[0]["options"].get("ondelete") == "CASCADE"
         migration.downgrade()
         assert "user_asset_states" not in inspect(connection).get_table_names()
+
+
+def test_user_asset_total_assets_migration_adds_and_removes_column() -> None:
+    migration_path = ROOT / "migrations" / "versions" / "0009_user_asset_total_assets.py"
+    spec = spec_from_file_location("migration_0009_user_asset_total_assets", migration_path)
+    assert spec is not None and spec.loader is not None
+    migration = module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    engine = create_engine("sqlite+pysqlite://")
+    metadata = sa.MetaData()
+    sa.Table(
+        "user_asset_states",
+        metadata,
+        sa.Column("user_id", sa.String(36), primary_key=True),
+        sa.Column("watchlist", sa.JSON(), nullable=False),
+        sa.Column("positions", sa.JSON(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    )
+    metadata.create_all(engine)
+
+    with engine.begin() as connection:
+        migration.op = Operations(MigrationContext.configure(connection))
+        migration.upgrade()
+        assert "total_assets" in {
+            column["name"] for column in inspect(connection).get_columns("user_asset_states")
+        }
+        migration.downgrade()
+        assert "total_assets" not in {
+            column["name"] for column in inspect(connection).get_columns("user_asset_states")
+        }

@@ -3,8 +3,31 @@ from __future__ import annotations
 import argparse
 
 import uvicorn
+from sqlalchemy import create_engine, inspect
 
+from ashare_ai.core.config import get_settings
 from ashare_ai.doctor import format_doctor, run_doctor
+from ashare_ai.storage.models import Base
+
+
+def migrate_database() -> str:
+    """Bootstrap an empty database at head; migrate populated databases revision by revision."""
+
+    from alembic import command
+    from alembic.config import Config
+
+    config = Config("alembic.ini")
+    engine = create_engine(get_settings().database_url)
+    try:
+        table_names = set(inspect(engine).get_table_names()) - {"alembic_version"}
+        if not table_names:
+            Base.metadata.create_all(engine)
+            command.stamp(config, "head")
+            return "bootstrapped"
+        command.upgrade(config, "head")
+        return "upgraded"
+    finally:
+        engine.dispose()
 
 
 def main() -> None:
@@ -25,10 +48,7 @@ def main() -> None:
     if args.command == "api":
         uvicorn.run("ashare_ai.api.app:app", host=args.host, port=args.port)
     elif args.command == "migrate":
-        from alembic import command
-        from alembic.config import Config
-
-        command.upgrade(Config("alembic.ini"), "head")
+        migrate_database()
     elif args.command == "doctor":
         checks = run_doctor(check_market=not args.skip_market)
         print(format_doctor(checks))

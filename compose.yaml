@@ -114,6 +114,31 @@ services:
       timeout: 5s
       retries: 5
 
+  trade-plan-worker:
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    command: ["python", "-m", "ashare_ai.orchestration.trade_plan_worker"]
+    env_file: [.env, .env.docker]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    volumes:
+      - lake-data:/data/lake
+      - object-data:/data/objects
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import redis; from ashare_ai.core.config import get_settings; assert redis.Redis.from_url(get_settings().redis_url).ping()"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
   postgres:
     image: postgres:16-alpine
     environment:
@@ -141,7 +166,7 @@ services:
 
   minio:
     image: minio/minio:latest
-    command: ["server", "/data", "--console-address", ":9001"]
+    command: ["server", "/data", "--address", ":9000", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin

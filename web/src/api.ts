@@ -1,4 +1,4 @@
-import type { AssetState, AuditEvent, Candidate, DataEnvelope, FinancialSearchResult, FinancialSearchStatus, KlineBar, MarketPrefetchResponse, ModelSettings, ModelSettingsDraft, Portfolio, Quote, Report, Run, Score, Snapshot, User } from './types'
+import type { AssetState, AuditEvent, Candidate, DataEnvelope, FinancialSearchResult, FinancialSearchStatus, KlineBar, KlineQueryOptions, MarketPrefetchResponse, ModelSettings, ModelSettingsDraft, Portfolio, Quote, Report, ResearchSettings, ResearchSubmission, Run, Score, Snapshot, TokenPair, TradePlan, User } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api/v1').replace(/\/$/, '')
 
@@ -54,13 +54,16 @@ function params(values: Record<string, string | number | undefined>) {
 
 export const api = {
   login: (username: string, password: string) => request<User>('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
+  token: (username: string, password: string) => request<TokenPair>('/auth/token', { method: 'POST', body: JSON.stringify({ username, password }) }),
+  refreshToken: (refreshToken: string) => request<TokenPair>('/auth/refresh', { method: 'POST', body: JSON.stringify({ refresh_token: refreshToken }) }),
+  revokeToken: (refreshToken: string) => request<void>('/auth/revoke', { method: 'POST', body: JSON.stringify({ refresh_token: refreshToken }) }),
   logout: () => request<void>('/auth/logout', { method: 'POST' }),
   me: () => request<User>('/auth/me'),
   assets: () => request<AssetState>('/assets'),
   saveAssets: (payload: AssetState) => request<AssetState>('/assets', { method: 'PUT', body: JSON.stringify(payload) }),
 
-  quotes: async (symbols: string[]) => {
-    const rows = await request<Array<Quote & { change_percent?: number; previous_close?: number }>>(`/market/quotes${params({ symbols: symbols.join(',') })}`)
+  quotes: async (symbols: string[], refresh = false) => {
+    const rows = await request<Array<Quote & { change_percent?: number; previous_close?: number }>>(`/market/quotes${params({ symbols: symbols.join(','), refresh: refresh ? 'true' : undefined })}`)
     return rows.map((row) => ({
       ...row,
       price: row.price ?? 0,
@@ -73,8 +76,16 @@ export const api = {
       is_delayed: row.is_delayed ?? row.status?.delayed,
     })) as Quote[]
   },
-  kline: async (symbol: string, period: string, limit = 160) => {
-    const payload = await request<DataEnvelope<KlineBar[]> & { bars: KlineBar[] }>(`/market/klines/${encodeURIComponent(symbol)}${params({ period, limit, adjust: 'hfq' })}`)
+  kline: async (symbol: string, period: string, limit = 160, options: KlineQueryOptions | boolean = {}) => {
+    const query = typeof options === 'boolean' ? { refresh: options } : options
+    const payload = await request<DataEnvelope<KlineBar[]> & { bars: KlineBar[] }>(`/market/klines/${encodeURIComponent(symbol)}${params({
+      period,
+      limit,
+      adjust: 'hfq',
+      start: query.start,
+      end: query.end,
+      refresh: query.refresh ? 'true' : undefined,
+    })}`)
     return { ...payload, bars: (payload.bars || []).map((bar) => ({ ...bar, time: bar.time || bar.timestamp })) }
   },
   prefetchMarket: async (symbols: string[], periods = ['day'], limit = 160) => {
@@ -104,18 +115,28 @@ export const api = {
   financialSearchStatus: () => request<FinancialSearchStatus>('/search/status'),
 
   scores: (date: string, runId?: string) => request<Score[]>(`/scores/${date}${params({ run_id: runId })}`),
+  score: (date: string, symbol: string, runId?: string) => request<Score>(`/scores/${date}/${encodeURIComponent(symbol)}${params({ run_id: runId })}`),
+  scoreLineage: (date: string, symbol: string, runId?: string) => request<Record<string, unknown>>(`/scores/${date}/${encodeURIComponent(symbol)}/lineage${params({ run_id: runId })}`),
   candidates: (date: string, runId?: string) => request<Candidate[]>(`/candidates/${date}${params({ run_id: runId })}`),
   portfolio: (date: string, runId?: string) => request<Portfolio>(`/portfolios/${date}${params({ run_id: runId })}`),
   report: (date: string, runId?: string) => request<Report>(`/reports/${date}${params({ run_id: runId })}`),
   reportContent: (reportId: string) => request<{ content?: string; body?: string }>(`/reports/${reportId}/content`),
+  reportTradePlans: (reportId: string) => request<TradePlan[]>(`/reports/${reportId}/trade-plans`),
+  submitTradePlan: (reportId: string, payload: { symbols: string[]; budget_override?: number; objective?: 'RISK_ADJUSTED_RETURN' }) => request<TradePlan>(`/reports/${reportId}/trade-plans`, { method: 'POST', body: JSON.stringify(payload) }),
+  tradePlan: (planId: string) => request<TradePlan>(`/trade-plans/${planId}`),
 
-  submitResearch: (tradingDate: string) => request<Run>('/research/runs', { method: 'POST', body: JSON.stringify({ trading_date: tradingDate }) }),
+  submitResearch: (payload: string | ResearchSubmission) => request<Run>('/research/runs', { method: 'POST', body: JSON.stringify(typeof payload === 'string' ? { trading_date: payload } : payload) }),
+  researchSettings: () => request<ResearchSettings>('/research/settings'),
+  saveResearchSettings: (autoEnabled: boolean) => request<ResearchSettings>('/research/settings', { method: 'PUT', body: JSON.stringify({ auto_enabled: autoEnabled }) }),
+  researchRuns: (limit = 5, tradingDate?: string) => request<Run[]>(`/research/runs${params({ limit, trading_date: tradingDate, mine: 'true' })}`),
+  cancelResearch: (runId: string) => request<Run>(`/research/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' }),
   runs: () => request<Run[] | { items: Run[] }>('/runs'),
   run: (runId: string) => request<Run>(`/runs/${runId}`),
   audit: (runId: string) => request<AuditEvent[]>(`/runs/${runId}/audit`),
   submitBacktest: (payload: { name: string; start_date: string; end_date: string; snapshot_ids: string[]; config: Record<string, unknown> }) => request<Run>('/backtests', { method: 'POST', body: JSON.stringify(payload) }),
   backtest: (backtestId: string) => request<Run>(`/backtests/${backtestId}`),
   backtests: () => request<Run[] | { items: Run[] }>('/backtests'),
+  retryBacktest: (backtestId: string) => request<Run>(`/backtests/${backtestId}/retry`, { method: 'POST' }),
   snapshots: () => request<Snapshot[]>('/snapshots?dataset=backtest_bundle'),
 
   users: () => request<User[]>('/admin/users'),

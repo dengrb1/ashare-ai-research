@@ -96,7 +96,6 @@ def test_builtin_executor_rejects_hash_schema_non_raw_and_future_data(
             },
             snapshot_uris={"snapshot-1": uri},
         )
-
     missing_path = tmp_path / "missing-column.parquet"
     missing_table = pa.Table.from_pylist([{"kind": "BACKTEST_CONFIG"}]).replace_schema_metadata(
         {b"bundle_schema_version": b"1", b"snapshot_status": b"COMMITTED"}
@@ -148,6 +147,35 @@ def test_builtin_executor_rejects_hash_schema_non_raw_and_future_data(
             },
             snapshot_uris={"snapshot-4": future_uri},
         )
+
+
+def test_builtin_executor_records_industry_change_warning_and_attribution(tmp_path: Path) -> None:
+    bundle = _bundle()
+    changed_signals = list(bundle.signals)
+    changed_signals[1] = changed_signals[1].model_copy(
+        update={"industry_code": "PLACEHOLDER_3"}
+    )
+    changed = bundle.model_copy(update={"signals": tuple(changed_signals)})
+    uri, digest = write_backtest_bundle(tmp_path / "industry-change.parquet", changed)
+    output = BuiltinBacktestExecutor().execute(
+        backtest_id="industry-change",
+        config={
+            "artifact_root": str(tmp_path / "artifacts"),
+            "snapshot_file_hashes": {"snapshot-1": digest},
+        },
+        snapshot_uris={"snapshot-1": uri},
+    )
+    assert "BANK -> PLACEHOLDER_3" in output.metrics["warnings"][0]
+    assert output.metrics["industry_classification_changes"][0]["symbol"] == "600000.SH"
+    attribution = json.loads(
+        _uri_path(output.artifacts["attribution"]["uri"]).read_text(encoding="utf-8")
+    )
+    assert attribution["attribution_method"] == (
+        "latest-research-industry-at-or-before-terminal-exposure-date"
+    )
+    assert attribution["industry_classification_changes"][0]["new_industry_code"] == (
+        "PLACEHOLDER_3"
+    )
 
 
 def _bundle() -> BacktestBundle:

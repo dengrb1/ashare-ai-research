@@ -102,6 +102,20 @@ def test_research_worker_executes_existing_frozen_run() -> None:
         assert events[0].event_type == "RESEARCH_STARTED"
 
 
+def test_research_worker_skips_portfolio_for_small_targeted_research() -> None:
+    class ResearchOnlyPipeline(Pipeline):
+        def portfolio_requested(self, run_id):
+            del run_id
+            return False
+
+    factory = _factory()
+    pipeline = ResearchOnlyPipeline()
+    result = execute_research_job("research-run", pipeline=pipeline, session_factory=factory)
+    assert result["status"] == "SUCCEEDED"
+    assert "portfolio" not in pipeline.calls
+    assert pipeline.calls[-2:] == ["report", "complete"]
+
+
 def test_research_worker_persists_failure_reason() -> None:
     factory = _factory()
     with pytest.raises(RuntimeError, match="failed at features"):

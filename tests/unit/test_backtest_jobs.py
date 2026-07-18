@@ -10,7 +10,7 @@ from ashare_ai.orchestration.backtest_jobs import (
     execute_backtest_job,
     mark_backtest_failed,
 )
-from ashare_ai.storage.models import BacktestRun, Base, JobRun, SnapshotManifestRow
+from ashare_ai.storage.models import AuditEvent, BacktestRun, Base, JobRun, SnapshotManifestRow
 
 
 class Executor:
@@ -124,3 +124,9 @@ def test_executor_load_or_snapshot_failure_is_persisted() -> None:
         assert backtest is not None and backtest.status == "FAILED"
         assert run is not None and run.status == "FAILED"
         assert run.error_message == "executor unavailable"
+    mark_backtest_failed(
+        "failed-backtest", RuntimeError("executor unavailable"), session_factory=factory
+    )
+    with factory() as session:
+        events = session.query(AuditEvent).filter(AuditEvent.event_type == "BACKTEST_FAILED").all()
+        assert len(events) == 1

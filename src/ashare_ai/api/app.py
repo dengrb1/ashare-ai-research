@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Annotated, Any
 from uuid import uuid4
 
@@ -23,10 +25,13 @@ from ashare_ai.api.auth import (
     bootstrap_admin,
     clear_auth_cookies,
     create_session,
+    create_token_session,
     hash_password,
     invalidate_user_sessions,
     require_admin,
+    revoke_refresh_token,
     revoke_session,
+    rotate_refresh_token,
 )
 from ashare_ai.api.dependencies import get_auth_context, get_db, get_write_context
 from ashare_ai.api.schemas import (
@@ -48,25 +53,46 @@ from ashare_ai.api.schemas import (
     PasswordResetRequest,
     PortfolioResponse,
     QuoteResponse,
+    RefreshTokenRequest,
     ReportBodyResponse,
     ReportResponse,
     ResearchRequest,
+    ResearchRunResponse,
+    ResearchSettingsRequest,
+    ResearchSettingsResponse,
     RunListResponse,
     RunResponse,
     ScoreResponse,
     SnapshotResponse,
+    TokenResponse,
+    TradePlanRequest,
+    TradePlanResponse,
     UserCreateRequest,
     UserResponse,
     UserUpdateRequest,
 )
 from ashare_ai.core.config import get_settings
-from ashare_ai.core.hashing import stable_hash
+from ashare_ai.core.hashing import sha256_bytes, stable_hash
+from ashare_ai.core.time import SHANGHAI
 from ashare_ai.market.service import get_market_data_service
 from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.orchestration.backtest_jobs import enqueue_backtest
+from ashare_ai.orchestration.builtin_backtest import read_backtest_bundle
 from ashare_ai.orchestration.daily import load_pipeline
 from ashare_ai.orchestration.research_jobs import enqueue_research
-from ashare_ai.portfolio.user_assets import UserAssetService
+from ashare_ai.orchestration.research_schedule import (
+    AKShareDataReadiness,
+    FreeExchangeCalendar,
+    resolve_manual_research_date,
+)
+from ashare_ai.orchestration.research_settings import ResearchSettingsService
+from ashare_ai.orchestration.trade_plan_jobs import (
+    PROMPT_VERSION as TRADE_PLAN_PROMPT_VERSION,
+)
+from ashare_ai.orchestration.trade_plan_jobs import (
+    enqueue_trade_plan,
+)
+from ashare_ai.portfolio.user_assets import UNSET_TOTAL_ASSETS, UserAssetService
 from ashare_ai.search.service import (
     FinancialSearchBusyError,
     FinancialSearchResponse,
@@ -76,11 +102,15 @@ from ashare_ai.search.service import (
 )
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import (
+    AuditEvent,
     BacktestRun,
     CandidateRow,
     JobRun,
+    PortfolioRow,
     ReportRow,
+    ScoreRow,
     SnapshotManifestRow,
+    TradePlanRow,
     UserAccount,
 )
 from ashare_ai.storage.objects import LocalObjectStore, ObjectStore, S3ObjectStore
@@ -125,12 +155,157 @@ def _result_access(context: AuthContext) -> dict[str, Any]:
     }
 
 
+def _manual_research_date(requested_date: date, now: datetime) -> date:
+    current = now.astimezone(SHANGHAI) if now.tzinfo is not None else now.replace(tzinfo=SHANGHAI)
+    if requested_date > current.date():
+        raise HTTPException(
+            status_code=422, detail="research requested_date cannot be in the future"
+        )
+    if requested_date < current.date() and requested_date.weekday() < 5:
+        return requested_date
+    try:
+        sessions = FreeExchangeCalendar().sessions(
+            requested_date - timedelta(days=20), current.date()
+        )
+        readiness = AKShareDataReadiness()
+        return resolve_manual_research_date(
+            requested_date=requested_date,
+            now=current,
+            sessions=sessions,
+            data_ready=lambda value: readiness.ready(value, current),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="no completed trading session with ready data is available",
+        ) from exc
+
+
+def _trade_plan_policy_payload(run: JobRun) -> dict[str, Any]:
+    manifest = run.manifest if isinstance(run.manifest, dict) else {}
+    configured_path = manifest.get("policy_config_path")
+    path = Path(str(configured_path)) if configured_path else get_settings().policy_config_path
+    if not path.is_file():
+        raise HTTPException(status_code=409, detail="pinned policy configuration is unavailable")
+    payload = path.read_bytes()
+    expected_hash = manifest.get("policy_config_sha256", manifest.get("policy_sha256"))
+    if isinstance(expected_hash, str) and expected_hash and sha256_bytes(payload) != expected_hash:
+        raise HTTPException(status_code=409, detail="pinned policy configuration hash mismatch")
+    parsed = json.loads(payload)
+    policy = parsed.get("trade_plan") if isinstance(parsed, dict) else None
+    if isinstance(policy, dict):
+        return policy
+    return {
+        "history_sessions": 240,
+        "training_sessions": 160,
+        "validation_sessions": 80,
+        "entry_step_sessions": 10,
+        "minimum_completed_trades": 5,
+        "maximum_drawdown": 0.12,
+        "entry_discounts": [0, 0.01, 0.02],
+        "take_profits": [0.08, 0.12, 0.16],
+        "stop_losses": [0.05, 0.08, 0.10],
+        "trailing_stops": [0.05, 0.08],
+        "maximum_holding_sessions": [10, 20, 40, 60],
+        "entry_valid_sessions": 3,
+        "score_exit_threshold": 60,
+    }
+
+
 def _backtest_response(db: Session, row: BacktestRun) -> BacktestResponse:
     job = db.get(JobRun, row.run_id) if row.run_id else None
     return BacktestResponse.model_validate(
         {
             **{column.name: getattr(row, column.name) for column in row.__table__.columns},
             "error_message": job.error_message if job else None,
+        }
+    )
+
+
+_RESEARCH_PHASES = {
+    "sync_reference_data": ("同步参考数据", 10),
+    "ingest_and_verify": ("冻结并校验快照", 22),
+    "build_universe": ("构建可交易池", 34),
+    "build_features": ("计算研究特征", 46),
+    "run_research_agents": ("执行结构化研究", 60),
+    "calculate_scores": ("生成确定性评分", 72),
+    "qlib_filter": ("筛选候选池", 82),
+    "risk_state": ("评估组合风控", 88),
+    "build_portfolio": ("生成模拟组合", 94),
+    "publish_report": ("发布研究报告", 98),
+}
+
+
+def _research_run_response(db: Session, row: JobRun) -> ResearchRunResponse:
+    report = db.scalar(
+        select(ReportRow)
+        .where(ReportRow.run_id == row.run_id)
+        .order_by(ReportRow.created_at.desc())
+        .limit(1)
+    )
+    normalized = row.status.upper()
+    if normalized in {"SUCCEEDED", "FUSED"}:
+        phase, progress = (
+            ("观察模式报告已发布", 100)
+            if normalized == "FUSED"
+            else ("研究结果已发布", 100)
+        )
+    elif normalized in {"FAILED", "CANCEL_REQUESTED", "CANCELLED"}:
+        latest = db.scalar(
+            select(AuditEvent)
+            .where(AuditEvent.run_id == row.run_id, AuditEvent.event_type == "STAGE_COMPLETED")
+            .order_by(AuditEvent.created_at.desc())
+            .limit(1)
+        )
+        stage = str(latest.details.get("stage", "")) if latest is not None else ""
+        _, progress = _RESEARCH_PHASES.get(stage, ("", 5))
+        phase = {
+            "FAILED": "研究失败",
+            "CANCEL_REQUESTED": "正在停止（当前阶段完成后）",
+            "CANCELLED": "研究已停止",
+        }[normalized]
+    elif normalized in {"PENDING", "QUEUED"}:
+        phase, progress = "等待 Worker", 0
+    else:
+        latest = db.scalar(
+            select(AuditEvent)
+            .where(AuditEvent.run_id == row.run_id, AuditEvent.event_type == "STAGE_COMPLETED")
+            .order_by(AuditEvent.created_at.desc())
+            .limit(1)
+        )
+        stage = str(latest.details.get("stage", "")) if latest is not None else ""
+        phase, progress = _RESEARCH_PHASES.get(stage, ("启动研究流水线", 5))
+    manifest = dict(row.manifest or {})
+    budget = manifest.get("research_budget")
+    budget = budget if isinstance(budget, dict) else {}
+    gate = manifest.get("data_quality_gate")
+    gate = gate if isinstance(gate, dict) else {}
+    risk_outcome = manifest.get("risk_outcome")
+    risk_outcome = risk_outcome if isinstance(risk_outcome, dict) else {}
+    portfolio_generated = db.scalar(
+        select(PortfolioRow.portfolio_id).where(PortfolioRow.run_id == row.run_id).limit(1)
+    ) is not None
+    return ResearchRunResponse.model_validate(
+        {
+            **{column.name: getattr(row, column.name) for column in row.__table__.columns},
+            "phase": phase,
+            "progress": progress,
+            "report_id": report.report_id if report else None,
+            "report_type": report.report_type if report else None,
+            "report_created_at": report.created_at if report else None,
+            "research_scope": manifest.get("research_scope", "MARKET"),
+            "target_symbols": manifest.get("target_symbols", []),
+            "total_budget": budget.get("total_budget"),
+            "per_symbol_budget": budget.get("per_symbol_budget"),
+            "max_stock_price": budget.get("max_stock_price"),
+            "portfolio_requested": bool(manifest.get("portfolio_requested", True)),
+            "portfolio_generated": portfolio_generated,
+            "reason_code": risk_outcome.get("reason_code"),
+            "reason_message": risk_outcome.get("reason_message"),
+            "formal_eligible_count": gate.get("formal_eligible_count"),
+            "excluded_symbol_count": len(gate.get("excluded_symbols", {})),
+            "trigger_source": manifest.get("trigger_source", "MANUAL"),
+            "requested_date": manifest.get("requested_date", row.trading_date),
         }
     )
 
@@ -161,6 +336,37 @@ def login(
     return UserResponse.model_validate(user)
 
 
+@app.post("/api/v1/auth/token", response_model=TokenResponse)
+def issue_token(payload: LoginRequest, request: Request, db: DbSession) -> TokenResponse:
+    bootstrap_admin(db)
+    user = authenticate(db, payload.username, payload.password)
+    if user is None:
+        raise HTTPException(status_code=401, detail="invalid username or password")
+    pair = create_token_session(db, user, request)
+    return TokenResponse(
+        access_token=pair.access_token,
+        expires_in=pair.access_expires_in,
+        refresh_token=pair.refresh_token,
+        refresh_expires_in=pair.refresh_expires_in,
+    )
+
+
+@app.post("/api/v1/auth/refresh", response_model=TokenResponse)
+def refresh_token(payload: RefreshTokenRequest, db: DbSession) -> TokenResponse:
+    pair = rotate_refresh_token(db, payload.refresh_token)
+    return TokenResponse(
+        access_token=pair.access_token,
+        expires_in=pair.access_expires_in,
+        refresh_token=pair.refresh_token,
+        refresh_expires_in=pair.refresh_expires_in,
+    )
+
+
+@app.post("/api/v1/auth/revoke", status_code=status.HTTP_204_NO_CONTENT)
+def revoke_token(payload: RefreshTokenRequest, db: DbSession) -> None:
+    revoke_refresh_token(db, payload.refresh_token)
+
+
 @app.post("/api/v1/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
 def logout(response: Response, db: DbSession, context: Writer) -> None:
     revoke_session(db, context)
@@ -184,7 +390,10 @@ def update_asset_state(
     state = UserAssetService(db).save(
         context.user.user_id,
         payload.watchlist,
-        [position.model_dump(mode="json") for position in payload.positions],
+        [position.model_dump(mode="json", exclude_none=True) for position in payload.positions],
+        payload.total_assets
+        if "total_assets" in payload.model_fields_set
+        else UNSET_TOTAL_ASSETS,
     )
     return AssetStateResponse.model_validate(state)
 
@@ -408,6 +617,9 @@ def score_lineage(
         "agent_bundle_sha256": row.agent_bundle_sha256,
         "evidence_bundle_sha256": row.evidence_bundle_sha256,
         "formula_version": row.formula_version,
+        "base_total_score": row.base_total_score,
+        "dividend_bonus": row.dividend_bonus,
+        "event_risk_multiplier": row.event_risk_multiplier,
         "evidence": [
             {
                 "evidence_id": item.evidence_id,
@@ -429,11 +641,35 @@ def score_lineage(
 def candidates(
     trading_date: date, db: DbSession, context: Current, run_id: str | None = None
 ) -> list[CandidateResponse]:
+    rows = QueryRepository(db).candidates(
+        trading_date, run_id=run_id, **_result_access(context)
+    )
+    scores = {
+        (item.run_id, item.symbol): item
+        for item in db.scalars(
+            select(ScoreRow).where(
+                ScoreRow.run_id.in_({row.run_id for row in rows}),
+                ScoreRow.symbol.in_({row.symbol for row in rows}),
+            )
+        ).all()
+    } if rows else {}
     return [
-        CandidateResponse.model_validate(row)
-        for row in QueryRepository(db).candidates(
-            trading_date, run_id=run_id, **_result_access(context)
+        CandidateResponse.model_validate(
+            {
+                **{column.name: getattr(row, column.name) for column in row.__table__.columns},
+                "base_total_score": (
+                    scores[(row.run_id, row.symbol)].base_total_score
+                    if (row.run_id, row.symbol) in scores
+                    else row.total_score
+                ),
+                "dividend_bonus": (
+                    scores[(row.run_id, row.symbol)].dividend_bonus
+                    if (row.run_id, row.symbol) in scores
+                    else 0
+                ),
+            }
         )
+        for row in rows
     ]
 
 
@@ -441,8 +677,54 @@ def candidates(
 def portfolio(
     trading_date: date, db: DbSession, context: Current, run_id: str | None = None
 ) -> PortfolioResponse:
-    row = QueryRepository(db).portfolio(trading_date, run_id=run_id, **_result_access(context))
+    repository = QueryRepository(db)
+    selected_run_id = repository.result_run_id(
+        trading_date, run_id, **_result_access(context)
+    )
+    selected_run = db.get(JobRun, selected_run_id) if selected_run_id else None
+    if selected_run is not None and selected_run.status == "FUSED":
+        manifest = dict(selected_run.manifest or {})
+        gate = manifest.get("data_quality_gate")
+        gate = gate if isinstance(gate, dict) else {}
+        risk_outcome = manifest.get("risk_outcome")
+        risk_outcome = risk_outcome if isinstance(risk_outcome, dict) else {}
+        return PortfolioResponse(
+            run_id=selected_run.run_id,
+            trading_date=trading_date,
+            status="FUSED",
+            observation_only=True,
+            message=str(
+                risk_outcome.get("reason_message")
+                or "正式组合条件未满足，当前仅发布观察报告"
+            ),
+            reason_code=(
+                str(risk_outcome["reason_code"])
+                if risk_outcome.get("reason_code")
+                else None
+            ),
+            formal_eligible_symbols=list(gate.get("formal_eligible_symbols", [])),
+            excluded_symbols=dict(gate.get("excluded_symbols", {})),
+        )
+    row = repository.portfolio(trading_date, run_id=run_id, **_result_access(context))
     if row is None:
+        manifest = dict(selected_run.manifest or {}) if selected_run is not None else {}
+        outcome = manifest.get("portfolio_outcome")
+        outcome = outcome if isinstance(outcome, dict) else {}
+        if selected_run is not None and selected_run.status == "SUCCEEDED" and (
+            not bool(manifest.get("portfolio_requested", True))
+            or outcome.get("generated") is False
+        ):
+            reason = manifest.get("research_only_reason")
+            failure = outcome.get("reason")
+            if not reason and isinstance(failure, dict):
+                reason = failure.get("message")
+            return PortfolioResponse(
+                run_id=selected_run.run_id,
+                trading_date=trading_date,
+                status="SUCCEEDED",
+                research_only=True,
+                message=str(reason or "本次研究未请求生成模拟组合"),
+            )
         raise HTTPException(status_code=404, detail="portfolio not found")
     return PortfolioResponse.model_validate(row)
 
@@ -483,6 +765,194 @@ def report_content(report_id: str, db: DbSession, context: Current) -> ReportBod
     return ReportBodyResponse(report_id=row.report_id, content_type="text/html", content=content)
 
 
+@app.post(
+    "/api/v1/reports/{report_id}/trade-plans",
+    response_model=TradePlanResponse,
+    status_code=202,
+)
+def submit_trade_plan(
+    report_id: str,
+    payload: TradePlanRequest,
+    response: Response,
+    db: DbSession,
+    context: Writer,
+) -> TradePlanResponse:
+    report_row = db.get(ReportRow, report_id)
+    if report_row is None:
+        raise HTTPException(status_code=404, detail="report not found")
+    run = db.get(JobRun, report_row.run_id)
+    if run is None or not _owns(run, context):
+        raise HTTPException(status_code=404, detail="report not found")
+    if run.status != "SUCCEEDED":
+        raise HTTPException(
+            status_code=409,
+            detail="FUSED or incomplete research runs cannot generate a buy plan",
+        )
+    candidates = list(
+        db.scalars(
+            select(CandidateRow).where(
+                CandidateRow.run_id == run.run_id,
+                CandidateRow.symbol.in_(payload.symbols),
+            )
+        ).all()
+    )
+    by_symbol = {item.symbol: item for item in candidates}
+    missing = sorted(set(payload.symbols) - set(by_symbol))
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"symbols are not formal candidates of this report: {missing}",
+        )
+    blocked = sorted(
+        symbol for symbol, item in by_symbol.items() if item.event_risk_multiplier <= 0
+    )
+    if blocked:
+        raise HTTPException(
+            status_code=409,
+            detail=f"CRITICAL-risk candidates cannot generate a buy plan: {blocked}",
+        )
+    gate = run.manifest.get("data_quality_gate", {}) if isinstance(run.manifest, dict) else {}
+    if isinstance(gate, dict) and gate.get("passed") is False:
+        raise HTTPException(status_code=409, detail="research data-quality gate did not pass")
+    snapshot = db.scalar(
+        select(SnapshotManifestRow)
+        .where(
+            SnapshotManifestRow.run_id == run.run_id,
+            SnapshotManifestRow.dataset == "backtest_bundle",
+            SnapshotManifestRow.status == "COMMITTED",
+        )
+        .order_by(SnapshotManifestRow.committed_at.desc())
+        .limit(1)
+    )
+    if snapshot is None:
+        raise HTTPException(status_code=409, detail="report has no committed backtest snapshot")
+    if len(snapshot.details.get("future_trading_dates", [])) < 3:
+        raise HTTPException(
+            status_code=409,
+            detail="report snapshot lacks three frozen future trading sessions",
+        )
+    request_payload = {
+        **payload.model_dump(mode="json"),
+        "optimizer_policy": _trade_plan_policy_payload(run),
+    }
+    active_key = stable_hash(
+        {
+            "kind": "ACTIVE_TRADE_PLAN",
+            "user_id": context.user.user_id,
+            "report_id": report_id,
+            "symbols": payload.symbols,
+            "budget_override": payload.budget_override,
+            "objective": payload.objective,
+        }
+    )
+    existing = db.scalar(
+        select(TradePlanRow).where(TradePlanRow.active_trade_plan_key == active_key)
+    )
+    if existing is not None and existing.status in {"PENDING", "RUNNING"}:
+        response.status_code = 200
+        return TradePlanResponse.model_validate(existing)
+    now = datetime.now(UTC)
+    model_reference = (
+        run.manifest.get("model_configuration") if isinstance(run.manifest, dict) else None
+    )
+    row = TradePlanRow(
+        user_id=context.user.user_id,
+        report_id=report_id,
+        run_id=run.run_id,
+        trading_date=run.trading_date,
+        decision_at=run.decision_at,
+        available_at=now,
+        status="PENDING",
+        objective=payload.objective,
+        symbols=payload.symbols,
+        budget_override=payload.budget_override,
+        request_payload=request_payload,
+        snapshot_ids=[snapshot.snapshot_id],
+        optimizer_version="trade-plan-grid-oos-v1",
+        config_version=str(run.manifest.get("policy_version", "unknown")),
+        prompt_version=TRADE_PLAN_PROMPT_VERSION,
+        model_configuration=(model_reference if isinstance(model_reference, dict) else None),
+        input_hash=stable_hash(
+            {
+                "request": request_payload,
+                "run_input_hash": run.input_hash,
+                "snapshot_id": snapshot.snapshot_id,
+                "snapshot_hash": snapshot.payload_sha256,
+                "optimizer_version": "trade-plan-grid-oos-v1",
+            }
+        ),
+        active_trade_plan_key=active_key,
+        created_at=now,
+    )
+    db.add(row)
+    db.flush()
+    AuditLogger(db).record(
+        run.run_id,
+        "TRADE_PLAN_SUBMITTED",
+        "Trade Plan queued from immutable research report",
+        details={
+            "plan_id": row.plan_id,
+            "report_id": report_id,
+            "symbols": payload.symbols,
+            "snapshot_ids": row.snapshot_ids,
+            "input_hash": row.input_hash,
+        },
+    )
+    try:
+        db.commit()
+        enqueue_trade_plan(row.plan_id)
+    except IntegrityError as exc:
+        db.rollback()
+        winner = db.scalar(
+            select(TradePlanRow).where(TradePlanRow.active_trade_plan_key == active_key)
+        )
+        if winner is None:
+            raise HTTPException(status_code=409, detail="trade plan submission conflicted") from exc
+        response.status_code = 200
+        return TradePlanResponse.model_validate(winner)
+    except Exception as exc:
+        failed = db.get(TradePlanRow, row.plan_id)
+        if failed is not None:
+            failed.status = "FAILED"
+            failed.active_trade_plan_key = None
+            failed.error_message = str(exc)
+            failed.completed_at = datetime.now(UTC)
+            db.commit()
+        raise HTTPException(status_code=503, detail="trade plan queue unavailable") from exc
+    return TradePlanResponse.model_validate(row)
+
+
+@app.get(
+    "/api/v1/reports/{report_id}/trade-plans",
+    response_model=list[TradePlanResponse],
+)
+def report_trade_plans(
+    report_id: str, db: DbSession, context: Current
+) -> list[TradePlanResponse]:
+    report_row = db.get(ReportRow, report_id)
+    if report_row is None:
+        raise HTTPException(status_code=404, detail="report not found")
+    run = db.get(JobRun, report_row.run_id)
+    if run is None or not _owns(run, context):
+        raise HTTPException(status_code=404, detail="report not found")
+    rows = db.scalars(
+        select(TradePlanRow)
+        .where(TradePlanRow.report_id == report_id)
+        .order_by(TradePlanRow.created_at.desc())
+    ).all()
+    return [TradePlanResponse.model_validate(item) for item in rows]
+
+
+@app.get("/api/v1/trade-plans/{plan_id}", response_model=TradePlanResponse)
+def trade_plan(plan_id: str, db: DbSession, context: Current) -> TradePlanResponse:
+    row = db.get(TradePlanRow, plan_id)
+    if row is None or (
+        context.user.role != "ADMIN" and row.user_id != context.user.user_id
+    ):
+        raise HTTPException(status_code=404, detail="trade plan not found")
+    return TradePlanResponse.model_validate(row)
+
+
 @app.get("/api/v1/snapshots", response_model=list[SnapshotResponse])
 def snapshots(
     db: DbSession,
@@ -518,11 +988,43 @@ def snapshots(
 def submit_research(
     payload: ResearchRequest, response: Response, db: DbSession, context: Writer
 ) -> RunResponse:
+    requested_date = payload.trading_date
+    actual_research_date = _manual_research_date(requested_date, datetime.now(SHANGHAI))
+    if payload.scope == "WATCHLIST":
+        assets = UserAssetService(db).get(context.user.user_id)
+        target_symbols: list[str] = sorted(
+            set(str(symbol) for symbol in assets.get("watchlist", []))
+            | {
+                str(position.get("symbol", "")).upper()
+                for position in assets.get("positions", [])
+                if position.get("symbol")
+            }
+        )
+        if not target_symbols:
+            raise HTTPException(status_code=422, detail="自选股与持仓为空，无法发起定向研究")
+    elif payload.scope == "CUSTOM":
+        target_symbols = list(payload.symbols)
+    else:
+        target_symbols = []
+    research_budget = {
+        "total_budget": str(payload.total_budget) if payload.total_budget is not None else None,
+        "per_symbol_budget": (
+            str(payload.per_symbol_budget) if payload.per_symbol_budget is not None else None
+        ),
+        "max_stock_price": (
+            str(payload.max_stock_price) if payload.max_stock_price is not None else None
+        ),
+    }
+    portfolio_requested = payload.scope == "MARKET" or len(target_symbols) >= 15
     active_key = stable_hash(
         {
             "kind": "ACTIVE_DAILY_RESEARCH",
+            "trigger_source": "MANUAL",
             "user_id": context.user.user_id,
-            "trading_date": payload.trading_date,
+            "trading_date": actual_research_date,
+            "scope": payload.scope,
+            "target_symbols": target_symbols,
+            "research_budget": research_budget,
         }
     )
     existing = db.scalar(
@@ -533,13 +1035,13 @@ def submit_research(
         .order_by(JobRun.started_at.desc())
     )
     if existing is not None:
-        if existing.status in {"PENDING", "RUNNING"}:
+        if existing.status in {"PENDING", "RUNNING", "PROCESSING", "CANCEL_REQUESTED"}:
             response.status_code = 200
             return RunResponse.model_validate(existing)
         existing.active_research_key = None
         db.commit()
     try:
-        run_id = load_pipeline().start_run(payload.trading_date)
+        run_id = load_pipeline().start_run(actual_research_date)
     except Exception as exc:
         raise HTTPException(
             status_code=503, detail=str(exc) or "research pipeline unavailable"
@@ -550,27 +1052,56 @@ def submit_research(
     run.user_id = context.user.user_id
     run.active_research_key = active_key
     run.status = "PENDING"
-    tracked_symbols = db.scalars(
-        select(CandidateRow.symbol)
-        .join(JobRun, CandidateRow.run_id == JobRun.run_id)
-        .where(
-            JobRun.user_id == context.user.user_id,
-            JobRun.run_type == "DAILY",
-            JobRun.status.in_(("SUCCEEDED", "FUSED")),
-            JobRun.trading_date < payload.trading_date,
+    tracked_symbols = target_symbols
+    if payload.scope == "MARKET":
+        tracked_symbols = list(
+            db.scalars(
+                select(CandidateRow.symbol)
+                .join(JobRun, CandidateRow.run_id == JobRun.run_id)
+                .where(
+                    JobRun.user_id == context.user.user_id,
+                    JobRun.run_type == "DAILY",
+                    JobRun.status.in_(("SUCCEEDED", "FUSED")),
+                    JobRun.trading_date < actual_research_date,
+                )
+                .order_by(JobRun.trading_date.desc(), CandidateRow.rank)
+                .limit(80)
+            )
+            .all()
         )
-        .order_by(JobRun.trading_date.desc(), CandidateRow.rank)
-        .limit(80)
-    ).all()
-    run.manifest = {
+    frozen_manifest = {
         **dict(run.manifest),
         "tracked_symbols": sorted(set(tracked_symbols)),
+        "trigger_source": "MANUAL",
+        "requested_date": requested_date.isoformat(),
+        "actual_research_date": actual_research_date.isoformat(),
+        "snapshot_mode": "SYSTEM_ENFORCED",
+        "research_scope": payload.scope,
+        "target_symbols": target_symbols,
+        "research_budget": research_budget,
+        "portfolio_requested": portfolio_requested,
+        "research_only_reason": (
+            None
+            if portfolio_requested
+            else "定向研究标的少于 15 只，仅生成评分、候选和报告"
+        ),
     }
+    run.manifest = frozen_manifest
+    run.input_hash = stable_hash(frozen_manifest)
     AuditLogger(db).record(
         run_id,
         "RESEARCH_SUBMITTED",
         "Daily research queued by WebGUI",
-        details={"user_id": context.user.user_id},
+        details={
+            "user_id": context.user.user_id,
+            "trigger_source": "MANUAL",
+            "requested_date": requested_date.isoformat(),
+            "actual_research_date": actual_research_date.isoformat(),
+            "research_scope": payload.scope,
+            "target_symbol_count": len(target_symbols),
+            "portfolio_requested": portfolio_requested,
+            "input_hash": run.input_hash,
+        },
     )
     try:
         db.commit()
@@ -612,6 +1143,99 @@ def submit_research(
         db.commit()
         raise HTTPException(status_code=503, detail="research queue unavailable") from exc
     return RunResponse.model_validate(run)
+
+
+@app.get("/api/v1/research/settings", response_model=ResearchSettingsResponse)
+def research_settings(db: DbSession, context: Current) -> ResearchSettingsResponse:
+    return ResearchSettingsResponse.model_validate(
+        ResearchSettingsService(db).get(context.user.user_id)
+    )
+
+
+@app.put("/api/v1/research/settings", response_model=ResearchSettingsResponse)
+def update_research_settings(
+    payload: ResearchSettingsRequest, db: DbSession, context: Writer
+) -> ResearchSettingsResponse:
+    return ResearchSettingsResponse.model_validate(
+        ResearchSettingsService(db).update(
+            context.user.user_id, auto_enabled=payload.auto_enabled
+        )
+    )
+
+
+@app.get("/api/v1/research/runs", response_model=list[ResearchRunResponse])
+def research_runs(
+    db: DbSession,
+    context: Current,
+    limit: int = Query(default=5, ge=1, le=50),
+    trading_date: date | None = None,
+    mine: bool = False,
+) -> list[ResearchRunResponse]:
+    statement = select(JobRun).where(JobRun.run_type == "DAILY")
+    if mine or context.user.role != "ADMIN":
+        statement = statement.where(JobRun.user_id == context.user.user_id)
+    if trading_date is not None:
+        statement = statement.where(JobRun.trading_date == trading_date)
+    rows = db.scalars(statement.order_by(JobRun.started_at.desc()).limit(limit)).all()
+    return [_research_run_response(db, row) for row in rows]
+
+
+@app.post(
+    "/api/v1/research/runs/{run_id}/cancel",
+    response_model=ResearchRunResponse,
+)
+def cancel_research_run(
+    run_id: str,
+    db: DbSession,
+    context: Writer,
+) -> ResearchRunResponse:
+    row = db.scalar(
+        select(JobRun)
+        .where(
+            JobRun.run_id == run_id,
+            JobRun.run_type == "DAILY",
+            JobRun.user_id == context.user.user_id,
+        )
+        .with_for_update()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="research run not found")
+
+    normalized = row.status.upper()
+    if normalized in {"SUCCEEDED", "FAILED", "FUSED", "CANCELLED", "CANCEL_REQUESTED"}:
+        raise HTTPException(
+            status_code=409,
+            detail=f"research run cannot be cancelled from status {normalized}",
+        )
+
+    now = datetime.now(UTC)
+    AuditLogger(db).record(
+        run_id,
+        "RESEARCH_CANCEL_REQUESTED",
+        "Daily research stop requested by its owner",
+        details={"user_id": context.user.user_id, "previous_status": normalized},
+    )
+    if normalized in {"PENDING", "QUEUED"}:
+        row.status = "CANCELLED"
+        row.active_research_key = None
+        row.error_message = None
+        row.completed_at = now
+        AuditLogger(db).record(
+            run_id,
+            "RESEARCH_CANCELLED",
+            "Queued daily research cancelled before worker execution",
+            details={"boundary": "queued"},
+        )
+    elif normalized in {"RUNNING", "PROCESSING"}:
+        row.status = "CANCEL_REQUESTED"
+    else:
+        raise HTTPException(
+            status_code=409,
+            detail=f"research run cannot be cancelled from status {normalized}",
+        )
+    db.commit()
+    db.refresh(row)
+    return _research_run_response(db, row)
 
 
 @app.get("/api/v1/runs", response_model=list[RunListResponse])
@@ -802,10 +1426,87 @@ def backtest(backtest_id: str, db: DbSession, context: Current) -> BacktestRespo
     return _backtest_response(db, row)
 
 
-@app.get("/api/v1/market/quotes", response_model=list[QuoteResponse])
-def market_quotes(symbols: str, _: Current) -> list[QuoteResponse]:
+@app.post(
+    "/api/v1/backtests/{backtest_id}/retry",
+    response_model=BacktestResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def retry_backtest(backtest_id: str, db: DbSession, context: Writer) -> BacktestResponse:
+    row = db.get(BacktestRun, backtest_id)
+    if row is None or row.user_id != context.user.user_id:
+        raise HTTPException(status_code=404, detail="backtest not found")
+    if row.status != "FAILED":
+        raise HTTPException(status_code=409, detail="only failed backtests can be retried")
+    job = db.get(JobRun, row.run_id) if row.run_id else None
+    if job is None:
+        raise HTTPException(status_code=409, detail="backtest job is unavailable")
+    manifests = db.scalars(
+        select(SnapshotManifestRow).where(
+            SnapshotManifestRow.snapshot_id.in_(row.snapshot_ids),
+            SnapshotManifestRow.status == "COMMITTED",
+        )
+    ).all()
+    by_id = {item.snapshot_id: item for item in manifests}
+    if set(by_id) != set(row.snapshot_ids):
+        raise HTTPException(status_code=409, detail="committed snapshot is unavailable")
+    expected_hashes = dict(row.config.get("snapshot_file_hashes", {}))
+    actual_hashes = {
+        snapshot_id: str(by_id[snapshot_id].details.get("parquet_file_sha256", ""))
+        for snapshot_id in row.snapshot_ids
+    }
+    if expected_hashes != actual_hashes or any(
+        len(value) != 64 for value in actual_hashes.values()
+    ):
+        raise HTTPException(status_code=409, detail="snapshot hash metadata changed")
     try:
-        rows = get_market_data_service().quotes(symbols.split(","))
+        read_backtest_bundle(
+            {snapshot_id: by_id[snapshot_id].parquet_uri for snapshot_id in row.snapshot_ids},
+            expected_hashes,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail="snapshot hash validation failed") from exc
+    row.retry_count += 1
+    row.status = "PENDING"
+    row.metrics = None
+    row.artifacts = None
+    row.output_hash = None
+    row.completed_at = None
+    job.status = "PENDING"
+    job.error_message = None
+    job.output_hash = None
+    job.completed_at = None
+    AuditLogger(db).record(
+        job.run_id,
+        "BACKTEST_RETRY_REQUESTED",
+        "Failed backtest was validated and queued again",
+        details={"backtest_id": backtest_id, "retry_count": row.retry_count},
+    )
+    db.commit()
+    try:
+        enqueue_backtest(backtest_id)
+    except Exception as exc:
+        failed_at = datetime.now(UTC)
+        row.status = "FAILED"
+        row.completed_at = failed_at
+        job.status = "FAILED"
+        job.error_message = str(exc)
+        job.completed_at = failed_at
+        AuditLogger(db).record(
+            job.run_id,
+            "BACKTEST_RETRY_ENQUEUE_FAILED",
+            "Validated retry could not be queued",
+            severity="ERROR",
+            details={"backtest_id": backtest_id, "retry_count": row.retry_count},
+        )
+        db.commit()
+        raise HTTPException(status_code=503, detail="backtest queue unavailable") from exc
+    return _backtest_response(db, row)
+
+
+@app.get("/api/v1/market/quotes", response_model=list[QuoteResponse])
+def market_quotes(symbols: str, _: Current, refresh: bool = False) -> list[QuoteResponse]:
+    try:
+        rows = get_market_data_service().quotes(symbols.split(","), force_refresh=refresh)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return [QuoteResponse.model_validate(row) for row in rows]
@@ -821,6 +1522,7 @@ def market_klines(
     adjust: str = "hfq",
     start: datetime | None = None,
     end: datetime | None = None,
+    refresh: bool = False,
 ) -> KlineResponse:
     if adjust.casefold() != "hfq":
         raise HTTPException(status_code=422, detail="only hfq adjustment is supported")
@@ -832,6 +1534,7 @@ def market_klines(
                 limit=limit,
                 start=start,
                 end=end,
+                force_refresh=refresh,
             )
         )
     except ValueError as exc:

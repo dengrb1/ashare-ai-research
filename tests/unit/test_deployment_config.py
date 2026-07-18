@@ -78,7 +78,11 @@ def test_web_container_builds_vite_assets_and_nginx_proxies_api() -> None:
     assert "try_files $uri $uri/ /index.html" in nginx
     assert "location = /assets {" in nginx
     assert "location = /assets/ {" in nginx
-    assert "proxy_pass http://api:8000" in nginx
+    assert "proxy_pass http://api:8000" in nginx or (
+        "resolver 127.0.0.11" in nginx
+        and "set $api_upstream api:8000" in nginx
+        and "proxy_pass http://$api_upstream" in nginx
+    )
 
 
 def test_first_release_policy_fixes_required_constraints() -> None:

@@ -8,10 +8,12 @@ from time import sleep
 from typing import Any, Protocol
 from uuid import NAMESPACE_URL, uuid5
 
+from ashare_ai.adapters._vendor import vendor_records
 from ashare_ai.adapters.symbols import infer_exchange, normalize_symbol
 from ashare_ai.core.contracts import (
     AvailabilityBasis,
     Board,
+    CashDividend,
     DailyBar,
     Disclosure,
     Exchange,
@@ -22,8 +24,13 @@ from ashare_ai.core.contracts import (
     SecurityStatusRecord,
 )
 from ashare_ai.core.hashing import stable_hash
-from ashare_ai.core.time import SHANGHAI
+from ashare_ai.core.time import SHANGHAI, conservative_date_availability
 from ashare_ai.orchestration.bundle import CanonicalDailyBundle
+from ashare_ai.portfolio.events import (
+    ActiveEventRisk,
+    EventSeverity,
+    classify_event_risks,
+)
 
 
 class CanonicalMarketProvider(Protocol):
@@ -36,6 +43,18 @@ class CanonicalMarketProvider(Protocol):
     def benchmark_bars(
         self, code: str, start_date: date, end_date: date
     ) -> list[dict[str, Any]]: ...
+
+    def financial_reports(self, symbol: str) -> list[dict[str, Any]]: ...
+
+    def disclosures(
+        self, symbol: str, start_date: date, end_date: date
+    ) -> list[dict[str, Any]]: ...
+
+    def news(self, symbol: str, start_date: date, end_date: date) -> list[dict[str, Any]]: ...
+
+    def dividends(self, symbol: str) -> list[dict[str, Any]]: ...
+
+    def trading_calendar(self, start_date: date, end_date: date) -> list[date]: ...
 
 
 class MarketDataAcquisitionError(RuntimeError):
@@ -57,6 +76,11 @@ class MarketDataAcquisitionError(RuntimeError):
             "securities": "证券列表",
             "daily_bars": "股票历史行情",
             "benchmark_bars": "基准历史行情",
+            "financial_reports": "三大财务报表",
+            "disclosures": "巨潮公告",
+            "news": "免费新闻",
+            "dividends": "历史现金分红",
+            "trading_calendar": "交易日历",
         }
         label = labels.get(operation, "市场数据")
         source_text = "、".join(sources)
@@ -98,10 +122,7 @@ class AKShareCanonicalProvider:
 
     @staticmethod
     def _records(frame: Any) -> list[dict[str, Any]]:
-        if frame is None:
-            return []
-        rows = frame.to_dict(orient="records")
-        return rows if isinstance(rows, list) else []
+        return vendor_records(frame)
 
     def _fetch(
         self,
@@ -129,6 +150,30 @@ class AKShareCanonicalProvider:
             attempt_count=attempt_count,
             sources=sources,
         )
+
+    def _fetch_many(
+        self,
+        *,
+        operation: str,
+        subject: str,
+        fetchers: tuple[tuple[str, Callable[[], list[dict[str, Any]]]], ...],
+        require_any: bool = False,
+    ) -> list[dict[str, Any]]:
+        collected: list[dict[str, Any]] = []
+        for source, fetcher in fetchers:
+            try:
+                rows = fetcher()
+            except Exception:
+                rows = []
+            collected.extend({**row, "_canonical_source": source} for row in rows)
+        if require_any and not collected:
+            raise MarketDataAcquisitionError(
+                operation=operation,
+                subject=subject,
+                attempt_count=len(fetchers),
+                sources=tuple(source for source, _ in fetchers),
+            )
+        return collected
 
     def securities(self) -> list[dict[str, Any]]:
         sdk = self._sdk()
@@ -166,7 +211,7 @@ class AKShareCanonicalProvider:
                             period="daily",
                             start_date=start_date.strftime("%Y%m%d"),
                             end_date=end_date.strftime("%Y%m%d"),
-                            adjust="hfq",
+                            adjust="",
                         )
                     ),
                 ),
@@ -179,7 +224,7 @@ class AKShareCanonicalProvider:
                                 symbol=_sina_symbol(normalized),
                                 start_date=start_date.strftime("%Y%m%d"),
                                 end_date=end_date.strftime("%Y%m%d"),
-                                adjust="hfq",
+                                adjust="",
                             )
                         )
                     ],
@@ -228,6 +273,103 @@ class AKShareCanonicalProvider:
             ),
         )
 
+    def financial_reports(self, symbol: str) -> list[dict[str, Any]]:
+        sdk = self._sdk()
+        normalized = str(normalize_symbol(symbol))
+        stock = _sina_symbol(normalized)
+        rows: list[dict[str, Any]] = []
+        for statement in ("利润表", "资产负债表", "现金流量表"):
+            def fetch_statement(statement_name: str = statement) -> list[dict[str, Any]]:
+                return self._records(
+                    sdk.stock_financial_report_sina(
+                        stock=stock,
+                        symbol=statement_name,
+                    )
+                )
+
+            statement_rows = self._fetch(
+                operation="financial_reports",
+                subject=f"{normalized}:{statement}",
+                fetchers=(("sina", fetch_statement),),
+            )
+            rows.extend(
+                {**row, "_statement_type": statement, "_canonical_source": "akshare-sina"}
+                for row in statement_rows
+            )
+        return rows
+
+    def disclosures(
+        self, symbol: str, start_date: date, end_date: date
+    ) -> list[dict[str, Any]]:
+        sdk = self._sdk()
+        normalized = str(normalize_symbol(symbol))
+        return self._fetch(
+            operation="disclosures",
+            subject=normalized,
+            fetchers=(("cninfo", lambda: [
+                {**row, "_canonical_source": "cninfo"}
+                for row in self._records(
+                    sdk.stock_zh_a_disclosure_report_cninfo(
+                        symbol=normalized.split(".", 1)[0],
+                        market="沪深京",
+                        keyword="",
+                        category="",
+                        start_date=start_date.strftime("%Y%m%d"),
+                        end_date=end_date.strftime("%Y%m%d"),
+                    )
+                )
+            ]),),
+        )
+
+    def news(self, symbol: str, start_date: date, end_date: date) -> list[dict[str, Any]]:
+        del start_date, end_date
+        sdk = self._sdk()
+        normalized = str(normalize_symbol(symbol))
+        stock_code = normalized.split(".", 1)[0]
+        return self._fetch_many(
+            operation="news",
+            subject=normalized,
+            fetchers=(
+                ("eastmoney", lambda: self._records(sdk.stock_news_em(symbol=stock_code))),
+                ("caixin", lambda: self._records(sdk.stock_news_main_cx())),
+            ),
+        )
+
+    def dividends(self, symbol: str) -> list[dict[str, Any]]:
+        sdk = self._sdk()
+        normalized = str(normalize_symbol(symbol))
+        stock_code = normalized.split(".", 1)[0]
+        return self._fetch_many(
+            operation="dividends",
+            subject=normalized,
+            fetchers=(
+                ("cninfo", lambda: self._records(sdk.stock_dividend_cninfo(symbol=stock_code))),
+                (
+                    "sina",
+                    lambda: self._records(
+                        sdk.stock_history_dividend_detail(
+                            symbol=stock_code, indicator="分红", date=""
+                        )
+                    ),
+                ),
+            ),
+        )
+
+    def trading_calendar(self, start_date: date, end_date: date) -> list[date]:
+        sdk = self._sdk()
+        rows = self._fetch(
+            operation="trading_calendar",
+            subject=f"{start_date.isoformat()}:{end_date.isoformat()}",
+            fetchers=(("sina", lambda: self._records(sdk.tool_trade_date_hist_sina())),),
+        )
+        values = {
+            value
+            for row in rows
+            if (value := _date_value(row.get("trade_date", row.get("日期")))) is not None
+            and start_date <= value <= end_date
+        }
+        return sorted(values)
+
 
 class TushareCanonicalProvider:
     source = "tushare"
@@ -245,7 +387,7 @@ class TushareCanonicalProvider:
         daily = self.client.daily(trade_date=date.today().strftime("%Y%m%d"))
         amounts = {
             str(item.get("ts_code")): item.get("amount", 0)
-            for item in daily.to_dict(orient="records")
+            for item in vendor_records(daily)
         }
         return [
             {
@@ -254,7 +396,7 @@ class TushareCanonicalProvider:
                 "最新价": 1,
                 "成交额": amounts.get(str(item.get("ts_code")), 0),
             }
-            for item in master.to_dict(orient="records")
+            for item in vendor_records(master)
         ]
 
     def daily_bars(self, symbol: str, start_date: date, end_date: date) -> list[dict[str, Any]]:
@@ -263,7 +405,7 @@ class TushareCanonicalProvider:
             ts_code=normalize_symbol(symbol),
             start_date=start_date.strftime("%Y%m%d"),
             end_date=end_date.strftime("%Y%m%d"),
-            adj="hfq",
+            adj=None,
             freq="D",
         )
         return _tushare_rows(frame)
@@ -275,6 +417,65 @@ class TushareCanonicalProvider:
             end_date=end_date.strftime("%Y%m%d"),
         )
         return _tushare_rows(frame)
+
+    def financial_reports(self, symbol: str) -> list[dict[str, Any]]:
+        normalized = str(normalize_symbol(symbol))
+        result: list[dict[str, Any]] = []
+        for statement, method in (
+            ("利润表", self.client.income),
+            ("资产负债表", self.client.balancesheet),
+            ("现金流量表", self.client.cashflow),
+        ):
+            frame = method(ts_code=normalized)
+            if frame is None or frame.empty:
+                continue
+            result.extend(
+                {**row, "_statement_type": statement, "_canonical_source": "tushare"}
+                for row in vendor_records(frame)
+            )
+        return result
+
+    def disclosures(
+        self, symbol: str, start_date: date, end_date: date
+    ) -> list[dict[str, Any]]:
+        frame = self.client.anns_d(
+            ts_code=str(normalize_symbol(symbol)),
+            start_date=start_date.strftime("%Y%m%d"),
+            end_date=end_date.strftime("%Y%m%d"),
+        )
+        if frame is None or frame.empty:
+            return []
+        return [
+            {**row, "_canonical_source": "tushare"}
+            for row in vendor_records(frame)
+        ]
+
+    def news(self, symbol: str, start_date: date, end_date: date) -> list[dict[str, Any]]:
+        return []
+
+    def dividends(self, symbol: str) -> list[dict[str, Any]]:
+        frame = self.client.dividend(ts_code=str(normalize_symbol(symbol)))
+        if frame is None or frame.empty:
+            return []
+        return [
+            {**row, "_canonical_source": "tushare"}
+            for row in vendor_records(frame)
+        ]
+
+    def trading_calendar(self, start_date: date, end_date: date) -> list[date]:
+        frame = self.client.trade_cal(
+            exchange="",
+            start_date=start_date.strftime("%Y%m%d"),
+            end_date=end_date.strftime("%Y%m%d"),
+            is_open="1",
+        )
+        if frame is None or frame.empty:
+            return []
+        return sorted(
+            value
+            for row in vendor_records(frame)
+            if (value := _date_value(row.get("cal_date"))) is not None
+        )
 
 
 class FallbackCanonicalProvider:
@@ -294,6 +495,10 @@ class FallbackCanonicalProvider:
     @staticmethod
     def _tag(rows: list[dict[str, Any]], source: str) -> list[dict[str, Any]]:
         return [{**row, "_canonical_source": source} for row in rows]
+
+    @staticmethod
+    def _tag_preserving(rows: list[dict[str, Any]], source: str) -> list[dict[str, Any]]:
+        return [{"_canonical_source": source, **row} for row in rows]
 
     def securities(self) -> list[dict[str, Any]]:
         try:
@@ -328,9 +533,71 @@ class FallbackCanonicalProvider:
             self.fallback.source,
         )
 
+    def financial_reports(self, symbol: str) -> list[dict[str, Any]]:
+        try:
+            rows = self.primary.financial_reports(symbol)
+            if _raw_financial_rows_complete(rows):
+                return rows
+        except Exception:
+            pass
+        return self._tag(self.fallback.financial_reports(symbol), self.fallback.source)
+
+    def disclosures(
+        self, symbol: str, start_date: date, end_date: date
+    ) -> list[dict[str, Any]]:
+        try:
+            rows = self.primary.disclosures(symbol, start_date, end_date)
+            if rows:
+                return rows
+        except Exception:
+            pass
+        return self._tag(
+            self.fallback.disclosures(symbol, start_date, end_date),
+            self.fallback.source,
+        )
+
+    def news(self, symbol: str, start_date: date, end_date: date) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for provider in (self.primary, self.fallback):
+            fetcher = getattr(provider, "news", None)
+            if not callable(fetcher):
+                continue
+            try:
+                rows.extend(
+                    self._tag_preserving(fetcher(symbol, start_date, end_date), provider.source)
+                )
+            except Exception:
+                continue
+        return rows
+
+    def dividends(self, symbol: str) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for provider in (self.primary, self.fallback):
+            fetcher = getattr(provider, "dividends", None)
+            if not callable(fetcher):
+                continue
+            try:
+                rows.extend(self._tag(fetcher(symbol), provider.source))
+            except Exception:
+                continue
+        return rows
+
+    def trading_calendar(self, start_date: date, end_date: date) -> list[date]:
+        for provider in (self.primary, self.fallback):
+            fetcher = getattr(provider, "trading_calendar", None)
+            if not callable(fetcher):
+                continue
+            try:
+                values = fetcher(start_date, end_date)
+            except Exception:
+                continue
+            if values:
+                return [value for value in values if isinstance(value, date)]
+        return []
+
 
 class AKShareCanonicalBundleBuilder:
-    """Build a PIT-frozen bundle from real AKShare market data and labeled placeholders."""
+    """Build a PIT-frozen bundle from free market, financial and official disclosure data."""
 
     def __init__(
         self,
@@ -339,11 +606,13 @@ class AKShareCanonicalBundleBuilder:
         clock: Callable[[], datetime] | None = None,
         bundle_size: int = 20,
         history_sessions: int = 90,
+        news_window_days: int = 30,
     ) -> None:
         self.provider = provider or AKShareCanonicalProvider()
         self.clock = clock or (lambda: datetime.now(SHANGHAI))
         self.bundle_size = bundle_size
         self.history_sessions = history_sessions
+        self.news_window_days = news_window_days
         self.acquisition_events: list[dict[str, Any]] = []
 
     def build(
@@ -367,17 +636,55 @@ class AKShareCanonicalBundleBuilder:
                 "the latest completed session before the next market opens; use a frozen "
                 "canonical file for older historical runs"
             )
-        if decision_at.hour < 17:
+        if (decision_at.hour, decision_at.minute) < (15, 5):
             raise RuntimeError("AKShare daily canonical data is unavailable before market close")
         market_available_at = datetime.combine(
             trading_date,
-            datetime.min.time().replace(hour=17),
+            datetime.min.time().replace(hour=15, minute=5),
             tzinfo=SHANGHAI,
         )
         if fetched_at < market_available_at:
             raise RuntimeError("AKShare daily canonical data has not reached its availability time")
         if market_available_at > decision_at:
             raise RuntimeError("AKShare daily data is not available at the requested decision_at")
+
+        calendar_fetcher = getattr(self.provider, "trading_calendar", None)
+        if callable(calendar_fetcher):
+            trading_calendar = tuple(
+                sorted(
+                    set(
+                        calendar_fetcher(
+                            trading_date - timedelta(days=max(400, self.history_sessions * 2)),
+                            trading_date + timedelta(days=30),
+                        )
+                    )
+                )
+            )
+            if trading_date in trading_calendar:
+                next_trading_date = next(
+                    (value for value in trading_calendar if value > trading_date), None
+                )
+            else:
+                next_trading_date = None
+            if next_trading_date is not None:
+                calendar_source = f"{self.provider.source}-calendar"
+                calendar_version = "exchange-calendar-v1"
+            elif _requires_authoritative_calendar(self.provider):
+                raise RuntimeError("authoritative trading calendar is missing required sessions")
+            else:
+                next_trading_date = _next_weekday(trading_date)
+                trading_calendar = tuple(
+                    _weekdays_between(trading_date - timedelta(days=400), next_trading_date)
+                )
+                calendar_source = "compatibility-weekdays"
+                calendar_version = "compatibility-v1"
+        else:
+            next_trading_date = _next_weekday(trading_date)
+            trading_calendar = tuple(
+                _weekdays_between(trading_date - timedelta(days=400), next_trading_date)
+            )
+            calendar_source = "compatibility-weekdays"
+            calendar_version = "compatibility-v1"
 
         security_rows = self.provider.securities()
         candidates = self._candidate_securities(security_rows)
@@ -448,6 +755,8 @@ class AKShareCanonicalBundleBuilder:
         facts: list[FinancialFact] = []
         disclosures: list[Disclosure] = []
         news: list[NewsItem] = []
+        dividends: list[CashDividend] = []
+        events: dict[str, tuple[ActiveEventRisk, ...]] = {}
         styles: dict[str, dict[str, float]] = {}
         quality: dict[str, dict[str, Any]] = {}
         for security, history in selected:
@@ -526,7 +835,9 @@ class AKShareCanonicalBundleBuilder:
             previous: Decimal | None = None
             for item in history:
                 available_at = datetime.combine(
-                    item["trading_date"], datetime.min.time().replace(hour=17), tzinfo=SHANGHAI
+                    item["trading_date"],
+                    datetime.min.time().replace(hour=15, minute=5),
+                    tzinfo=SHANGHAI,
                 )
                 bars.append(
                     DailyBar(
@@ -535,7 +846,7 @@ class AKShareCanonicalBundleBuilder:
                             item["trading_date"],
                             available_at,
                             fetched_at,
-                            f"hfq-bar-{symbol}-{item['trading_date'].isoformat()}",
+                            f"raw-bar-{symbol}-{item['trading_date'].isoformat()}",
                             ingestion_id,
                             str(item.get("_canonical_source", self.provider.source)),
                             item,
@@ -551,12 +862,135 @@ class AKShareCanonicalBundleBuilder:
                     )
                 )
                 previous = item["close"]
-            placeholder_at = market_available_at
-            facts.extend(_neutral_facts(symbol, trading_date, placeholder_at, ingestion_id))
-            disclosures.append(
-                _neutral_disclosure(symbol, trading_date, placeholder_at, ingestion_id)
+            financial_rows: list[dict[str, Any]] = []
+            disclosure_rows: list[dict[str, Any]] = []
+            news_rows: list[dict[str, Any]] = []
+            dividend_rows: list[dict[str, Any]] = []
+            financial_error: str | None = None
+            disclosure_error: str | None = None
+            financial_fetcher = getattr(self.provider, "financial_reports", None)
+            try:
+                if callable(financial_fetcher):
+                    financial_rows = financial_fetcher(symbol)
+            except Exception as exc:
+                financial_error = type(exc).__name__
+                self.acquisition_events.append(
+                    {
+                        "operation": "financial_reports",
+                        "subject": symbol,
+                        "outcome": "placeholder_for_symbol",
+                        "error_type": financial_error,
+                    }
+                )
+            disclosure_fetcher = getattr(self.provider, "disclosures", None)
+            try:
+                if callable(disclosure_fetcher):
+                    disclosure_rows = disclosure_fetcher(
+                        symbol, trading_date - timedelta(days=365), trading_date
+                    )
+            except Exception as exc:
+                disclosure_error = type(exc).__name__
+                self.acquisition_events.append(
+                    {
+                        "operation": "disclosures",
+                        "subject": symbol,
+                        "outcome": "placeholder_for_symbol",
+                        "error_type": disclosure_error,
+                    }
+                )
+            news_fetcher = getattr(self.provider, "news", None)
+            try:
+                if callable(news_fetcher):
+                    news_rows = news_fetcher(
+                        symbol, trading_date - timedelta(days=30), trading_date
+                    )
+            except Exception as exc:
+                self.acquisition_events.append(
+                    {
+                        "operation": "news",
+                        "subject": symbol,
+                        "outcome": "news_unavailable_for_symbol",
+                        "error_type": type(exc).__name__,
+                    }
+                )
+            dividend_fetcher = getattr(self.provider, "dividends", None)
+            try:
+                if callable(dividend_fetcher):
+                    dividend_rows = dividend_fetcher(symbol)
+            except Exception as exc:
+                self.acquisition_events.append(
+                    {
+                        "operation": "dividends",
+                        "subject": symbol,
+                        "outcome": "dividends_unavailable_for_symbol",
+                        "error_type": type(exc).__name__,
+                    }
+                )
+            symbol_facts = _financial_facts(
+                symbol=symbol,
+                trading_date=trading_date,
+                decision_at=decision_at,
+                fetched_at=fetched_at,
+                ingestion_id=ingestion_id,
+                rows=financial_rows,
             )
-            news.append(_neutral_news(symbol, trading_date, placeholder_at, ingestion_id))
+            fundamental_reasons = _fundamental_completeness_reasons(symbol_facts)
+            if fundamental_reasons:
+                symbol_facts.extend(
+                    _neutral_facts(symbol, trading_date, market_available_at, ingestion_id)
+                )
+            facts.extend(symbol_facts)
+            symbol_disclosures = _official_disclosures(
+                symbol=symbol,
+                trading_date=trading_date,
+                decision_at=decision_at,
+                fetched_at=fetched_at,
+                ingestion_id=ingestion_id,
+                rows=disclosure_rows,
+            )
+            sentiment_reasons: list[str] = []
+            if not symbol_disclosures:
+                sentiment_reasons.append("MISSING_OFFICIAL_DISCLOSURE")
+                symbol_disclosures = [
+                    _neutral_disclosure(symbol, trading_date, market_available_at, ingestion_id)
+                ]
+                news.append(_neutral_news(symbol, trading_date, market_available_at, ingestion_id))
+            symbol_news = _news_items(
+                symbol=symbol,
+                trading_date=trading_date,
+                decision_at=decision_at,
+                fetched_at=fetched_at,
+                ingestion_id=ingestion_id,
+                rows=news_rows,
+            )
+            if symbol_news:
+                news.extend(symbol_news)
+                sentiment_reasons = [
+                    reason for reason in sentiment_reasons if reason != "MISSING_FREE_NEWS"
+                ]
+            symbol_dividends = _cash_dividends(
+                symbol=symbol,
+                trading_date=trading_date,
+                decision_at=decision_at,
+                fetched_at=fetched_at,
+                ingestion_id=ingestion_id,
+                rows=dividend_rows,
+            )
+            dividends.extend(symbol_dividends)
+            disclosures.extend(symbol_disclosures)
+            classified_events = classify_event_risks(
+                symbol_disclosures,
+                symbol_news,
+                symbol=symbol,
+                decision_at=decision_at,
+                window_days=self.news_window_days,
+            )
+            events[symbol] = tuple(
+                {
+                    item.event_id: item
+                    for item in (*_events_from_disclosures(symbol_disclosures), *classified_events)
+                }.values()
+            )
             styles[symbol] = {
                 name: 0.0
                 for name in ("beta", "size", "value", "momentum", "volatility", "liquidity")
@@ -564,17 +998,25 @@ class AKShareCanonicalBundleBuilder:
             quality[symbol] = {
                 "source": "+".join(history_sources),
                 "market_history_real": True,
-                "market_price_basis": "HFQ",
-                "fundamental_placeholder": True,
-                "sentiment_placeholder": True,
+                "market_price_basis": "RAW",
+                "fundamental_placeholder": bool(fundamental_reasons),
+                "sentiment_placeholder": bool(sentiment_reasons),
                 "industry_placeholder": True,
                 "security_master_placeholder": security["name"] == symbol,
                 "list_date_placeholder": True,
                 "tracked_only": tracked_only,
                 "history_is_current": history_is_current,
-                "completeness": 0.55,
-                "official_source_ratio": 0.2,
-                "evidence_coverage": 0.5,
+                "fundamental_reason_codes": fundamental_reasons,
+                "sentiment_reason_codes": sentiment_reasons,
+                "financial_source": _record_sources(financial_rows),
+                "disclosure_source": _record_sources(disclosure_rows),
+                "news_sources": _record_sources(news_rows),
+                "dividend_sources": _record_sources(dividend_rows),
+                "financial_acquisition_error": financial_error,
+                "disclosure_acquisition_error": disclosure_error,
+                "completeness": 1.0 if not fundamental_reasons and not sentiment_reasons else 0.55,
+                "official_source_ratio": 1.0 if not sentiment_reasons else 0.0,
+                "evidence_coverage": 1.0 if not sentiment_reasons else 0.5,
             }
 
         benchmark_returns = self._benchmarks(start_date, trading_date, bars)
@@ -582,7 +1024,7 @@ class AKShareCanonicalBundleBuilder:
             schema_version="canonical-daily-bundle-akshare-v2",
             trading_date=trading_date,
             decision_at=decision_at,
-            next_trading_date=_next_weekday(trading_date),
+            next_trading_date=next_trading_date,
             securities=tuple(securities),
             statuses=tuple(statuses),
             industries=tuple(industries),
@@ -590,6 +1032,11 @@ class AKShareCanonicalBundleBuilder:
             financial_facts=tuple(facts),
             disclosures=tuple(disclosures),
             news=tuple(news),
+            dividends=tuple(dividends),
+            trading_calendar=trading_calendar,
+            calendar_source=calendar_source,
+            calendar_version=calendar_version,
+            events_by_symbol=events,
             style_exposures=styles,
             nav=Decimal("10000000"),
             high_watermark=Decimal("10000000"),
@@ -742,12 +1189,504 @@ def _pit(
         "adapter_version": {
             "akshare": "akshare-canonical-v2",
             "akshare-sina": "akshare-sina-canonical-v1",
+            "cninfo": "cninfo-disclosure-v1",
             "tushare": "tushare-canonical-v1",
             "akshare-neutral-placeholder": "neutral-placeholder-v1",
         }.get(source, "canonical-market-fallback-v1"),
         "ingestion_run_id": ingestion_id,
         "availability_basis": basis,
     }
+
+
+_FINANCIAL_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "REVENUE": ("营业总收入", "营业收入", "total_revenue", "revenue"),
+    "NET_PROFIT": (
+        "归属于母公司所有者的净利润",
+        "归属于母公司股东的净利润",
+        "归属母公司股东的净利润",
+        "n_income_attr_p",
+    ),
+    "TOTAL_ASSETS": ("资产总计", "total_assets"),
+    "TOTAL_LIABILITIES": ("负债合计", "total_liab"),
+    "TOTAL_EQUITY": (
+        "归属于母公司股东权益合计",
+        "归属于母公司所有者权益合计",
+        "所有者权益(或股东权益)合计",
+        "total_hldr_eqy_exc_min_int",
+        "total_hldr_eqy_inc_min_int",
+    ),
+    "OPERATING_CASH_FLOW": ("经营活动产生的现金流量净额", "n_cashflow_act"),
+}
+
+
+def _raw_financial_rows_complete(rows: list[dict[str, Any]]) -> bool:
+    by_period: dict[date, set[str]] = {}
+    for row in rows:
+        period = _date_value(row.get("报告日", row.get("end_date")))
+        if period is None:
+            continue
+        fields = by_period.setdefault(period, set())
+        for field, aliases in _FINANCIAL_FIELD_ALIASES.items():
+            if any(_decimal(row.get(alias)) is not None for alias in aliases):
+                fields.add(field)
+    if not by_period:
+        return False
+    latest = max(by_period)
+    return set(_FINANCIAL_FIELD_ALIASES) <= by_period[latest] and {
+        "REVENUE",
+        "NET_PROFIT",
+    } <= by_period.get(_previous_year(latest), set())
+
+
+def _financial_facts(
+    *,
+    symbol: str,
+    trading_date: date,
+    decision_at: datetime,
+    fetched_at: datetime,
+    ingestion_id: Any,
+    rows: list[dict[str, Any]],
+) -> list[FinancialFact]:
+    result: list[FinancialFact] = []
+    for row_index, row in enumerate(rows):
+        report_period = _date_value(
+            row.get("报告日", row.get("end_date", row.get("report_period")))
+        )
+        if report_period is None or report_period > trading_date:
+            continue
+        announced = _datetime_value(
+            row.get("公告日期", row.get("f_ann_date", row.get("ann_date"))),
+            date_only=True,
+        )
+        updated = _datetime_value(row.get("更新日期", row.get("update_time")))
+        available_at = max(value for value in (announced, updated) if value is not None) if (
+            announced is not None or updated is not None
+        ) else fetched_at
+        if available_at > decision_at:
+            continue
+        statement_type = str(row.get("_statement_type", "UNKNOWN"))
+        source = str(row.get("_canonical_source", "akshare-sina"))
+        announcement_date = announced.date().isoformat() if announced else "unknown"
+        announcement_id = (
+            f"financial-{symbol}-{report_period.isoformat()}-{announcement_date}"
+        )
+        revision_seq = int(updated is not None and announced is not None and updated > announced)
+        for field_code, aliases in _FINANCIAL_FIELD_ALIASES.items():
+            value = next(
+                (
+                    _decimal(row.get(alias))
+                    for alias in aliases
+                    if _decimal(row.get(alias)) is not None
+                ),
+                None,
+            )
+            if value is None:
+                continue
+            record_id = f"{announcement_id}-{statement_type}-{field_code}-{row_index}"
+            result.append(
+                FinancialFact(
+                    **_pit(
+                        symbol,
+                        trading_date,
+                        available_at,
+                        fetched_at,
+                        record_id,
+                        ingestion_id,
+                        source,
+                        row,
+                        AvailabilityBasis.DATE_ONLY_CONSERVATIVE
+                        if announced is not None and announced.microsecond == 999999
+                        else AvailabilityBasis.VENDOR_TIMESTAMP,
+                    ),
+                    statement_type=statement_type,
+                    report_period_end=report_period,
+                    report_type=_report_type(report_period),
+                    fiscal_year=report_period.year,
+                    fiscal_quarter={3: 1, 6: 2, 9: 3, 12: 4}.get(report_period.month),
+                    field_code=field_code,
+                    value=value,
+                    unit="CNY",
+                    revision_seq=revision_seq,
+                    announcement_id=announcement_id,
+                )
+            )
+    return result
+
+
+def _fundamental_completeness_reasons(facts: list[FinancialFact]) -> list[str]:
+    if not facts:
+        return ["MISSING_FINANCIAL_FACTS"]
+    by_period: dict[date, set[str]] = {}
+    for fact in facts:
+        by_period.setdefault(fact.report_period_end, set()).add(fact.field_code)
+    latest = max(by_period)
+    reasons: list[str] = []
+    if not set(_FINANCIAL_FIELD_ALIASES) <= by_period[latest]:
+        reasons.append("INCOMPLETE_LATEST_FINANCIAL_PERIOD")
+    prior = _previous_year(latest)
+    if not {"REVENUE", "NET_PROFIT"} <= by_period.get(prior, set()):
+        reasons.append("MISSING_YOY_COMPARABLE_PERIOD")
+    return reasons
+
+
+def _official_disclosures(
+    *,
+    symbol: str,
+    trading_date: date,
+    decision_at: datetime,
+    fetched_at: datetime,
+    ingestion_id: Any,
+    rows: list[dict[str, Any]],
+) -> list[Disclosure]:
+    result: list[Disclosure] = []
+    for row in rows:
+        title = str(row.get("公告标题", row.get("title", ""))).strip()
+        published_at = _datetime_value(
+            row.get("公告时间", row.get("ann_date", row.get("publish_time"))),
+            date_only="公告时间" not in row,
+        )
+        if not title or published_at is None or published_at > decision_at:
+            continue
+        uri = str(row.get("公告链接", row.get("url", ""))).strip()
+        if not uri:
+            continue
+        fallback_id = stable_hash(
+            {"symbol": symbol, "title": title, "published_at": published_at}
+        )
+        announcement_id = str(
+            row.get("announcementId", row.get("ann_id", fallback_id))
+        )
+        source = str(row.get("_canonical_source", "cninfo"))
+        record_id = f"disclosure-{source}-{announcement_id}"
+        result.append(
+            Disclosure(
+                **_pit(
+                    symbol,
+                    trading_date,
+                    published_at,
+                    fetched_at,
+                    record_id,
+                    ingestion_id,
+                    source,
+                    row,
+                    AvailabilityBasis.OFFICIAL_TIMESTAMP,
+                ),
+                announcement_id=announcement_id,
+                title=title,
+                category_codes=_disclosure_categories(title),
+                published_at=published_at,
+                official_verified=True,
+                official_source="CNINFO" if source == "cninfo" else source.upper(),
+                document_uri=uri,
+                document_sha256=stable_hash(
+                    {
+                        "announcement_id": announcement_id,
+                        "title": title,
+                        "published_at": published_at,
+                        "document_uri": uri,
+                    }
+                ),
+            )
+        )
+    return sorted(
+        result,
+        key=lambda item: (item.published_at or item.available_at, item.announcement_id),
+    )
+
+
+def _news_items(
+    *,
+    symbol: str,
+    trading_date: date,
+    decision_at: datetime,
+    fetched_at: datetime,
+    ingestion_id: Any,
+    rows: list[dict[str, Any]],
+) -> list[NewsItem]:
+    window_start = decision_at - timedelta(days=30)
+    by_key: dict[tuple[str, date], NewsItem] = {}
+    stock_code = symbol.split(".", 1)[0]
+    for row in rows:
+        title = str(
+            row.get("新闻标题", row.get("title", row.get("tag", "")))
+        ).strip()
+        content = str(
+            row.get("新闻内容", row.get("content", row.get("summary", "")))
+        ).strip()
+        source = str(row.get("_canonical_source", "unknown-free-news"))
+        if source == "caixin" and stock_code not in f"{title} {content}":
+            continue
+        published_at = _datetime_value(
+            row.get(
+                "发布时间",
+                row.get("published_at", row.get("publish_time", row.get("date"))),
+            )
+        )
+        if not title or published_at is None:
+            continue
+        if not window_start <= published_at <= decision_at:
+            continue
+        uri = str(row.get("新闻链接", row.get("url", ""))).strip() or None
+        publisher = str(
+            row.get("文章来源", row.get("publisher", source))
+        ).strip() or source
+        content_sha256 = stable_hash(
+            {
+                "title": title,
+                "content": content,
+                "published_at": published_at,
+                "publisher": publisher,
+                "uri": uri,
+            }
+        )
+        news_id = stable_hash(
+            {
+                "symbol": symbol,
+                "normalized_title": "".join(title.casefold().split()),
+                "published_date": published_at.date(),
+                "content_sha256": content_sha256,
+            }
+        )
+        item = NewsItem(
+            **_pit(
+                symbol,
+                trading_date,
+                published_at,
+                fetched_at,
+                f"news-{source}-{news_id}",
+                ingestion_id,
+                source,
+                row,
+                AvailabilityBasis.VENDOR_TIMESTAMP,
+            ),
+            news_id=news_id,
+            title=title,
+            published_at=published_at,
+            publisher=publisher,
+            body_uri=uri,
+            content_sha256=content_sha256,
+            related_symbols=(symbol,),
+            official_verified=False,
+            source_uri=uri,
+        )
+        key = ("".join(title.casefold().split()), published_at.date())
+        by_key.setdefault(key, item)
+    return sorted(by_key.values(), key=lambda item: (item.published_at, item.news_id))
+
+
+def _cash_dividends(
+    *,
+    symbol: str,
+    trading_date: date,
+    decision_at: datetime,
+    fetched_at: datetime,
+    ingestion_id: Any,
+    rows: list[dict[str, Any]],
+) -> list[CashDividend]:
+    by_key: dict[tuple[int, date, Decimal], CashDividend] = {}
+    for row in rows:
+        source = str(row.get("_canonical_source", "unknown-dividend"))
+        announced = _datetime_value(
+            row.get(
+                "实施方案公告日期",
+                row.get("公告日期", row.get("ann_date", row.get("imp_ann_date"))),
+            ),
+            date_only=True,
+        )
+        payment_date = _date_value(
+            row.get(
+                "派息日",
+                row.get(
+                    "除权除息日",
+                    row.get("pay_date", row.get("ex_date", row.get("div_proc"))),
+                ),
+            )
+        )
+        raw_cash = _decimal(
+            row.get(
+                "派息比例",
+                row.get("派息", row.get("cash_div_tax", row.get("cash_div"))),
+            )
+        )
+        progress = str(row.get("进度", row.get("分红类型", row.get("div_proc", ""))))
+        if announced is None or payment_date is None or raw_cash is None or raw_cash <= 0:
+            continue
+        if source == "sina" and progress and "实施" not in progress:
+            continue
+        if announced > decision_at or payment_date > decision_at.date():
+            continue
+        per_share = raw_cash if source == "tushare" else raw_cash / Decimal("10")
+        if per_share <= 0:
+            continue
+        fiscal_year = _dividend_fiscal_year(row, announced.date())
+        record_date = _date_value(row.get("股权登记日", row.get("record_date")))
+        ex_dividend_date = _date_value(
+            row.get("除权日", row.get("除权除息日", row.get("ex_date")))
+        )
+        source_uri = str(row.get("url", row.get("公告链接", ""))).strip() or None
+        dividend_id = stable_hash(
+            {
+                "symbol": symbol,
+                "fiscal_year": fiscal_year,
+                "payment_date": payment_date,
+                "cash_dividend_per_share": per_share,
+            }
+        )
+        item = CashDividend(
+            **_pit(
+                symbol,
+                trading_date,
+                announced,
+                fetched_at,
+                f"dividend-{source}-{dividend_id}",
+                ingestion_id,
+                source,
+                row,
+                AvailabilityBasis.DATE_ONLY_CONSERVATIVE,
+            ),
+            dividend_id=dividend_id,
+            fiscal_year=fiscal_year,
+            implementation_announcement_date=announced.date(),
+            record_date=record_date,
+            ex_dividend_date=ex_dividend_date,
+            payment_date=payment_date,
+            cash_dividend_per_share=per_share,
+            official_verified=source == "cninfo",
+            source_uri=source_uri,
+        )
+        key = (fiscal_year, payment_date, per_share)
+        current = by_key.get(key)
+        if current is None or (item.official_verified and not current.official_verified):
+            by_key[key] = item
+    return sorted(by_key.values(), key=lambda item: (item.payment_date, item.dividend_id))
+
+
+def _dividend_fiscal_year(row: dict[str, Any], announcement_date: date) -> int:
+    raw = str(
+        row.get("报告时间", row.get("end_date", row.get("fiscal_year", "")))
+    )
+    for token in raw.replace("年", "-").split("-"):
+        if len(token) == 4 and token.isdigit():
+            return int(token)
+    return announcement_date.year - 1
+
+
+def _date_value(value: Any) -> date | None:
+    if value is None or str(value).strip() in {"", "None", "NaT", "nan"}:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    raw = str(value).strip().replace("/", "-")
+    if len(raw) == 8 and raw.isdigit():
+        raw = f"{raw[:4]}-{raw[4:6]}-{raw[6:]}"
+    try:
+        return date.fromisoformat(raw[:10])
+    except ValueError:
+        return None
+
+
+def _weekdays_between(start_date: date, end_date: date) -> list[date]:
+    values: list[date] = []
+    current = start_date
+    while current <= end_date:
+        if current.weekday() < 5:
+            values.append(current)
+        current += timedelta(days=1)
+    return values
+
+
+def _requires_authoritative_calendar(provider: CanonicalMarketProvider) -> bool:
+    if isinstance(provider, (AKShareCanonicalProvider, TushareCanonicalProvider)):
+        return True
+    return isinstance(provider, FallbackCanonicalProvider) and isinstance(
+        provider.primary, (AKShareCanonicalProvider, TushareCanonicalProvider)
+    )
+
+
+def _datetime_value(value: Any, *, date_only: bool = False) -> datetime | None:
+    if isinstance(value, datetime):
+        return (
+            value.replace(tzinfo=SHANGHAI)
+            if value.tzinfo is None
+            else value.astimezone(SHANGHAI)
+        )
+    value_date = _date_value(value)
+    if value_date is None:
+        return None
+    raw = str(value).strip().replace("/", "-")
+    if date_only or len(raw) <= 10 or (len(raw) == 8 and raw.isdigit()):
+        return conservative_date_availability(value_date)
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return conservative_date_availability(value_date)
+    return parsed.replace(tzinfo=SHANGHAI) if parsed.tzinfo is None else parsed.astimezone(SHANGHAI)
+
+
+def _report_type(period: date) -> str:
+    return {3: "QUARTERLY", 6: "SEMIANNUAL", 9: "QUARTERLY", 12: "ANNUAL"}.get(
+        period.month, "OTHER"
+    )
+
+
+def _previous_year(value: date) -> date:
+    try:
+        return value.replace(year=value.year - 1)
+    except ValueError:
+        return value.replace(year=value.year - 1, day=28)
+
+
+def _disclosure_categories(title: str) -> tuple[str, ...]:
+    mapping = {
+        "业绩": "PERFORMANCE",
+        "回购": "BUYBACK",
+        "增持": "HOLDING_INCREASE",
+        "减持": "HOLDING_DECREASE",
+        "风险": "RISK",
+        "处罚": "PENALTY",
+        "诉讼": "LITIGATION",
+        "退市": "DELISTING",
+    }
+    values = tuple(code for keyword, code in mapping.items() if keyword in title)
+    return values or ("GENERAL",)
+
+
+def _events_from_disclosures(
+    disclosures: list[Disclosure],
+) -> tuple[ActiveEventRisk, ...]:
+    severity_by_code = {
+        "RISK": EventSeverity.HIGH,
+        "PENALTY": EventSeverity.HIGH,
+        "LITIGATION": EventSeverity.HIGH,
+        "DELISTING": EventSeverity.CRITICAL,
+        "HOLDING_DECREASE": EventSeverity.MEDIUM,
+    }
+    result = []
+    for disclosure in disclosures:
+        severity = max(
+            (
+                severity_by_code[code]
+                for code in disclosure.category_codes
+                if code in severity_by_code
+            ),
+            default=None,
+            key=lambda value: list(EventSeverity).index(value),
+        )
+        if severity is not None:
+            result.append(
+                ActiveEventRisk(
+                    event_id=f"disclosure:{disclosure.announcement_id}",
+                    severity=severity,
+                    trusted_source=disclosure.official_verified,
+                )
+            )
+    return tuple(result)
+
+
+def _record_sources(rows: list[dict[str, Any]]) -> list[str]:
+    return sorted({str(row.get("_canonical_source", "unknown")) for row in rows})
 
 
 def _neutral_facts(
@@ -863,9 +1802,7 @@ def _returns(rows: list[dict[str, Any]]) -> dict[date, float]:
 
 
 def _tushare_rows(frame: Any) -> list[dict[str, Any]]:
-    if frame is None:
-        return []
-    rows = frame.to_dict(orient="records")
+    rows = vendor_records(frame)
     result: list[dict[str, Any]] = []
     for item in rows:
         raw_date = str(item.get("trade_date", ""))

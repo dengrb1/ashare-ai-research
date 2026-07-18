@@ -74,6 +74,8 @@ class SnapshotStatus(StrEnum):
 class RunStatus(StrEnum):
     PENDING = "PENDING"
     RUNNING = "RUNNING"
+    CANCEL_REQUESTED = "CANCEL_REQUESTED"
+    CANCELLED = "CANCELLED"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     FUSED = "FUSED"
@@ -200,6 +202,23 @@ class NewsItem(PointInTimeRecord):
     body_uri: str | None = None
     content_sha256: Sha256
     related_symbols: tuple[CanonicalSymbol, ...]
+    official_verified: bool = False
+    source_uri: str | None = None
+
+
+class CashDividend(PointInTimeRecord):
+    """Implemented cash dividend that was knowable at the decision time."""
+
+    dividend_id: str
+    fiscal_year: int
+    implementation_announcement_date: date
+    record_date: date | None = None
+    ex_dividend_date: date | None = None
+    payment_date: date
+    cash_dividend_per_share: Decimal = Field(gt=0)
+    currency: str = "CNY"
+    official_verified: bool = False
+    source_uri: str | None = None
 
 
 class FeatureValue(PointInTimeRecord):
@@ -284,11 +303,27 @@ class CompositeScore(FrozenModel):
     technical_score: Score100
     sentiment_score: Score100
     quality_confidence_score: Score100
+    adjusted_fundamental_score: Score100 = 0
+    base_total_score: Score100 = 0
+    dividend_bonus: float = Field(ge=0, le=10)
+    event_risk_multiplier: float = Field(ge=0, le=1)
     total_score: Score100
     formula_version: str
     agent_bundle_sha256: Sha256
     feature_snapshot_id: UUID
     evidence_bundle_sha256: Sha256
+
+    @model_validator(mode="before")
+    @classmethod
+    def fill_v1_compatibility_fields(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        result = dict(value)
+        result.setdefault("adjusted_fundamental_score", result.get("fundamental_score", 0))
+        result.setdefault("base_total_score", result.get("total_score", 0))
+        result.setdefault("dividend_bonus", 0.0)
+        result.setdefault("event_risk_multiplier", 1.0)
+        return result
 
 
 class Candidate(FrozenModel):
@@ -296,6 +331,8 @@ class Candidate(FrozenModel):
     trading_date: date
     decision_at: AwareDatetime
     total_score: Score100
+    base_total_score: Score100 | None = None
+    dividend_bonus: float = Field(default=0, ge=0, le=10)
     prediction_percentile: float = Field(ge=0, le=1)
     industry_code: str
     volatility: float = Field(gt=0)

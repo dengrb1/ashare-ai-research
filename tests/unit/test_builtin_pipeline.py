@@ -20,6 +20,7 @@ from ashare_ai.orchestration.builtin import BuiltinDailyBackend
 from ashare_ai.orchestration.bundle import make_demo_bundle
 from ashare_ai.orchestration.daily import daily_research_flow
 from ashare_ai.orchestration.production import ApplicationPipeline
+from ashare_ai.portfolio.events import ActiveEventRisk, EventSeverity
 from ashare_ai.storage.models import (
     AgentCall,
     AuditEvent,
@@ -30,6 +31,7 @@ from ashare_ai.storage.models import (
     ReportRow,
     ScoreRow,
 )
+from ashare_ai.universe.builder import UniverseResult
 
 
 @pytest.fixture(autouse=True)
@@ -118,6 +120,75 @@ def test_run_context_normalizes_postgres_utc_timestamp_to_shanghai(tmp_path) -> 
     assert manifest == {"source": "test"}
 
 
+def test_v2_scoring_reclassifies_legacy_generic_risk_event(tmp_path, monkeypatch) -> None:
+    trading_date = date(2026, 7, 15)
+    base = make_demo_bundle(trading_date)
+    original = base.disclosures[0]
+    target_symbol = original.symbol
+    ordinary_notice = original.model_copy(
+        update={
+            "title": "关于公司经营风险提示的公告",
+            "category_codes": ("RISK",),
+            "official_verified": True,
+        }
+    )
+    bundle = base.model_copy(
+        update={
+            "disclosures": (ordinary_notice, *base.disclosures[1:]),
+            "events_by_symbol": {
+                **base.events_by_symbol,
+                target_symbol: (
+                    ActiveEventRisk(
+                        event_id=f"disclosure:{ordinary_notice.announcement_id}",
+                        severity=EventSeverity.HIGH,
+                        trusted_source=True,
+                    ),
+                ),
+            },
+        }
+    )
+
+    class Builder:
+        def __init__(self) -> None:
+            self.acquisition_events: list[dict[str, object]] = []
+
+        def build(self, value_date, decision_at, *, required_symbols=()):
+            del required_symbols
+            assert value_date == trading_date
+            assert decision_at == bundle.decision_at
+            return bundle
+
+    monkeypatch.setenv("CANONICAL_BUNDLE_MODE", "akshare")
+    get_settings.cache_clear()
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    backend = BuiltinDailyBackend(
+        session_factory=factory,
+        object_root=tmp_path / "objects",
+        state_root=tmp_path / "state",
+        policy_path="configs/first_release.v2.json",
+        canonical_builder=Builder(),  # type: ignore[arg-type]
+    )
+
+    result = daily_research_flow(
+        trading_date, ApplicationPipeline(backend, session_factory=factory)
+    )
+
+    with factory() as session:
+        score = session.scalar(
+            select(ScoreRow).where(
+                ScoreRow.run_id == result["run_id"], ScoreRow.symbol == target_symbol
+            )
+        )
+        assert score is not None
+        assert score.event_risk_multiplier == 1
+
+
 def _prepared_llm_backend(tmp_path, client: FakeStructuredLLMClient):
     engine = create_engine(
         "sqlite+pysqlite://",
@@ -197,6 +268,44 @@ class ReloadingPipeline:
         return self._application().complete_run(run_id, report_id, status)
 
 
+def test_custom_research_scores_only_requested_eligible_symbols(tmp_path) -> None:
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    backend = BuiltinDailyBackend(
+        session_factory=factory,
+        object_root=tmp_path / "objects",
+        state_root=tmp_path / "state",
+        policy_path="configs/first_release.v1.json",
+        app_env="development",
+    )
+    pipeline = ApplicationPipeline(backend, session_factory=factory)
+    run_id = pipeline.start_run(date(2026, 7, 14))
+    targets = ["600000.SH", "600001.SH"]
+    with factory() as session:
+        run = session.get(JobRun, run_id)
+        assert run is not None
+        run.manifest = {
+            **run.manifest,
+            "research_scope": "CUSTOM",
+            "target_symbols": targets,
+            "tracked_symbols": targets,
+            "portfolio_requested": False,
+        }
+        session.commit()
+
+    pipeline.sync_reference_data(run_id)
+    snapshots = pipeline.ingest_and_verify(run_id)
+    universe_id = pipeline.build_universe(run_id, snapshots)
+    universe = backend._read_stage(run_id, "universe", UniverseResult)
+    assert universe_id == backend._stage_digest(run_id, "universe")
+    assert universe.included == tuple(targets)
+
+
 def test_builtin_demo_runs_full_daily_flow_and_is_reproducible(tmp_path) -> None:
     engine = create_engine(
         "sqlite+pysqlite://",
@@ -267,6 +376,88 @@ def test_builtin_demo_runs_full_daily_flow_and_is_reproducible(tmp_path) -> None
             len(session.scalars(select(AgentCall).where(AgentCall.run_id == first["run_id"])).all())
             == 60
         )
+
+
+@pytest.mark.parametrize(
+    ("complete_count", "expected_status", "expected_portfolio"),
+    [(15, "SUCCEEDED", True), (14, "FUSED", False)],
+)
+def test_formal_portfolio_gate_is_per_symbol(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    complete_count: int,
+    expected_status: str,
+    expected_portfolio: bool,
+) -> None:
+    monkeypatch.setenv("CANONICAL_BUNDLE_MODE", "akshare")
+    get_settings.cache_clear()
+    trading_date = date(2026, 7, 14)
+    base = make_demo_bundle(trading_date)
+    quality = {}
+    for index, (symbol, values) in enumerate(base.data_quality.items()):
+        complete = index < complete_count
+        quality[symbol] = {
+            **values,
+            "fundamental_placeholder": not complete,
+            "sentiment_placeholder": not complete,
+            "fundamental_reason_codes": []
+            if complete
+            else ["INCOMPLETE_LATEST_FINANCIAL_PERIOD"],
+            "sentiment_reason_codes": []
+            if complete
+            else ["MISSING_OFFICIAL_DISCLOSURE"],
+        }
+    bundle = base.model_copy(update={"data_quality": quality})
+
+    class Builder:
+        def __init__(self) -> None:
+            self.acquisition_events: list[dict[str, object]] = []
+
+        def build(self, value_date, decision_at, *, required_symbols=()):
+            del required_symbols
+            assert value_date == trading_date
+            assert decision_at == bundle.decision_at
+            return bundle
+
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    backend = BuiltinDailyBackend(
+        session_factory=factory,
+        object_root=tmp_path / "objects",
+        state_root=tmp_path / "state",
+        policy_path="configs/first_release.v1.json",
+        app_env="development",
+        canonical_builder=Builder(),  # type: ignore[arg-type]
+    )
+    result = daily_research_flow(
+        trading_date,
+        ApplicationPipeline(backend, session_factory=factory),
+    )
+
+    assert result["status"] == expected_status
+    with factory() as session:
+        run = session.get(JobRun, result["run_id"])
+        assert run is not None
+        gate = run.manifest["data_quality_gate"]
+        assert gate["formal_eligible_count"] == complete_count
+        assert len(gate["excluded_symbols"]) == 20 - complete_count
+        candidates = session.scalars(
+            select(CandidateRow).where(CandidateRow.run_id == result["run_id"])
+        ).all()
+        assert len(candidates) == complete_count
+        portfolio = session.scalar(
+            select(PortfolioRow).where(PortfolioRow.run_id == result["run_id"])
+        )
+        assert (portfolio is not None) is expected_portfolio
+        if expected_status == "FUSED":
+            assert run.manifest["risk_outcome"]["reason_code"] == (
+                "INSUFFICIENT_COMPLETE_SYMBOLS"
+            )
 
 
 def test_builtin_production_requires_canonical_bundle_and_accepts_json(

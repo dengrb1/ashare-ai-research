@@ -65,7 +65,29 @@ def test_daily_research_builds_cumulative_executable_backtest_snapshot(
             {latest.snapshot_id: latest.details["parquet_file_sha256"]},
         )
         assert any(signal.signal_date < bundle.trading_calendar[-1] for signal in bundle.signals)
-        assert all(bar.price_basis == "HFQ" for bar in bundle.bars)
+        assert all(bar.price_basis == "RAW" for bar in bundle.bars)
+        assert latest.details["research_price_basis"] == "RAW"
+        assert latest.details["execution_price_basis"] == "RAW"
+        canonical = list(
+            session.scalars(
+                select(SnapshotManifestRow).where(
+                    SnapshotManifestRow.run_id == latest.run_id,
+                    SnapshotManifestRow.dataset.in_(
+                        (
+                            "canonical_news",
+                            "canonical_cash_dividends",
+                            "canonical_trading_calendar",
+                        )
+                    ),
+                )
+            )
+        )
+        assert {item.dataset for item in canonical} == {
+            "canonical_news",
+            "canonical_cash_dividends",
+            "canonical_trading_calendar",
+        }
+        assert all(item.status == "COMMITTED" for item in canonical)
 
 
 def test_observe_only_research_still_builds_labeled_research_backtest_snapshot(

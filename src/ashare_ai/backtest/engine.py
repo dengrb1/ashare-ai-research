@@ -4,6 +4,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import date
 from decimal import ROUND_FLOOR, Decimal
+from itertools import pairwise
 from math import sqrt
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
@@ -159,6 +160,16 @@ class IndustryAttribution(BaseModel):
     total_cost: Decimal = Field(ge=0)
 
 
+class IndustryClassificationChange(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    symbol: str
+    old_industry_code: str
+    new_industry_code: str
+    changed_at: date
+    attribution_method: str
+
+
 class BacktestResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -169,6 +180,9 @@ class BacktestResult(BaseModel):
     capacity: tuple[CapacityResult, ...]
     symbol_attribution: tuple[SymbolAttribution, ...]
     industry_attribution: tuple[IndustryAttribution, ...]
+    industry_classification_changes: tuple[IndustryClassificationChange, ...]
+    attribution_method: str
+    warnings: tuple[str, ...]
     cost_attribution: CostAttribution
     manifest_hash: str
     input_hash: str
@@ -207,14 +221,11 @@ class BacktestEngine:
         pending_orders: tuple[Order, ...] = ()
         daily_nav: list[DailyNav] = []
         executions: list[ExecutionResult] = []
+        execution_dates: dict[str, date] = {}
         traded_notional = Decimal("0")
         signals_by_date: dict[date, list[BacktestSignal]] = defaultdict(list)
-        industry_by_symbol: dict[str, str] = {}
         for signal in signals:
             signals_by_date[signal.signal_date].append(signal)
-            previous_industry = industry_by_symbol.setdefault(signal.symbol, signal.industry_code)
-            if previous_industry != signal.industry_code:
-                raise ValueError(f"inconsistent industry for {signal.symbol}")
 
         for index, trading_date in enumerate(calendar):
             day_bars = {
@@ -245,6 +256,7 @@ class BacktestEngine:
                     },
                 )
                 executions.extend(day_results)
+                execution_dates.update({result.order_id: trading_date for result in day_results})
                 traded_notional += sum((result.notional for result in day_results), Decimal("0"))
                 pending_orders = ()
 
@@ -282,13 +294,20 @@ class BacktestEngine:
         )
         benchmarks = self._benchmark_results(calendar, benchmark_series, metrics.total_return)
         cost_attribution = self._cost_attribution(executions)
-        symbol_attribution, industry_attribution = self._pnl_attribution(
+        (
+            symbol_attribution,
+            industry_attribution,
+            industry_changes,
+            warnings,
+        ) = self._pnl_attribution(
             account,
             bars,
             calendar[-1],
             executions,
-            industry_by_symbol,
+            execution_dates,
+            signals,
         )
+        attribution_method = "latest-research-industry-at-or-before-terminal-exposure-date"
         capacity = self._capacity(executions)
         input_hash = stable_hash(
             {
@@ -322,6 +341,11 @@ class BacktestEngine:
             "capacity": [item.model_dump(mode="json") for item in capacity],
             "symbol_attribution": [item.model_dump(mode="json") for item in symbol_attribution],
             "industry_attribution": [item.model_dump(mode="json") for item in industry_attribution],
+            "industry_classification_changes": [
+                item.model_dump(mode="json") for item in industry_changes
+            ],
+            "attribution_method": attribution_method,
+            "warnings": warnings,
             "cost_attribution": cost_attribution.model_dump(mode="json"),
             "manifest_hash": self.config.input_manifest.manifest_hash,
             "input_hash": input_hash,
@@ -334,6 +358,9 @@ class BacktestEngine:
             capacity=capacity,
             symbol_attribution=symbol_attribution,
             industry_attribution=industry_attribution,
+            industry_classification_changes=industry_changes,
+            attribution_method=attribution_method,
+            warnings=warnings,
             cost_attribution=cost_attribution,
             manifest_hash=self.config.input_manifest.manifest_hash,
             input_hash=input_hash,
@@ -584,8 +611,14 @@ class BacktestEngine:
         bars: Mapping[tuple[date, str], ExecutionBar],
         final_date: date,
         executions: Sequence[ExecutionResult],
-        industry_by_symbol: Mapping[str, str],
-    ) -> tuple[tuple[SymbolAttribution, ...], tuple[IndustryAttribution, ...]]:
+        execution_dates: Mapping[str, date],
+        signals: Sequence[BacktestSignal],
+    ) -> tuple[
+        tuple[SymbolAttribution, ...],
+        tuple[IndustryAttribution, ...],
+        tuple[IndustryClassificationChange, ...],
+        tuple[str, ...],
+    ]:
         cash_flow: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
         explicit_cost: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
         slippage_cost: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
@@ -598,12 +631,47 @@ class BacktestEngine:
         for lot in account.lots:
             ending_quantity[lot.symbol] += lot.quantity
         symbols = sorted(set(cash_flow) | set(ending_quantity))
+        attribution_method = "latest-research-industry-at-or-before-terminal-exposure-date"
+        signals_by_symbol: dict[str, list[BacktestSignal]] = defaultdict(list)
+        for signal in sorted(signals, key=lambda item: (item.symbol, item.signal_date)):
+            signals_by_symbol[signal.symbol].append(signal)
+        industry_changes: list[IndustryClassificationChange] = []
+        for symbol, symbol_signals in sorted(signals_by_symbol.items()):
+            for previous, current in pairwise(symbol_signals):
+                if previous.industry_code == current.industry_code:
+                    continue
+                industry_changes.append(
+                    IndustryClassificationChange(
+                        symbol=symbol,
+                        old_industry_code=previous.industry_code,
+                        new_industry_code=current.industry_code,
+                        changed_at=current.signal_date,
+                        attribution_method=attribution_method,
+                    )
+                )
         symbol_results: list[SymbolAttribution] = []
         industry_totals: dict[str, tuple[Decimal, Decimal, Decimal]] = {}
         for symbol in symbols:
-            industry = industry_by_symbol.get(symbol)
-            if industry is None:
+            filled_dates = [
+                execution_dates[result.order_id]
+                for result in executions
+                if result.symbol == symbol
+                and result.filled_quantity > 0
+                and result.order_id in execution_dates
+            ]
+            terminal_exposure_date = (
+                final_date if ending_quantity[symbol] > 0 else max(filled_dates, default=final_date)
+            )
+            eligible_signals = [
+                signal
+                for signal in signals_by_symbol.get(symbol, ())
+                if signal.signal_date <= terminal_exposure_date
+            ]
+            if not eligible_signals:
                 raise ValueError(f"missing industry attribution for {symbol}")
+            industry = max(
+                eligible_signals, key=lambda item: (item.signal_date, item.decision_at)
+            ).industry_code
             final_bar = bars.get((final_date, symbol))
             if final_bar is None and ending_quantity[symbol] > 0:
                 raise ValueError(f"missing final attribution price for {symbol}")
@@ -642,7 +710,15 @@ class BacktestEngine:
             )
             for industry, values in sorted(industry_totals.items())
         )
-        return tuple(symbol_results), industry_results
+        warnings = tuple(
+            (
+                f"industry classification changed for {item.symbol}: "
+                f"{item.old_industry_code} -> {item.new_industry_code}; "
+                f"attribution_method={item.attribution_method}"
+            )
+            for item in industry_changes
+        )
+        return tuple(symbol_results), industry_results, tuple(industry_changes), warnings
 
     @staticmethod
     def _sorted_models(

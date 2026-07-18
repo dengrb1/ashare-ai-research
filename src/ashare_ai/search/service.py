@@ -567,7 +567,7 @@ def _deterministic_search(
     if intent.asset_type == "index":
         raise ValueError("指数查询当前支持行情与 K 线，不支持估值或财务指标")
     if intent.data_kind == "valuation":
-        facts = _akshare_valuation(symbol)
+        facts, upstream, source_uri, warnings = _valuation_facts(symbol)
         return _built_response(
             query=query,
             intent=intent,
@@ -575,11 +575,14 @@ def _deterministic_search(
             mode=mode,
             searched_at=searched_at,
             started=started,
-            upstream="eastmoney",
+            upstream=upstream,
             outcome={"kind": "valuation", "symbol": symbol, "facts": facts},
             content=json.dumps(facts, ensure_ascii=False, indent=2),
-            source_uri="https://quote.eastmoney.com/",
-            interpretation="估值指标来自东方财富 A 股实时快照，模型未生成或改写数值。",
+            source_uri=source_uri,
+            interpretation=(
+                "估值指标来自公开行情接口，模型未生成或改写数值。"
+            ),
+            warnings=warnings,
         )
     facts, report_date, notice_date, warnings = _akshare_financials(symbol, searched_at)
     return _built_response(
@@ -674,6 +677,84 @@ def _akshare_valuation(symbol: str) -> dict[str, Any]:
         "float_market_cap": "流通市值",
     }
     return {key: _json_value(row.get(column)) for key, column in mapping.items()}
+
+
+def _valuation_facts(
+    symbol: str,
+) -> tuple[dict[str, Any], str, str, tuple[str, ...]]:
+    """Read valuation facts with a free, independent fallback.
+
+    AKShare's all-market EastMoney endpoint occasionally closes connections while
+    a single-symbol quote remains available elsewhere.  A search should degrade
+    across providers instead of leaking that transport failure as an HTTP 500.
+    """
+
+    try:
+        return (
+            _akshare_valuation(symbol),
+            "eastmoney",
+            "https://quote.eastmoney.com/",
+            (),
+        )
+    except Exception:
+        try:
+            facts = _tencent_valuation(symbol)
+        except Exception as tencent_exc:
+            raise RuntimeError(
+                "免费估值数据源暂时不可用，请稍后重试"
+            ) from tencent_exc
+        return (
+            facts,
+            "tencent-finance",
+            "https://gu.qq.com/",
+            ("东方财富实时估值接口暂不可用，已自动切换腾讯公开行情接口。",),
+        )
+
+
+def _tencent_valuation(symbol: str) -> dict[str, Any]:
+    number, exchange = symbol.split(".", 1)
+    code = f"{exchange.casefold()}{number}"
+    response = httpx.get(
+        f"https://qt.gtimg.cn/q={code}",
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; ashare-ai-research/0.1)",
+            "Referer": "https://finance.qq.com/",
+        },
+        timeout=10.0,
+    )
+    response.raise_for_status()
+    text = response.content.decode("gbk", errors="replace")
+    match = re.search(r'="([^"]*)"', text)
+    if match is None:
+        raise RuntimeError(f"腾讯未返回 {symbol} 的估值数据")
+    fields = match.group(1).split("~")
+    if len(fields) <= 46 or fields[2] != number:
+        raise RuntimeError(f"腾讯未返回 {symbol} 的完整估值数据")
+    return {
+        "name": fields[1],
+        "price": _optional_number(fields[3]),
+        "pe_dynamic": _optional_number(fields[39]),
+        "pb": _optional_number(fields[46]),
+        "turnover_rate": _optional_number(fields[38]),
+        # Tencent publishes both market-cap fields in CNY 100 million.
+        "total_market_cap": _scaled_number(fields[45], 100_000_000),
+        "float_market_cap": _scaled_number(fields[44], 100_000_000),
+    }
+
+
+def _optional_number(value: Any) -> float | None:
+    text = str(value).strip()
+    if not text or text in {"-", "--"}:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _scaled_number(value: Any, scale: int) -> int | None:
+    number = _optional_number(value)
+    return round(number * scale) if number is not None else None
 
 
 def _akshare_financials(

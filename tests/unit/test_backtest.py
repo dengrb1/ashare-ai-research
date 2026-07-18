@@ -191,6 +191,10 @@ def make_signal(day: date, weight: str) -> BacktestSignal:
     )
 
 
+def make_industry_signal(day: date, weight: str, industry: str) -> BacktestSignal:
+    return make_signal(day, weight).model_copy(update={"industry_code": industry})
+
+
 def test_signal_is_executed_next_day_and_t1_sell_waits_until_following_session() -> None:
     engine, days, bars, rules, adv, volatility, benchmarks = make_fixture()
     result = engine.run(
@@ -282,6 +286,40 @@ def test_fixed_snapshot_hash_covers_adv_volatility_and_benchmarks() -> None:
         != baseline.input_hash
     )
 
+
+def test_industry_changes_use_latest_signal_before_terminal_exposure() -> None:
+    engine, days, bars, rules, adv, volatility, benchmarks = make_fixture()
+    signals = (
+        make_industry_signal(days[0], "0.5", "I0"),
+        make_industry_signal(days[1], "0", "PLACEHOLDER_3"),
+    )
+    first = engine.run(
+        trading_calendar=days,
+        bars=bars,
+        rules=rules,
+        signals=signals,
+        adv_amounts=adv,
+        volatilities=volatility,
+        benchmark_series=benchmarks,
+    )
+    second = engine.run(
+        trading_calendar=tuple(reversed(days)),
+        bars=dict(reversed(list(bars.items()))),
+        rules=dict(reversed(list(rules.items()))),
+        signals=tuple(reversed(signals)),
+        adv_amounts=dict(reversed(list(adv.items()))),
+        volatilities=dict(reversed(list(volatility.items()))),
+        benchmark_series=tuple(reversed(benchmarks)),
+    )
+    assert first.symbol_attribution[0].industry_code == "PLACEHOLDER_3"
+    assert first.industry_attribution[0].industry_code == "PLACEHOLDER_3"
+    assert first.industry_classification_changes[0].old_industry_code == "I0"
+    assert first.industry_classification_changes[0].new_industry_code == "PLACEHOLDER_3"
+    assert first.attribution_method == (
+        "latest-research-industry-at-or-before-terminal-exposure-date"
+    )
+    assert "I0 -> PLACEHOLDER_3" in first.warnings[0]
+    assert first.output_hash == second.output_hash
 
 def test_future_bar_canary_and_incomplete_benchmark_fail_closed() -> None:
     engine, days, bars, rules, adv, volatility, benchmarks = make_fixture()

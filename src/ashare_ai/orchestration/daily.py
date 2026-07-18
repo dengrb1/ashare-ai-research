@@ -49,6 +49,7 @@ class Pipeline(Protocol):
     def calculate_scores(self, run_id: str, agent_bundle_id: str) -> str: ...
     def qlib_filter(self, run_id: str, score_snapshot_id: str) -> str: ...
     def risk_state(self, run_id: str) -> str: ...
+    def portfolio_requested(self, run_id: str) -> bool: ...
     def build_portfolio(self, run_id: str, candidate_snapshot_id: str) -> str | None: ...
     def publish_report(self, run_id: str, portfolio_id: str | None, risk_state: str) -> str: ...
     def complete_run(self, run_id: str, report_id: str, status: str) -> dict[str, Any]: ...
@@ -67,7 +68,8 @@ def daily_research_flow(trading_date: date, pipeline: Pipeline) -> dict[str, Any
     risk_state = pipeline.risk_state(run_id)
     portfolio_id = None
     final_status = "FUSED" if risk_state == "OBSERVE_ONLY" else "SUCCEEDED"
-    if risk_state != "OBSERVE_ONLY":
+    portfolio_requested = getattr(pipeline, "portfolio_requested", lambda _: True)(run_id)
+    if risk_state != "OBSERVE_ONLY" and portfolio_requested:
         portfolio_id = pipeline.build_portfolio(run_id, candidate_snapshot_id)
     report_id = pipeline.publish_report(run_id, portfolio_id, risk_state)
     return pipeline.complete_run(run_id, report_id, final_status)
@@ -103,7 +105,8 @@ def scheduled_daily_research_flow(trading_date: date | None = None) -> dict[str,
     risk_state = _configured_call("risk_state", run_id)
     portfolio_id = None
     final_status = "FUSED" if risk_state == "OBSERVE_ONLY" else "SUCCEEDED"
-    if risk_state != "OBSERVE_ONLY":
+    portfolio_requested = bool(_configured_call("portfolio_requested", run_id))
+    if risk_state != "OBSERVE_ONLY" and portfolio_requested:
         portfolio_id = _configured_call("build_portfolio", run_id, candidate_snapshot_id)
     report_id = _configured_call("publish_report", run_id, portfolio_id, risk_state)
     return cast(
@@ -112,9 +115,20 @@ def scheduled_daily_research_flow(trading_date: date | None = None) -> dict[str,
     )
 
 
+@flow(name="ashare-user-auto-research-dispatch", log_prints=True)
+def auto_research_dispatch_flow() -> dict[str, Any]:
+    from ashare_ai.orchestration.research_schedule import dispatch_auto_research
+
+    return dispatch_auto_research()
+
+
 @task(retries=2, retry_delay_seconds=30)
 def _configured_call(method_name: str, *args: Any) -> Any:
     """Load the configured pipeline inside the task; only serializable IDs cross task edges."""
     pipeline = load_pipeline()
-    method = getattr(pipeline, method_name)
+    method = getattr(pipeline, method_name, None)
+    if method is None and method_name == "portfolio_requested":
+        return True
+    if method is None:
+        raise AttributeError(f"configured pipeline has no stage: {method_name}")
     return method(*args)

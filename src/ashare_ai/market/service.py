@@ -144,6 +144,7 @@ class AKShareMarketProvider:
                     "close": _number(item.get("收盘")) or 0.0,
                     "volume": _number(item.get("成交量")) or 0.0,
                     "amount": _number(item.get("成交额")),
+                    "turnover_rate": _number(item.get("换手率")),
                 }
             )
         return bars
@@ -284,6 +285,7 @@ class SinaMarketProvider:
                     "close": close,
                     "volume": volume,
                     "amount": _number(item.get("amount")),
+                    "turnover_rate": _number(item.get("turnover_rate")),
                 }
             )
         return sorted(bars, key=lambda item: item["timestamp"])[-limit:]
@@ -369,6 +371,7 @@ class TencentHfqDailyMarketProvider:
                     "close": close,
                     "volume": volume,
                     "amount": _number(item[8]) if len(item) > 8 else None,
+                    "turnover_rate": None,
                 }
         return sorted(bars_by_timestamp.values(), key=lambda item: item["timestamp"])[-limit:]
 
@@ -450,6 +453,7 @@ class TushareMarketProvider:
                     "close": _number(item.get("close")) or 0.0,
                     "volume": _number(item.get("vol")) or 0.0,
                     "amount": _number(item.get("amount")),
+                    "turnover_rate": _number(item.get("turnover_rate")),
                 }
             )
         return result
@@ -613,7 +617,9 @@ class MarketDataService:
         cached_at = datetime.fromisoformat(record["cached_at"])
         return (now - cached_at).total_seconds() <= self.settings.market_stale_seconds
 
-    def quotes(self, symbols: list[str]) -> list[dict[str, Any]]:
+    def quotes(
+        self, symbols: list[str], *, force_refresh: bool = False
+    ) -> list[dict[str, Any]]:
         normalized = sorted(set(normalize_symbol(item) for item in symbols if item.strip()))
         if not normalized:
             return []
@@ -628,7 +634,8 @@ class MarketDataService:
         now = self.clock()
         cached = self._get(key, now)
         if (
-            cached is not None
+            not force_refresh
+            and cached is not None
             and self._fresh(cached, now)
             and len(selected(cached)) == len(normalized)
         ):
@@ -637,7 +644,8 @@ class MarketDataService:
             now = self.clock()
             cached = self._get(key, now)
             if (
-                cached is not None
+                not force_refresh
+                and cached is not None
                 and self._fresh(cached, now)
                 and len(selected(cached)) == len(normalized)
             ):
@@ -734,6 +742,7 @@ class MarketDataService:
         limit: int = 300,
         start: datetime | None = None,
         end: datetime | None = None,
+        force_refresh: bool = False,
     ) -> dict[str, Any]:
         normalized = normalize_symbol(symbol)
         provider_period = PERIODS.get(period.casefold())
@@ -742,12 +751,12 @@ class MarketDataService:
         key = f"klines:{normalized}:{provider_period}:{limit}:{start}:{end}:hfq"
         now = self.clock()
         cached = self._get(key, now)
-        if cached is not None and self._fresh(cached, now):
+        if not force_refresh and cached is not None and self._fresh(cached, now):
             return cast(dict[str, Any], cached["value"])
         with self._lock(key):
             now = self.clock()
             cached = self._get(key, now)
-            if cached is not None and self._fresh(cached, now):
+            if not force_refresh and cached is not None and self._fresh(cached, now):
                 return cast(dict[str, Any], cached["value"])
             redis_client, refresh_token, claimed = self._claim_refresh(key)
             if not claimed:

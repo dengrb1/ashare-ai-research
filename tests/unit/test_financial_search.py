@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
 import httpx
+import pytest
 import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -23,6 +24,7 @@ from ashare_ai.search.service import (
     SearchEntity,
     SearchRecall,
     _minimal_subprocess_env,
+    _valuation_facts,
     get_financial_search_service,
 )
 from ashare_ai.storage.models import Base, UserAccount
@@ -153,6 +155,52 @@ def test_search_cache_single_flight_and_user_rate_limit() -> None:
     assert service.allow_user_request("user-1") is True
     assert service.allow_user_request("user-1") is True
     assert service.allow_user_request("user-1") is False
+
+
+@respx.mock
+def test_valuation_falls_back_to_free_tencent_source(monkeypatch) -> None:
+    def unavailable(_: str) -> dict[str, object]:
+        raise ConnectionError("EastMoney closed the connection")
+
+    monkeypatch.setattr("ashare_ai.search.service._akshare_valuation", unavailable)
+    fields = [""] * 47
+    fields[1] = "宁德时代"
+    fields[2] = "300750"
+    fields[3] = "360.00"
+    fields[38] = "1.20"
+    fields[39] = "21.09"
+    fields[44] = "15325.33"
+    fields[45] = "16655.94"
+    fields[46] = "5.10"
+    respx.get("https://qt.gtimg.cn/q=sz300750").mock(
+        return_value=httpx.Response(
+            200, content=f'v_sz300750="{"~".join(fields)}";'.encode("gbk")
+        )
+    )
+
+    facts, upstream, uri, warnings = _valuation_facts("300750.SZ")
+
+    assert upstream == "tencent-finance"
+    assert uri == "https://gu.qq.com/"
+    assert facts["price"] == 360.0
+    assert facts["pe_dynamic"] == 21.09
+    assert facts["pb"] == 5.1
+    assert facts["total_market_cap"] == 1_665_594_000_000
+    assert warnings == ("东方财富实时估值接口暂不可用，已自动切换腾讯公开行情接口。",)
+
+
+@respx.mock
+def test_valuation_returns_clear_service_error_when_all_sources_fail(monkeypatch) -> None:
+    def unavailable(_: str) -> dict[str, object]:
+        raise ConnectionError("unavailable")
+
+    monkeypatch.setattr("ashare_ai.search.service._akshare_valuation", unavailable)
+    respx.get("https://qt.gtimg.cn/q=sz300750").mock(
+        side_effect=httpx.ConnectError("unavailable")
+    )
+
+    with pytest.raises(RuntimeError, match="免费估值数据源暂时不可用"):
+        _valuation_facts("300750.SZ")
 
 
 def test_authenticated_financial_search_api_uses_default_service() -> None:

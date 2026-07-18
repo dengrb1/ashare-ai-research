@@ -75,24 +75,26 @@ def mark_backtest_failed(
         failed = session.get(BacktestRun, backtest_id)
         if failed is None:
             return
+        job = session.get(JobRun, failed.run_id) if failed.run_id else None
+        if failed.status == "FAILED" and (job is None or job.status == "FAILED"):
+            return
         failed.status = "FAILED"
         failed.completed_at = datetime.now(UTC)
-        if failed.run_id:
-            job = session.get(JobRun, failed.run_id)
-            if job is not None:
-                job.status = "FAILED"
-                job.error_message = str(error)
-                job.completed_at = datetime.now(UTC)
-                AuditLogger(session).record(
-                    job.run_id,
-                    "BACKTEST_FAILED",
-                    "Backtest execution failed",
-                    severity="ERROR",
-                    details={
-                        "backtest_id": backtest_id,
-                        "error_type": type(error).__name__,
-                    },
-                )
+        if job is not None:
+            job.status = "FAILED"
+            job.error_message = str(error)
+            job.completed_at = datetime.now(UTC)
+            AuditLogger(session).record(
+                job.run_id,
+                "BACKTEST_FAILED",
+                "Backtest execution failed",
+                severity="ERROR",
+                details={
+                    "backtest_id": backtest_id,
+                    "error_type": type(error).__name__,
+                    "retry_count": failed.retry_count,
+                },
+            )
         session.commit()
 
 

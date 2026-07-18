@@ -16,6 +16,7 @@ import { AdminPage } from './pages/AdminPage'
 import { FinancialSearchPage } from './pages/FinancialSearchPage'
 import { ModelSettingsPage } from './pages/ModelSettingsPage'
 import { ThemeProvider } from './context/ThemeContext'
+import { RefreshProvider } from './context/RefreshContext'
 
 function ProtectedApp() {
   const { user, loading } = useAuth()
@@ -49,5 +50,5 @@ function AppRoutes() {
 }
 
 export function App() {
-  return <ThemeProvider><AuthProvider><AppRoutes /></AuthProvider></ThemeProvider>
+  return <ThemeProvider><AuthProvider><RefreshProvider><AppRoutes /></RefreshProvider></AuthProvider></ThemeProvider>
 }

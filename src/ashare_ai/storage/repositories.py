@@ -88,7 +88,7 @@ class QueryRepository:
         conditions = [
             JobRun.trading_date == trading_date,
             JobRun.run_type == "DAILY",
-            JobRun.status == "SUCCEEDED",
+            JobRun.status.in_(("SUCCEEDED", "FUSED")),
         ]
         if not include_all_users:
             conditions.append(JobRun.user_id == user_id)
@@ -102,6 +102,21 @@ class QueryRepository:
                 JobRun.run_id.desc(),
             )
             .limit(1)
+        )
+
+    def result_run_id(
+        self,
+        trading_date: date,
+        run_id: str | None = None,
+        *,
+        user_id: str | None = None,
+        include_all_users: bool = True,
+    ) -> str | None:
+        return self._result_run_id(
+            trading_date,
+            run_id,
+            user_id=user_id,
+            include_all_users=include_all_users,
         )
 
     def scores(

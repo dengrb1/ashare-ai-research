@@ -10,27 +10,63 @@
     th, td { border-bottom: 1px solid #d5d8dc; padding: .55rem; text-align: right; }
     th:first-child, td:first-child { text-align: left; }
     .warning { background: #fff3cd; padding: 1rem; border-left: 4px solid #f0ad4e; }
+    .info { background: #eef6ff; padding: 1rem; border-left: 4px solid #4a90e2; }
+    .muted { color: #6b7280; }
+    .config { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .75rem; margin: 1rem 0; }
+    .config div { border: 1px solid #d5d8dc; border-radius: .5rem; padding: .75rem; }
+    .config span { display: block; color: #6b7280; font-size: .85rem; }
     .audit { color: #566573; font-size: .9rem; overflow-wrap: anywhere; }
   </style>
 </head>
 <body>
+  {% set scope = research_scope|default('MARKET') %}
+  {% set targets = target_symbols|default([]) %}
+  {% set budget = research_budget|default({}) %}
+  {% set quality = quality_summary|default({'symbol_count': 0, 'fundamental_placeholder_count': 0, 'sentiment_placeholder_count': 0, 'industry_placeholder_count': 0}) %}
+  {% set outcome = portfolio_outcome|default({}) %}
+  {% set eligible = formal_eligible_symbols|default([]) %}
+  {% set exclusions = excluded_symbols|default({}) %}
+  {% set risk_code = risk_reason_code|default(None) %}
+  {% set risk_message = risk_reason_message|default(None) %}
   <h1>{{ trading_date }} A股 AI 投研日报</h1>
   <p>决策时点：{{ decision_at }}；运行状态：{{ run_status }}</p>
-  {% if fused %}<p class="warning">最大回撤熔断已触发：仅输出观察报告，不生成新增模拟仓位。</p>{% endif %}
+  {% if fused %}<p class="warning">当前为观察模式：{{ risk_message or '正式组合条件未满足' }}。仅输出研究结果，不生成新增模拟仓位。</p>{% endif %}
+  <h2>本次研究配置</h2>
+  <div class="config">
+    <div><span>研究范围</span><strong>{{ {'MARKET': '动态市场股票池', 'WATCHLIST': '我的自选与持仓', 'CUSTOM': '手工指定股票'}.get(scope, scope) }}</strong></div>
+    <div><span>指定股票数</span><strong>{{ targets|length if targets else '动态筛选' }}</strong></div>
+    <div><span>总资金预算</span><strong>{{ budget.get('total_budget') or '使用系统模拟净值' }}</strong></div>
+    <div><span>单股最高投入</span><strong>{{ budget.get('per_symbol_budget') or '遵循 8% 仓位上限' }}</strong></div>
+    <div><span>最高可接受股价</span><strong>{{ budget.get('max_stock_price') or '不限' }}</strong></div>
+  </div>
+  {% if targets %}<p class="muted">指定范围：{{ targets|join('、') }}</p>{% endif %}
+  <h2>数据完整性</h2>
+  <p class="{{ 'warning' if quality.fundamental_placeholder_count or quality.sentiment_placeholder_count else 'info' }}">
+    本次数据包共 {{ quality.symbol_count }} 只证券；基本面占位 {{ quality.fundamental_placeholder_count }} 只，
+    新闻/情绪占位 {{ quality.sentiment_placeholder_count }} 只，行业占位 {{ quality.industry_placeholder_count }} 只。
+    占位数据不会被当作正式事实，也不会生成可执行组合。
+  </p>
+  <p class="info">正式可用股票 {{ eligible|length }} 只；被数据门禁排除 {{ exclusions|length }} 只。</p>
+  {% if exclusions %}
+  <table>
+    <thead><tr><th>观察对象</th><th>排除原因码</th></tr></thead>
+    <tbody>{% for symbol, reasons in exclusions.items() %}<tr><td>{{ symbol }}</td><td>{{ reasons|join('、') }}</td></tr>{% endfor %}</tbody>
+  </table>
+  {% endif %}
   <h2>候选池</h2>
   <table>
-    <thead><tr><th>证券</th><th>综合分</th><th>Qlib 分位</th><th>行业</th><th>事件乘数</th></tr></thead>
-    <tbody>{% for row in candidates %}<tr><td>{{ row.symbol }}</td><td>{{ "%.2f"|format(row.total_score) }}</td><td>{{ "%.2f"|format(row.prediction_percentile) }}</td><td>{{ row.industry_code }}</td><td>{{ "%.2f"|format(row.event_risk_multiplier) }}</td></tr>{% endfor %}</tbody>
+    <thead><tr><th>证券</th><th>最终分</th><th>基础分</th><th>分红加分</th><th>事件乘数</th><th>Qlib 分位</th><th>行业</th></tr></thead>
+    <tbody>{% for row in candidates %}<tr><td>{{ row.symbol }}</td><td>{{ "%.2f"|format(row.total_score) }}</td><td>{{ "%.2f"|format(row.base_total_score if row.base_total_score is not none else row.total_score) }}</td><td>{{ "%.2f"|format(row.dividend_bonus|default(0)) }}</td><td>{{ "%.2f"|format(row.event_risk_multiplier) }}</td><td>{{ "%.2f"|format(row.prediction_percentile) }}</td><td>{{ ('行业数据暂缺（占位分组 ' ~ row.industry_code.split('_')[-1] ~ '）') if row.industry_code.startswith('PLACEHOLDER_') else row.industry_code }}</td></tr>{% endfor %}</tbody>
   </table>
   <h2>下一交易日模拟组合</h2>
   <table>
     <thead><tr><th>证券</th><th>权重</th><th>目标股数</th><th>参考价</th></tr></thead>
     <tbody>{% for row in positions %}<tr><td>{{ row.symbol }}</td><td>{{ "%.2f%%"|format(row.weight * 100) }}</td><td>{{ row.target_shares }}</td><td>{{ row.reference_price }}</td></tr>{% endfor %}</tbody>
   </table>
+  {% if not positions %}<p class="info">{{ risk_message or research_only_reason|default(None) or outcome.get('reason', {}).get('message') or '观察模式下不生成模拟组合。' }}</p>{% endif %}
   <h2>风险与审计</h2>
-  <ul>{% for risk in risks %}<li>{{ risk }}</li>{% endfor %}</ul>
+  <ul>{% for risk in risks %}<li>{{ risk }}</li>{% endfor %}{% if risk_code %}<li>{{ risk_code }}：{{ risk_message }}</li>{% endif %}</ul>
   <p class="audit">run_id={{ run_id }} · input_hash={{ input_hash }} · formula={{ formula_version }} · rule={{ trade_rule_version }}</p>
   <p>本报告为模拟研究输出，不构成投资建议，不接入自动实盘下单。</p>
 </body>
 </html>
-

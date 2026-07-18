@@ -17,6 +17,7 @@ from ashare_ai.core.contracts import AgentComponentResult, EvidenceRef
 from ashare_ai.core.hashing import sha256_bytes
 from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.storage.models import (
+    AuditEvent,
     BacktestRun,
     Base,
     CandidateRow,
@@ -355,6 +356,163 @@ def test_daily_result_endpoints_select_latest_successful_run() -> None:
         assert client.get(f"/api/v1/candidates/{trading_date}").json()[0]["total_score"] == 82
         assert client.get(f"/api/v1/portfolios/{trading_date}").json()["run_id"] == "new"
         assert client.get(f"/api/v1/reports/{trading_date}").json()["run_id"] == "new"
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+
+def test_latest_fused_results_are_visible_without_reusing_old_portfolio() -> None:
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    session = Session(engine, expire_on_commit=False)
+    trading_date = date(2026, 7, 14)
+    now = datetime(2026, 7, 14, 10, tzinfo=UTC)
+    _add_result_set(session, "old-success", trading_date, now, "SUCCEEDED", 61)
+    _add_result_set(session, "new-fused", trading_date, now + timedelta(minutes=1), "FUSED", 88)
+    fused_run = session.get(JobRun, "new-fused")
+    assert fused_run is not None
+    fused_run.manifest = {
+        "data_quality_gate": {
+            "formal_eligible_count": 8,
+            "formal_eligible_symbols": ["600000.SH"],
+            "excluded_symbols": {"600001.SH": ["MISSING_OFFICIAL_DISCLOSURE"]},
+        },
+        "risk_outcome": {
+            "state": "OBSERVE_ONLY",
+            "reason_code": "INSUFFICIENT_COMPLETE_SYMBOLS",
+            "reason_message": "正式可用股票仅 8 只，少于组合要求的 15 只",
+        },
+    }
+    session.query(PortfolioRow).filter(PortfolioRow.run_id == "new-fused").delete()
+    session.commit()
+
+    _override_authenticated_admin(session)
+    try:
+        client = TestClient(app)
+        assert client.get(f"/api/v1/scores/{trading_date}").json()[0]["total_score"] == 88
+        assert client.get(f"/api/v1/candidates/{trading_date}").json()[0]["total_score"] == 88
+        assert client.get(f"/api/v1/reports/{trading_date}").json()["run_id"] == "new-fused"
+        portfolio = client.get(f"/api/v1/portfolios/{trading_date}")
+        assert portfolio.status_code == 200
+        assert portfolio.json()["run_id"] == "new-fused"
+        assert portfolio.json()["observation_only"] is True
+        assert portfolio.json()["positions"] == []
+        assert portfolio.json()["reason_code"] == "INSUFFICIENT_COMPLETE_SYMBOLS"
+        assert portfolio.json()["excluded_symbols"] == {
+            "600001.SH": ["MISSING_OFFICIAL_DISCLOSURE"]
+        }
+        recent = client.get(
+            "/api/v1/research/runs", params={"limit": 5, "trading_date": trading_date}
+        ).json()
+        assert recent[0]["status"] == "FUSED"
+        assert recent[0]["progress"] == 100
+        assert recent[0]["report_id"] == "report-new-fused"
+        assert recent[0]["reason_code"] == "INSUFFICIENT_COMPLETE_SYMBOLS"
+        assert recent[0]["formal_eligible_count"] == 8
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+
+def test_failed_backtest_retry_is_single_queue_transition(monkeypatch) -> None:
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    session = Session(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    session.add(
+        JobRun(
+            run_id="retry-snapshot-run",
+            user_id="legacy-test-admin",
+            run_type="DAILY",
+            trading_date=date(2025, 12, 31),
+            decision_at=now,
+            status="SUCCEEDED",
+            idempotency_key="retry-snapshot-key",
+            manifest={},
+            input_hash="1" * 64,
+            started_at=now,
+            completed_at=now,
+        )
+    )
+    session.add(
+        SnapshotManifestRow(
+            snapshot_id="retry-snapshot",
+            run_id="retry-snapshot-run",
+            dataset="backtest_bundle",
+            source="fixture",
+            schema_version="1",
+            adapter_version="1",
+            fetched_at=now,
+            row_count=1,
+            payload_sha256="2" * 64,
+            parquet_uri="file:///retry.parquet",
+            status="COMMITTED",
+            details={"parquet_file_sha256": "3" * 64},
+            committed_at=now,
+        )
+    )
+    session.add(
+        JobRun(
+            run_id="retry-job",
+            user_id="legacy-test-admin",
+            run_type="BACKTEST",
+            trading_date=date(2025, 12, 31),
+            decision_at=now,
+            status="FAILED",
+            idempotency_key="retry-job-key",
+            manifest={},
+            input_hash="4" * 64,
+            started_at=now,
+            completed_at=now,
+            error_message="old failure",
+        )
+    )
+    session.add(
+        BacktestRun(
+            backtest_id="retry-backtest",
+            run_id="retry-job",
+            user_id="legacy-test-admin",
+            name="retry",
+            status="FAILED",
+            start_date=date(2025, 1, 1),
+            end_date=date(2025, 12, 31),
+            config={"snapshot_file_hashes": {"retry-snapshot": "3" * 64}},
+            snapshot_ids=["retry-snapshot"],
+            metrics={"old": True},
+            artifacts={"old": True},
+            input_hash="4" * 64,
+            output_hash="5" * 64,
+            created_at=now,
+            completed_at=now,
+        )
+    )
+    session.commit()
+    queued: list[str] = []
+    monkeypatch.setattr("ashare_ai.api.app.read_backtest_bundle", lambda *_: None)
+    monkeypatch.setattr("ashare_ai.api.app.enqueue_backtest", queued.append)
+    _override_authenticated_admin(session)
+    try:
+        client = TestClient(app)
+        first = client.post("/api/v1/backtests/retry-backtest/retry")
+        second = client.post("/api/v1/backtests/retry-backtest/retry")
+        assert first.status_code == 202
+        assert first.json()["retry_count"] == 1
+        assert first.json()["metrics"] is None
+        assert second.status_code == 409
+        assert queued == ["retry-backtest"]
+        events = session.query(AuditEvent).filter(
+            AuditEvent.run_id == "retry-job",
+            AuditEvent.event_type == "BACKTEST_RETRY_REQUESTED",
+        ).all()
+        assert len(events) == 1
     finally:
         app.dependency_overrides.clear()
         session.close()

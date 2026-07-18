@@ -36,6 +36,6 @@ describe('login flow', () => {
   })
 
   it('keeps the assets page heading when nginx redirects to a trailing slash', () => {
-    expect(titleForPathname('/assets/')).toEqual(['自选与持仓', '关注列表与模拟持仓实时状态'])
+    expect(titleForPathname('/assets/')).toEqual(['自选与持仓', '关注列表与个人持仓记录'])
   })
 })

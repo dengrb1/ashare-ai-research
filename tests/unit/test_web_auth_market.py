@@ -80,6 +80,7 @@ class FallbackProvider(QuoteProvider):
                 "close": 10.5,
                 "volume": 100,
                 "amount": 1000,
+                "turnover_rate": 1.25,
             }
         ]
 
@@ -295,6 +296,88 @@ def test_login_csrf_admin_and_disabled_session_invalidation() -> None:
         session.close()
 
 
+def test_market_kline_api_forwards_segment_boundaries_and_refresh(monkeypatch) -> None:
+    session, _, _ = _database()
+    calls: list[dict[str, object]] = []
+
+    class StubMarket:
+        def klines(self, symbol, period, *, limit, start, end, force_refresh):
+            calls.append(
+                {
+                    "symbol": symbol,
+                    "period": period,
+                    "limit": limit,
+                    "start": start,
+                    "end": end,
+                    "force_refresh": force_refresh,
+                }
+            )
+            return {
+                "symbol": symbol,
+                "period": period,
+                "adjustment": "hfq",
+                "bars": [
+                    {
+                        "timestamp": "2026-07-15T09:31:00+08:00",
+                        "open": 10,
+                        "high": 11,
+                        "low": 9,
+                        "close": 10.5,
+                        "volume": 100,
+                        "amount": None,
+                    }
+                ],
+                "status": {
+                    "source": "fixture",
+                    "collected_at": "2026-07-17T12:00:00+08:00",
+                    "cached_at": "2026-07-17T12:00:00+08:00",
+                    "delayed": False,
+                    "stale": False,
+                },
+            }
+
+    def override_db():
+        yield session
+
+    monkeypatch.setattr("ashare_ai.api.app.get_market_data_service", lambda: StubMarket())
+    app.dependency_overrides[get_db] = override_db
+    try:
+        client = TestClient(app)
+        client.post(
+            "/api/v1/auth/login",
+            json={"username": "alice", "password": "alice-password"},
+        )
+        response = client.get(
+            "/api/v1/market/klines/600519.SH",
+            params={
+                "period": "1m",
+                "limit": 1200,
+                "adjust": "hfq",
+                "start": "2026-07-10T09:30:00+08:00",
+                "end": "2026-07-17T15:00:00+08:00",
+                "refresh": "true",
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["bars"][0]["amount"] is None
+        assert calls == [
+            {
+                "symbol": "600519.SH",
+                "period": "1m",
+                "limit": 1200,
+                "start": datetime.fromisoformat("2026-07-10T09:30:00+08:00"),
+                "end": datetime.fromisoformat("2026-07-17T15:00:00+08:00"),
+                "force_refresh": True,
+            }
+        ]
+        assert client.get(
+            "/api/v1/market/klines/600519.SH", params={"adjust": "qfq"}
+        ).status_code == 422
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+
 def test_user_scoped_latest_run_selection() -> None:
     session, _, user = _database()
     other = session.scalar(select(UserAccount).where(UserAccount.username == "admin"))
@@ -434,6 +517,7 @@ def test_tushare_fallback_is_labeled_and_hfq_kline_contract_is_preserved() -> No
     assert kline["adjustment"] == "hfq"
     assert kline["status"]["source"] == "tushare"
     assert kline["bars"][0]["close"] == 10.5
+    assert kline["bars"][0]["turnover_rate"] == 1.25
 
 
 def test_missing_primary_quote_is_filled_by_tushare_without_dropping_primary_data() -> None:
@@ -798,12 +882,26 @@ def test_research_submission_prepares_frozen_manifest_and_deduplicates(monkeypat
         csrf = client.cookies.get("ashare_csrf")
         first = client.post(
             "/api/v1/research/runs",
-            json={"trading_date": "2026-07-14"},
+            json={
+                "trading_date": "2026-07-14",
+                "scope": "CUSTOM",
+                "symbols": ["600519.SH", "000858.SZ"],
+                "total_budget": 1_000_000,
+                "per_symbol_budget": 80_000,
+                "max_stock_price": 500,
+            },
             headers={"x-csrf-token": csrf},
         )
         second = client.post(
             "/api/v1/research/runs",
-            json={"trading_date": "2026-07-14"},
+            json={
+                "trading_date": "2026-07-14",
+                "scope": "CUSTOM",
+                "symbols": ["600519.SH", "000858.SZ"],
+                "total_budget": 1_000_000,
+                "per_symbol_budget": 80_000,
+                "max_stock_price": 500,
+            },
             headers={"x-csrf-token": csrf},
         )
         assert first.status_code == 202
@@ -813,8 +911,28 @@ def test_research_submission_prepares_frozen_manifest_and_deduplicates(monkeypat
         assert run.user_id == user.user_id
         assert run.status == "PENDING"
         assert run.manifest["dependency_lock_sha256"] == "d" * 64
+        assert run.manifest["research_scope"] == "CUSTOM"
+        assert run.manifest["target_symbols"] == ["600519.SH", "000858.SZ"]
+        assert run.manifest["tracked_symbols"] == ["000858.SZ", "600519.SH"]
+        assert run.manifest["research_budget"] == {
+            "total_budget": "1000000",
+            "per_symbol_budget": "80000",
+            "max_stock_price": "500",
+        }
+        assert run.manifest["portfolio_requested"] is False
+        assert run.input_hash != "i" * 64
         assert pipeline.start_calls == 1
         assert queued == ["prepared-run"]
+        run.status = "SUCCEEDED"
+        run.active_research_key = None
+        session.commit()
+        portfolio = client.get(
+            "/api/v1/portfolios/2026-07-14",
+            params={"run_id": "prepared-run"},
+        )
+        assert portfolio.status_code == 200
+        assert portfolio.json()["research_only"] is True
+        assert "少于 15 只" in portfolio.json()["message"]
     finally:
         app.dependency_overrides.clear()
         session.close()

@@ -51,7 +51,12 @@ from ashare_ai.orchestration.bundle import (
     make_demo_bundle,
 )
 from ashare_ai.portfolio.builder import CandidateQuote, PortfolioBuilder, PortfolioConfig
-from ashare_ai.portfolio.events import EventRiskPolicy, EventSeverity, aggregate_event_risk
+from ashare_ai.portfolio.events import (
+    EventRiskPolicy,
+    EventSeverity,
+    aggregate_event_risk,
+    classify_event_risks,
+)
 from ashare_ai.portfolio.risk import (
     DrawdownConfig,
     DrawdownControlState,
@@ -59,8 +64,10 @@ from ashare_ai.portfolio.risk import (
     transition_drawdown_state,
 )
 from ashare_ai.reports.daily import DailyReportService
-from ashare_ai.scoring.formula import FORMULA_VERSION, build_composite_score
+from ashare_ai.scoring.dividends import calculate_dividend_bonus
+from ashare_ai.scoring.formula import FORMULA_VERSION, FORMULA_VERSION_V2, build_composite_score
 from ashare_ai.storage.database import SessionLocal
+from ashare_ai.storage.lake import ImmutableLake
 from ashare_ai.storage.models import (
     AgentCall,
     CandidateRow,
@@ -72,6 +79,7 @@ from ashare_ai.storage.models import (
 )
 from ashare_ai.storage.object_service import StoredObjectService
 from ashare_ai.storage.objects import LocalObjectStore
+from ashare_ai.storage.repositories import SnapshotRepository
 from ashare_ai.trading.default_rules import RULESET_VERSION
 from ashare_ai.universe.builder import UniverseConfig, UniverseResult, build_dynamic_universe
 
@@ -106,6 +114,20 @@ class ScoringPolicy(FrozenModel):
     technical_weight: Decimal
     sentiment_weight: Decimal
     quality_confidence_weight: Decimal
+    dividend_yield_multiplier: Decimal = Decimal("200")
+    dividend_yield_bonus_cap: Decimal = Decimal("8")
+    dividend_continuity_bonus_cap: Decimal = Decimal("2")
+    dividend_total_bonus_cap: Decimal = Decimal("10")
+    news_window_days: int = Field(default=30, ge=1)
+    event_classifier_version: str = "dividend-news-events-v2"
+    event_risk_multipliers: dict[str, Decimal] = Field(
+        default_factory=lambda: {
+            "LOW": Decimal("1"),
+            "MEDIUM": Decimal("0.8"),
+            "HIGH": Decimal("0.5"),
+            "CRITICAL": Decimal("0"),
+        }
+    )
 
 
 class UniversePolicy(FrozenModel):
@@ -145,6 +167,35 @@ class BacktestPolicy(FrozenModel):
     capacity_max_impact_bps: Decimal = Field(ge=0)
 
 
+class TradePlanPolicy(FrozenModel):
+    objective: str = "RISK_ADJUSTED_RETURN"
+    history_sessions: int = Field(default=240, ge=120, le=500)
+    training_sessions: int = Field(default=160, ge=1)
+    validation_sessions: int = Field(default=80, ge=1)
+    entry_step_sessions: int = Field(default=10, ge=1)
+    minimum_completed_trades: int = Field(default=5, ge=1)
+    maximum_drawdown: Decimal = Field(default=Decimal("0.12"), gt=0, lt=1)
+    entry_discounts: tuple[Decimal, ...] = (
+        Decimal("0"),
+        Decimal("0.01"),
+        Decimal("0.02"),
+    )
+    take_profits: tuple[Decimal, ...] = (
+        Decimal("0.08"),
+        Decimal("0.12"),
+        Decimal("0.16"),
+    )
+    stop_losses: tuple[Decimal, ...] = (
+        Decimal("0.05"),
+        Decimal("0.08"),
+        Decimal("0.10"),
+    )
+    trailing_stops: tuple[Decimal, ...] = (Decimal("0.05"), Decimal("0.08"))
+    maximum_holding_sessions: tuple[int, ...] = (10, 20, 40, 60)
+    entry_valid_sessions: int = Field(default=3, ge=1)
+    score_exit_threshold: Decimal = Field(default=Decimal("60"), ge=0, le=100)
+
+
 class FirstReleasePolicy(FrozenModel):
     version: str
     scoring: ScoringPolicy
@@ -153,6 +204,7 @@ class FirstReleasePolicy(FrozenModel):
     execution: ExecutionPolicy
     risk: RiskPolicy
     backtest: BacktestPolicy
+    trade_plan: TradePlanPolicy = TradePlanPolicy()
 
     @model_validator(mode="after")
     def enforce_release_contract(self) -> FirstReleasePolicy:
@@ -164,8 +216,13 @@ class FirstReleasePolicy(FrozenModel):
         )
         if weights != (Decimal("0.35"), Decimal("0.35"), Decimal("0.20"), Decimal("0.10")):
             raise ValueError("first release scoring weights must be 35/35/20/10")
-        if self.scoring.formula_version != FORMULA_VERSION:
+        if self.scoring.formula_version not in {FORMULA_VERSION, FORMULA_VERSION_V2}:
             raise ValueError("first release formula version does not match scoring engine")
+        if (
+            self.trade_plan.training_sessions + self.trade_plan.validation_sessions
+            > self.trade_plan.history_sessions
+        ):
+            raise ValueError("trade-plan train/validation windows exceed history window")
         if (
             self.portfolio.target_count != 15
             or self.portfolio.maximum_single_weight != Decimal("0.08")
@@ -216,6 +273,10 @@ class CandidateArtifact(FrozenModel):
 
 class RiskArtifact(FrozenModel):
     control: DrawdownControlState
+    formal_eligible_symbols: tuple[str, ...] = ()
+    excluded_symbols: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+    reason_code: str | None = None
+    reason_message: str | None = None
 
 
 class BuiltinDailyBackend:
@@ -279,7 +340,7 @@ class BuiltinDailyBackend:
                 if mode == "akshare"
                 else mode
             ),
-            "canonical_provider_version": "akshare-canonical-v2",
+            "canonical_provider_version": "akshare-canonical-v3-raw-news-dividend",
             "canonical_bundle_size": self._settings.akshare_bundle_size,
             "canonical_history_sessions": self._settings.akshare_history_sessions,
             "policy_version": self.policy.version,
@@ -362,6 +423,12 @@ class BuiltinDailyBackend:
                 policy=self.policy,
                 dataset="research_input_bundle",
             )
+            canonical_snapshot_ids = self._persist_canonical_evidence_snapshots(
+                session, run, bundle
+            )
+            updated = dict(run.manifest)
+            updated["canonical_snapshot_ids"] = canonical_snapshot_ids
+            run.manifest = updated
             session.commit()
         self._write_stage(
             run_id,
@@ -371,10 +438,84 @@ class BuiltinDailyBackend:
                 "bars": len(bundle.bars),
                 "financial_facts": len(bundle.financial_facts),
                 "documents": len(bundle.disclosures) + len(bundle.news),
+                "dividends": len(bundle.dividends),
+                "canonical_snapshot_ids": canonical_snapshot_ids,
                 "backtest_snapshot_id": snapshot.snapshot_id,
             },
         )
         return [snapshot.snapshot_id]
+
+    def _persist_canonical_evidence_snapshots(
+        self,
+        session: Session,
+        run: JobRun,
+        bundle: CanonicalDailyBundle,
+    ) -> list[str]:
+        lake = ImmutableLake(self._settings.lake_root)
+        repository = SnapshotRepository(session)
+        datasets: tuple[tuple[str, str, list[dict[str, Any]]], ...] = (
+            (
+                "canonical_news",
+                "multi-free-news",
+                [item.model_dump(mode="json") for item in bundle.news],
+            ),
+            (
+                "canonical_cash_dividends",
+                "cninfo-with-free-cross-check",
+                [item.model_dump(mode="json") for item in bundle.dividends],
+            ),
+            (
+                "canonical_trading_calendar",
+                bundle.calendar_source,
+                [
+                    {
+                        "trading_date": value.isoformat(),
+                        "available_at": bundle.decision_at.isoformat(),
+                        "source": bundle.calendar_source,
+                        "calendar_version": bundle.calendar_version,
+                    }
+                    for value in bundle.trading_calendar
+                ],
+            ),
+        )
+        snapshot_ids: list[str] = []
+        for dataset, source, rows in datasets:
+            snapshot_rows = [
+                {
+                    **item,
+                    "_manifest_run_id": run.run_id,
+                    "_manifest_trading_date": bundle.trading_date.isoformat(),
+                }
+                for item in rows
+            ] or [
+                {
+                    "_manifest_only": True,
+                    "_manifest_run_id": run.run_id,
+                    "_manifest_trading_date": bundle.trading_date.isoformat(),
+                }
+            ]
+            manifest = lake.write_snapshot(
+                dataset=dataset,
+                source=source,
+                schema_version="canonical-pit-v1",
+                adapter_version="builtin-canonical-evidence-v1",
+                fetched_at=bundle.decision_at,
+                rows=snapshot_rows,
+                metadata={
+                    "run_id": run.run_id,
+                    "trading_date": bundle.trading_date.isoformat(),
+                    "decision_at": bundle.decision_at.isoformat(),
+                    "source_record_hashes": sorted(
+                        str(item.get("payload_sha256", item.get("trading_date", "")))
+                        for item in rows
+                    ),
+                },
+            )
+            row = repository.add(manifest)
+            row.run_id = run.run_id
+            repository.commit(row.snapshot_id)
+            snapshot_ids.append(row.snapshot_id)
+        return snapshot_ids
 
     def build_universe(self, run_id: str, snapshot_ids: list[str]) -> str:
         bundle = self._read_stage(run_id, "bundle", CanonicalDailyBundle)
@@ -404,7 +545,34 @@ class BuiltinDailyBackend:
                 abnormal_return_window=self.policy.universe.abnormal_return_window,
             ),
         )
-        if len(result.included) < self.policy.portfolio.target_count:
+        _, _, manifest = self._run_context(run_id)
+        research_scope = str(manifest.get("research_scope", "MARKET")).upper()
+        target_symbols = tuple(str(item) for item in manifest.get("target_symbols", ()))
+        if research_scope != "MARKET":
+            target_set = set(target_symbols)
+            included = tuple(symbol for symbol in result.included if symbol in target_set)
+            if not included:
+                rejected = {
+                    item.symbol: [reason.value for reason in item.reasons]
+                    for item in result.decisions
+                    if item.symbol in target_set and not item.eligible
+                }
+                raise ValueError(
+                    f"指定股票均未通过研究股票池校验: {rejected or list(target_symbols)}"
+                )
+            result = result.model_copy(
+                update={
+                    "included": included,
+                    "input_hash": stable_hash(
+                        {
+                            "base_universe_hash": result.input_hash,
+                            "research_scope": research_scope,
+                            "target_symbols": target_symbols,
+                        }
+                    ),
+                }
+            )
+        elif len(result.included) < self.policy.portfolio.target_count:
             raise ValueError("canonical bundle cannot produce the required 15-stock portfolio")
         return self._write_stage(run_id, "universe", result)
 
@@ -595,6 +763,19 @@ class BuiltinDailyBackend:
         agents = self._read_stage(run_id, "agents", AgentArtifact)
         feature_digest = self._stage_digest(run_id, "features")
         feature_uuid = uuid5(NAMESPACE_URL, feature_digest)
+        closes = {
+            item.symbol: item.close
+            for item in bundle.bars
+            if item.trading_date == bundle.trading_date
+        }
+        event_policy = EventRiskPolicy(
+            version=self.policy.scoring.event_classifier_version,
+            multipliers={
+                severity: float(self.policy.scoring.event_risk_multipliers[severity.value])
+                for severity in EventSeverity
+            },
+            blocked_severities=frozenset({EventSeverity.CRITICAL}),
+        )
         scores = tuple(
             build_composite_score(
                 symbol=item.symbol,
@@ -620,6 +801,36 @@ class BuiltinDailyBackend:
                 ),
                 feature_snapshot_id=feature_uuid,
                 formula_version=self.policy.scoring.formula_version,
+                dividend_bonus=(
+                    calculate_dividend_bonus(
+                        bundle.dividends,
+                        symbol=item.symbol,
+                        decision_at=bundle.decision_at,
+                        frozen_close=closes[item.symbol],
+                        yield_multiplier=self.policy.scoring.dividend_yield_multiplier,
+                        yield_bonus_cap=float(self.policy.scoring.dividend_yield_bonus_cap),
+                        continuity_bonus_cap=float(
+                            self.policy.scoring.dividend_continuity_bonus_cap
+                        ),
+                        total_bonus_cap=float(self.policy.scoring.dividend_total_bonus_cap),
+                    ).total_bonus
+                    if self.policy.scoring.formula_version == FORMULA_VERSION_V2
+                    else 0.0
+                ),
+                event_risk_multiplier=aggregate_event_risk(
+                    (
+                        classify_event_risks(
+                            bundle.disclosures,
+                            bundle.news,
+                            symbol=item.symbol,
+                            decision_at=bundle.decision_at,
+                            window_days=self.policy.scoring.news_window_days,
+                        )
+                        if self.policy.scoring.formula_version == FORMULA_VERSION_V2
+                        else bundle.events_by_symbol.get(item.symbol, ())
+                    ),
+                    event_policy,
+                ).multiplier,
             )
             for item in agents.items
         )
@@ -636,6 +847,9 @@ class BuiltinDailyBackend:
                         technical_score=score.technical_score,
                         sentiment_score=score.sentiment_score,
                         quality_confidence_score=score.quality_confidence_score,
+                        base_total_score=score.base_total_score,
+                        dividend_bonus=score.dividend_bonus,
+                        event_risk_multiplier=score.event_risk_multiplier,
                         total_score=score.total_score,
                         formula_version=score.formula_version,
                         agent_bundle_sha256=score.agent_bundle_sha256,
@@ -656,11 +870,16 @@ class BuiltinDailyBackend:
         feature_artifact = self._read_stage(run_id, "features", FeatureArtifact)
         features = {item.symbol: item for item in feature_artifact.items}
         industries = {item.symbol: item.industry_code for item in bundle.industries}
-        ordered = sorted(score_artifact.scores, key=lambda item: (item.total_score, item.symbol))
+        universe = self._read_stage(run_id, "universe", UniverseResult)
+        formal_eligible, _ = self._formal_eligibility(bundle, universe)
+        formal_scores = tuple(
+            score for score in score_artifact.scores if score.symbol in formal_eligible
+        )
+        ordered = sorted(formal_scores, key=lambda item: (item.total_score, item.symbol))
         percentiles = {
             item.symbol: (index + 1) / len(ordered) for index, item in enumerate(ordered)
         }
-        event_policy = EventRiskPolicy(
+        legacy_event_policy = EventRiskPolicy(
             version="builtin-events-v1",
             multipliers={
                 EventSeverity.LOW: 1.0,
@@ -676,19 +895,25 @@ class BuiltinDailyBackend:
                 trading_date=bundle.trading_date,
                 decision_at=bundle.decision_at,
                 total_score=score.total_score,
+                base_total_score=score.base_total_score,
+                dividend_bonus=score.dividend_bonus,
                 prediction_percentile=percentiles[score.symbol],
                 industry_code=industries[score.symbol],
                 volatility=max(
                     features[score.symbol].technical.annualized_volatility_20d or 0.0,
                     0.01,
                 ),
-                event_risk_multiplier=aggregate_event_risk(
-                    bundle.events_by_symbol.get(score.symbol, ()), event_policy
-                ).multiplier,
+                event_risk_multiplier=(
+                    score.event_risk_multiplier
+                    if self.policy.scoring.formula_version == FORMULA_VERSION_V2
+                    else aggregate_event_risk(
+                        bundle.events_by_symbol.get(score.symbol, ()), legacy_event_policy
+                    ).multiplier
+                ),
                 style_exposures=bundle.style_exposures[score.symbol],
             )
             for score in sorted(
-                score_artifact.scores,
+                formal_scores,
                 key=lambda item: (-item.total_score, item.symbol),
             )
         )
@@ -723,7 +948,11 @@ class BuiltinDailyBackend:
         bundle: CanonicalDailyBundle,
     ) -> tuple[tuple[BacktestSignal, ...], set[str]]:
         calendar = {item.trading_date for item in bundle.bars}
-        current_symbols = {item.symbol for item in bundle.securities}
+        current_gate = run.manifest.get("data_quality_gate")
+        current_gate = current_gate if isinstance(current_gate, dict) else {}
+        current_symbols = set(current_gate.get("formal_eligible_symbols", ())) or {
+            item.symbol for item in bundle.securities
+        }
         rows = session.execute(
             select(CandidateRow, JobRun)
             .join(JobRun, CandidateRow.run_id == JobRun.run_id)
@@ -738,8 +967,16 @@ class BuiltinDailyBackend:
         grouped: dict[tuple[str, date], list[CandidateRow]] = {}
         decisions: dict[tuple[str, date], datetime] = {}
         snapshot_hashes: dict[tuple[str, date], str] = {}
+        dropped_symbols: set[str] = set()
         for candidate, job in rows:
             key = (job.run_id, job.trading_date)
+            gate = job.manifest.get("data_quality_gate")
+            gate = gate if isinstance(gate, dict) else {}
+            if gate and int(gate.get("formal_eligible_count", 0)) < (
+                self.policy.portfolio.target_count
+            ):
+                dropped_symbols.add(candidate.symbol)
+                continue
             grouped.setdefault(key, []).append(candidate)
             decision = job.decision_at
             if decision.tzinfo is None:
@@ -747,7 +984,6 @@ class BuiltinDailyBackend:
             decisions[key] = decision
             snapshot_hashes[key] = str(job.manifest.get("acquired_bundle_sha256") or job.input_hash)
         signals: list[BacktestSignal] = []
-        dropped_symbols: set[str] = set()
         chosen_dates: set[date] = set()
         for key, candidates_for_run in sorted(grouped.items(), key=lambda item: item[0][1]):
             if key[1] == run.trading_date and key[0] != run.run_id:
@@ -778,6 +1014,7 @@ class BuiltinDailyBackend:
 
     def risk_state(self, run_id: str) -> str:
         bundle = self._read_stage(run_id, "bundle", CanonicalDailyBundle)
+        universe = self._read_stage(run_id, "universe", UniverseResult)
         control = transition_drawdown_state(
             nav=bundle.nav,
             high_watermark=bundle.high_watermark,
@@ -795,17 +1032,87 @@ class BuiltinDailyBackend:
                 else True
             ),
         )
-        if any(
-            item.get("fundamental_placeholder") or item.get("sentiment_placeholder")
-            for item in bundle.data_quality.values()
-        ):
+        formal_eligible, excluded = self._formal_eligibility(bundle, universe)
+        reason_code: str | None = None
+        reason_message: str | None = None
+        if control.state == PortfolioRiskState.OBSERVE_ONLY:
+            reason_code = "MAX_DRAWDOWN_FUSE_ACTIVE"
+            reason_message = "最大回撤熔断仍在生效，需满足恢复阈值、观察期和人工恢复要求"
+        elif len(formal_eligible) < self.policy.portfolio.target_count:
             control = DrawdownControlState(
                 state=PortfolioRiskState.OBSERVE_ONLY,
                 drawdown=control.drawdown,
                 observation_sessions=max(1, control.observation_sessions),
             )
-        self._write_stage(run_id, "risk", RiskArtifact(control=control))
+            reason_code = "INSUFFICIENT_COMPLETE_SYMBOLS"
+            reason_message = (
+                f"正式可用股票仅 {len(formal_eligible)} 只，少于组合要求的 "
+                f"{self.policy.portfolio.target_count} 只"
+            )
+        gate = {
+            "minimum_required": self.policy.portfolio.target_count,
+            "formal_eligible_count": len(formal_eligible),
+            "formal_eligible_symbols": sorted(formal_eligible),
+            "excluded_symbols": {symbol: list(reasons) for symbol, reasons in excluded.items()},
+        }
+        with self.session_factory() as session:
+            run = session.get(JobRun, run_id)
+            if run is None:
+                raise KeyError(run_id)
+            updated = dict(run.manifest)
+            updated["data_quality_gate"] = gate
+            updated["risk_outcome"] = {
+                "state": control.state.value,
+                "drawdown": str(control.drawdown),
+                "reason_code": reason_code,
+                "reason_message": reason_message,
+            }
+            run.manifest = updated
+            session.commit()
+        self._write_stage(
+            run_id,
+            "risk",
+            RiskArtifact(
+                control=control,
+                formal_eligible_symbols=tuple(sorted(formal_eligible)),
+                excluded_symbols=excluded,
+                reason_code=reason_code,
+                reason_message=reason_message,
+            ),
+        )
         return control.state.value
+
+    @staticmethod
+    def _formal_eligibility(
+        bundle: CanonicalDailyBundle, universe: UniverseResult
+    ) -> tuple[set[str], dict[str, tuple[str, ...]]]:
+        eligible: set[str] = set()
+        excluded: dict[str, tuple[str, ...]] = {}
+        for symbol in universe.included:
+            quality = bundle.data_quality.get(symbol, {})
+            reasons: list[str] = []
+            if quality.get("fundamental_placeholder"):
+                reasons.extend(
+                    str(item)
+                    for item in quality.get("fundamental_reason_codes", ())
+                )
+                if not quality.get("fundamental_reason_codes"):
+                    reasons.append("FUNDAMENTAL_DATA_INCOMPLETE")
+            if quality.get("sentiment_placeholder"):
+                reasons.extend(
+                    str(item) for item in quality.get("sentiment_reason_codes", ())
+                )
+                if not quality.get("sentiment_reason_codes"):
+                    reasons.append("DISCLOSURE_DATA_INCOMPLETE")
+            if reasons:
+                excluded[symbol] = tuple(dict.fromkeys(reasons))
+            else:
+                eligible.add(symbol)
+        return eligible, excluded
+
+    def portfolio_requested(self, run_id: str) -> bool:
+        _, _, manifest = self._run_context(run_id)
+        return bool(manifest.get("portfolio_requested", True))
 
     def build_portfolio(self, run_id: str, candidate_snapshot_id: str) -> str | None:
         if candidate_snapshot_id != self._stage_digest(run_id, "candidates"):
@@ -816,6 +1123,24 @@ class BuiltinDailyBackend:
         latest_bars = {
             item.symbol: item for item in bundle.bars if item.trading_date == bundle.trading_date
         }
+        _, _, manifest = self._run_context(run_id)
+        raw_budget = manifest.get("research_budget")
+        budget = raw_budget if isinstance(raw_budget, dict) else {}
+        total_budget = (
+            Decimal(str(budget["total_budget"]))
+            if budget.get("total_budget") is not None
+            else bundle.nav
+        )
+        per_symbol_budget = (
+            Decimal(str(budget["per_symbol_budget"]))
+            if budget.get("per_symbol_budget") is not None
+            else None
+        )
+        max_stock_price = (
+            Decimal(str(budget["max_stock_price"]))
+            if budget.get("max_stock_price") is not None
+            else None
+        )
         quotes = tuple(
             CandidateQuote(
                 candidate=candidate,
@@ -825,30 +1150,62 @@ class BuiltinDailyBackend:
                 lot_size=100,
             )
             for candidate in artifact.candidates
+            if max_stock_price is None
+            or latest_bars[candidate.symbol].close <= max_stock_price
         )
+        maximum_single_weight = self.policy.portfolio.maximum_single_weight
+        if per_symbol_budget is not None:
+            maximum_single_weight = min(
+                maximum_single_weight,
+                per_symbol_budget / total_budget,
+            )
         result = PortfolioBuilder(
             PortfolioConfig(
                 target_count=self.policy.portfolio.target_count,
-                maximum_single_weight=self.policy.portfolio.maximum_single_weight,
+                maximum_single_weight=maximum_single_weight,
                 maximum_industry_weight=self.policy.portfolio.maximum_industry_weight,
                 maximum_turnover=self.policy.portfolio.maximum_one_way_turnover,
                 style_exposure_limits=self.policy.portfolio.style_exposure_limits,
                 base_cash_weight=self.policy.portfolio.cash_buffer,
                 minimum_prediction_percentile=Decimal("0"),
-                constraint_version=self.policy.version,
+                constraint_version=(
+                    f"{self.policy.version}-personal-budget-{stable_hash(budget)[:12]}"
+                    if any(value is not None for value in budget.values())
+                    else self.policy.version
+                ),
                 enforce_turnover_on_initial=False,
                 allocation_tolerance=Decimal("0.000000001"),
                 maximum_allocation_iterations=200,
             )
         ).build(
             quotes=quotes,
-            nav=bundle.nav,
+            nav=total_budget,
             effective_trading_date=bundle.next_trading_date,
             current_weights=bundle.current_weights,
             risk_state=risk.state,
             derisk_gross_multiplier=Decimal("0.5"),
         )
         if not result.success or result.portfolio is None:
+            if any(value is not None for value in budget.values()):
+                failure = result.failure.model_dump(mode="json") if result.failure else {
+                    "code": "UNKNOWN",
+                    "message": "预算约束下未生成模拟组合",
+                    "details": {},
+                }
+                with self.session_factory() as session:
+                    run = session.get(JobRun, run_id)
+                    if run is None:
+                        raise KeyError(run_id)
+                    updated = dict(run.manifest)
+                    updated["portfolio_outcome"] = {
+                        "generated": False,
+                        "reason": failure,
+                        "eligible_price_count": len(quotes),
+                    }
+                    run.manifest = updated
+                    session.commit()
+                self._write_stage(run_id, "portfolio_constraints", failure)
+                return None
             raise RuntimeError(f"builtin portfolio failed: {result.failure}")
         portfolio = result.portfolio
         persisted_portfolio_id = str(uuid5(NAMESPACE_URL, f"{run_id}:{portfolio.portfolio_id}"))
@@ -873,6 +1230,13 @@ class BuiltinDailyBackend:
             run = session.get(JobRun, run_id)
             if run is None:
                 raise KeyError(run_id)
+            updated = dict(run.manifest)
+            updated["portfolio_outcome"] = {
+                "generated": True,
+                "position_count": len(portfolio.positions),
+                "nav": str(total_budget),
+            }
+            run.manifest = updated
             self._persist_cumulative_backtest_snapshot(
                 session,
                 run,
@@ -886,6 +1250,19 @@ class BuiltinDailyBackend:
     def publish_report(self, run_id: str, portfolio_id: str | None, risk_state: str) -> str:
         bundle = self._read_stage(run_id, "bundle", CanonicalDailyBundle)
         candidates = self._read_stage(run_id, "candidates", CandidateArtifact)
+        universe = self._read_stage(run_id, "universe", UniverseResult)
+        try:
+            risk_artifact = self._read_stage(run_id, "risk", RiskArtifact)
+            risk_reason_code = risk_artifact.reason_code
+            risk_reason_message = risk_artifact.reason_message
+            formal_eligible_symbols = risk_artifact.formal_eligible_symbols
+            excluded_symbols = risk_artifact.excluded_symbols
+        except KeyError:
+            formal_eligible, excluded = self._formal_eligibility(bundle, universe)
+            risk_reason_code = None
+            risk_reason_message = None
+            formal_eligible_symbols = tuple(sorted(formal_eligible))
+            excluded_symbols = excluded
         positions: Sequence[Mapping[str, Any]] = ()
         if portfolio_id is not None:
             with self.session_factory() as session:
@@ -897,6 +1274,24 @@ class BuiltinDailyBackend:
             run = session.get(JobRun, run_id)
             if run is None:
                 raise KeyError(run_id)
+            manifest = dict(run.manifest or {})
+            quality_rows = [
+                item
+                for symbol, item in bundle.data_quality.items()
+                if symbol in set(universe.included) and isinstance(item, dict)
+            ]
+            quality_summary = {
+                "symbol_count": len(quality_rows),
+                "fundamental_placeholder_count": sum(
+                    bool(item.get("fundamental_placeholder")) for item in quality_rows
+                ),
+                "sentiment_placeholder_count": sum(
+                    bool(item.get("sentiment_placeholder")) for item in quality_rows
+                ),
+                "industry_placeholder_count": sum(
+                    bool(item.get("industry_placeholder")) for item in quality_rows
+                ),
+            }
             if risk_state == "OBSERVE_ONLY":
                 self._persist_cumulative_backtest_snapshot(
                     session,
@@ -924,6 +1319,16 @@ class BuiltinDailyBackend:
                     "candidates": candidates.candidates,
                     "positions": positions,
                     "risks": [f"risk_state={risk_state}"],
+                    "risk_reason_code": risk_reason_code,
+                    "risk_reason_message": risk_reason_message,
+                    "formal_eligible_symbols": formal_eligible_symbols,
+                    "excluded_symbols": excluded_symbols,
+                    "research_scope": manifest.get("research_scope", "MARKET"),
+                    "target_symbols": manifest.get("target_symbols", []),
+                    "research_budget": manifest.get("research_budget", {}),
+                    "research_only_reason": manifest.get("research_only_reason"),
+                    "portfolio_outcome": manifest.get("portfolio_outcome", {}),
+                    "quality_summary": quality_summary,
                     "run_id": run_id,
                     "input_hash": run.input_hash,
                     "formula_version": self.policy.scoring.formula_version,
@@ -970,6 +1375,8 @@ class BuiltinDailyBackend:
                 "observe_only": observe_only or prior_observe_only,
                 "current_run_observe_only": observe_only,
                 "run_status": "FUSED" if observe_only else "SUCCEEDED",
+                "data_quality_gate": run.manifest.get("data_quality_gate", {}),
+                "risk_outcome": run.manifest.get("risk_outcome", {}),
             },
             prior_bundle=prior_bundle,
             prior_snapshot_id=prior_snapshot_id,
@@ -1049,6 +1456,7 @@ class BuiltinDailyBackend:
                     provider=provider,
                     bundle_size=self._settings.akshare_bundle_size,
                     history_sessions=self._settings.akshare_history_sessions,
+                    news_window_days=self.policy.scoring.news_window_days,
                 )
             try:
                 bundle = builder.build(

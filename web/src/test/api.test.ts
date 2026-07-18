@@ -27,6 +27,22 @@ describe('API security and market adapters', () => {
     expect(init?.method).toBe('POST')
   })
 
+  it('targets single-score lineage and research cancellation endpoints', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({ symbol: '600000.SH', total_score: 80 }))
+      .mockResolvedValueOnce(jsonResponse({ symbol: '600000.SH', formula_version: 'v1' }))
+      .mockResolvedValueOnce(jsonResponse({ run_id: 'run-1', status: 'CANCEL_REQUESTED' }))
+
+    await api.score('2026-07-17', '600000.SH', 'run-1')
+    await api.scoreLineage('2026-07-17', '600000.SH', 'run-1')
+    await api.cancelResearch('run-1')
+
+    expect(String(vi.mocked(fetch).mock.calls[0][0])).toContain('/scores/2026-07-17/600000.SH?run_id=run-1')
+    expect(String(vi.mocked(fetch).mock.calls[1][0])).toContain('/scores/2026-07-17/600000.SH/lineage?run_id=run-1')
+    expect(String(vi.mocked(fetch).mock.calls[2][0])).toContain('/research/runs/run-1/cancel')
+    expect(vi.mocked(fetch).mock.calls[2][1]?.method).toBe('POST')
+  })
+
   it('normalizes backend quote names and nested status metadata', async () => {
     vi.mocked(fetch).mockResolvedValue(jsonResponse([{
       symbol: '600519.SH', name: '贵州茅台', price: 1500, change: 15,
@@ -45,9 +61,29 @@ describe('API security and market adapters', () => {
       status: { source: 'AKShare', collected_at: '2026-07-15T07:00:00Z', cached_at: '2026-07-15T07:00:01Z', delayed: false },
     }))
 
-    const payload = await api.kline('600519.SH', 'day')
+    const payload = await api.kline('600519.SH', 'day', 1200, { start: '2026-06-01T00:00:00+08:00', end: '2026-07-01T00:00:00+08:00' })
     expect(payload.bars[0].time).toBe('2026-07-15T07:00:00Z')
-    expect(String(vi.mocked(fetch).mock.calls[0][0])).toContain('adjust=hfq')
+    const url = String(vi.mocked(fetch).mock.calls[0][0])
+    expect(url).toContain('adjust=hfq')
+    expect(url).toContain('limit=1200')
+    expect(url).toContain('start=2026-06-01T00%3A00%3A00%2B08%3A00')
+    expect(url).toContain('end=2026-07-01T00%3A00%3A00%2B08%3A00')
+  })
+
+  it('bypasses client/server market caches and sends CSRF for backtest retry', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse({ symbol: '600519.SH', period: 'day', adjustment: 'hfq', bars: [], status: { source: 'fixture', collected_at: '2026-07-17T00:00:00Z', cached_at: '2026-07-17T00:00:00Z', delayed: false } }))
+      .mockResolvedValueOnce(jsonResponse({ backtest_id: 'backtest-1', run_id: 'run-1', status: 'PENDING', retry_count: 1 }))
+    await api.quotes(['600519.SH'], true)
+    await api.kline('600519.SH', 'day', 160, true)
+    await api.retryBacktest('backtest-1')
+
+    expect(String(vi.mocked(fetch).mock.calls[0][0])).toContain('refresh=true')
+    expect(String(vi.mocked(fetch).mock.calls[1][0])).toContain('refresh=true')
+    const retry = vi.mocked(fetch).mock.calls[2]
+    expect(retry[1]?.method).toBe('POST')
+    expect(new Headers(retry[1]?.headers).get('X-CSRF-Token')).toBe('csrf-value')
   })
 
   it('uses the NeoData financial search endpoint for natural-language queries', async () => {

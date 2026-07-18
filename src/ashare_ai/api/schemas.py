@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Any
+from decimal import Decimal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class OrmResponse(BaseModel):
@@ -19,6 +20,18 @@ class HealthResponse(BaseModel):
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=256)
+
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str = Field(min_length=32, max_length=512)
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    refresh_token: str
+    refresh_expires_in: int
 
 
 class UserResponse(OrmResponse):
@@ -99,7 +112,9 @@ class PaperPosition(BaseModel):
     name: str = Field(default="", max_length=64)
     quantity: int = Field(gt=0, le=1_000_000_000)
     cost: float = Field(gt=0, le=10_000_000)
-    target_weight: float = Field(ge=0, le=1)
+    # Kept for saved records and older API clients.  Manual holdings now derive
+    # their current weight from market value and the account total instead.
+    target_weight: float | None = Field(default=None, ge=0, le=1)
 
     @field_validator("symbol", mode="before")
     @classmethod
@@ -115,6 +130,7 @@ class PaperPosition(BaseModel):
 class AssetStateRequest(BaseModel):
     watchlist: list[str] = Field(max_length=100)
     positions: list[PaperPosition] = Field(max_length=15)
+    total_assets: float | None = Field(default=None, gt=0, le=1_000_000_000_000)
 
     @field_validator("watchlist", mode="before")
     @classmethod
@@ -141,14 +157,13 @@ class AssetStateRequest(BaseModel):
         symbols = [position.symbol for position in value]
         if len(set(symbols)) != len(symbols):
             raise ValueError("position symbols must be unique")
-        if sum(position.target_weight for position in value) > 1.000001:
-            raise ValueError("position target weights cannot exceed 100%")
         return value
 
 
 class AssetStateResponse(BaseModel):
     watchlist: list[str]
     positions: list[PaperPosition]
+    total_assets: float | None = None
     updated_at: datetime | None = None
 
 
@@ -160,6 +175,9 @@ class ScoreResponse(OrmResponse):
     technical_score: float
     sentiment_score: float
     quality_confidence_score: float
+    base_total_score: float
+    dividend_bonus: float
+    event_risk_multiplier: float
     total_score: float
     formula_version: str
     agent_bundle_sha256: str
@@ -173,6 +191,8 @@ class CandidateResponse(OrmResponse):
     decision_at: datetime
     rank: int
     total_score: float
+    base_total_score: float | None = None
+    dividend_bonus: float = 0
     prediction_percentile: float
     industry_code: str
     event_risk_multiplier: float
@@ -181,17 +201,23 @@ class CandidateResponse(OrmResponse):
 
 
 class PortfolioResponse(OrmResponse):
-    portfolio_id: str
+    portfolio_id: str | None = None
     run_id: str
     trading_date: date
-    effective_trading_date: date
+    effective_trading_date: date | None = None
     status: str
-    expected_turnover: float
-    cash_weight: float
-    constraint_version: str
-    input_hash: str
-    positions: list[dict[str, Any]]
-    rejection_reasons: list[str]
+    expected_turnover: float = 0
+    cash_weight: float = 1
+    constraint_version: str | None = None
+    input_hash: str | None = None
+    positions: list[dict[str, Any]] = Field(default_factory=list)
+    rejection_reasons: list[str] = Field(default_factory=list)
+    observation_only: bool = False
+    research_only: bool = False
+    message: str | None = None
+    reason_code: str | None = None
+    formal_eligible_symbols: list[str] = Field(default_factory=list)
+    excluded_symbols: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class RunResponse(OrmResponse):
@@ -209,10 +235,147 @@ class RunResponse(OrmResponse):
 
 class ResearchRequest(BaseModel):
     trading_date: date
+    scope: Literal["MARKET", "WATCHLIST", "CUSTOM"] = "MARKET"
+    symbols: list[str] = Field(default_factory=list, max_length=100)
+    total_budget: Decimal | None = Field(default=None, gt=0, le=Decimal("100000000000"))
+    per_symbol_budget: Decimal | None = Field(
+        default=None, gt=0, le=Decimal("100000000000")
+    )
+    max_stock_price: Decimal | None = Field(default=None, gt=0, le=Decimal("10000000"))
+
+    @field_validator("scope", mode="before")
+    @classmethod
+    def normalize_scope(cls, value: object) -> object:
+        return value.strip().upper() if isinstance(value, str) else value
+
+    @field_validator("symbols", mode="before")
+    @classmethod
+    def normalize_symbols(cls, value: object) -> object:
+        if not isinstance(value, list):
+            return value
+        normalized = [item.strip().upper() if isinstance(item, str) else item for item in value]
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("research symbols must be unique")
+        return normalized
+
+    @field_validator("symbols")
+    @classmethod
+    def validate_symbols(cls, value: list[str]) -> list[str]:
+        import re
+
+        if any(re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", item) is None for item in value):
+            raise ValueError("research symbols contain an invalid A-share symbol")
+        return value
+
+    @model_validator(mode="after")
+    def validate_scope_and_budget(self) -> ResearchRequest:
+        if self.scope == "CUSTOM" and not self.symbols:
+            raise ValueError("custom research requires at least one symbol")
+        if self.scope != "CUSTOM" and self.symbols:
+            raise ValueError("symbols are only accepted for custom research")
+        if (
+            self.total_budget is not None
+            and self.per_symbol_budget is not None
+            and self.per_symbol_budget > self.total_budget
+        ):
+            raise ValueError("per-symbol budget cannot exceed total budget")
+        return self
+
+
+class ResearchSettingsRequest(BaseModel):
+    auto_enabled: bool
+
+
+class ResearchSettingsResponse(BaseModel):
+    auto_enabled: bool = False
+    updated_at: datetime | None = None
+    automatic_scope: Literal["MARKET"] = "MARKET"
+    automatic_total_budget: Decimal = Decimal("1000000")
+    automatic_per_symbol_budget: Decimal = Decimal("80000")
+    automatic_max_stock_price: Decimal | None = None
+    schedule_timezone: Literal["Asia/Shanghai"] = "Asia/Shanghai"
+    schedule_time: Literal["15:05"] = "15:05"
+    snapshot_mode: Literal["SYSTEM_ENFORCED"] = "SYSTEM_ENFORCED"
+
+
+class TradePlanRequest(BaseModel):
+    symbols: list[str] = Field(min_length=1, max_length=15)
+    budget_override: Decimal | None = Field(
+        default=None, gt=0, le=Decimal("100000000000")
+    )
+    objective: Literal["RISK_ADJUSTED_RETURN"] = "RISK_ADJUSTED_RETURN"
+
+    @field_validator("symbols", mode="before")
+    @classmethod
+    def normalize_trade_plan_symbols(cls, value: object) -> object:
+        if not isinstance(value, list):
+            return value
+        normalized = [item.strip().upper() if isinstance(item, str) else item for item in value]
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("trade plan symbols must be unique")
+        return sorted(normalized)
+
+    @field_validator("symbols")
+    @classmethod
+    def validate_trade_plan_symbols(cls, value: list[str]) -> list[str]:
+        import re
+
+        if any(re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", item) is None for item in value):
+            raise ValueError("trade plan contains an invalid A-share symbol")
+        return value
+
+
+class TradePlanResponse(OrmResponse):
+    plan_id: str
+    user_id: str
+    report_id: str
+    run_id: str
+    trading_date: date
+    decision_at: datetime
+    available_at: datetime
+    status: str
+    objective: str
+    symbols: list[str]
+    budget_override: Decimal | None
+    snapshot_ids: list[str]
+    optimizer_version: str
+    config_version: str
+    prompt_version: str | None
+    deterministic_result: dict[str, Any] | None
+    ai_explanation: dict[str, Any] | None
+    input_hash: str
+    output_hash: str | None
+    object_uri: str | None
+    object_sha256: str | None
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    error_message: str | None
 
 
 class RunListResponse(RunResponse):
     user_id: str | None
+
+
+class ResearchRunResponse(RunResponse):
+    phase: str
+    progress: int = Field(ge=0, le=100)
+    report_id: str | None = None
+    report_type: str | None = None
+    report_created_at: datetime | None = None
+    research_scope: str = "MARKET"
+    target_symbols: list[str] = Field(default_factory=list)
+    total_budget: Decimal | None = None
+    per_symbol_budget: Decimal | None = None
+    max_stock_price: Decimal | None = None
+    portfolio_requested: bool = True
+    portfolio_generated: bool = False
+    reason_code: str | None = None
+    reason_message: str | None = None
+    formal_eligible_count: int | None = None
+    excluded_symbol_count: int = 0
+    trigger_source: Literal["AUTO", "MANUAL"] = "MANUAL"
+    requested_date: date | None = None
 
 
 class AuditEventResponse(OrmResponse):
@@ -245,6 +408,7 @@ class BacktestResponse(OrmResponse):
     artifacts: dict[str, Any] | None
     input_hash: str
     output_hash: str | None
+    retry_count: int = 0
     created_at: datetime
     completed_at: datetime | None
     error_message: str | None = None
@@ -298,6 +462,7 @@ class KlineBarResponse(BaseModel):
     close: float
     volume: float
     amount: float | None = None
+    turnover_rate: float | None = None
 
 
 class KlineResponse(BaseModel):

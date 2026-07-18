@@ -93,6 +93,12 @@ $env:ADMIN_PASSWORD = "请替换为至少10位的强密码"
 HttpOnly Cookie、双提交 CSRF 校验和 Argon2 密码哈希；禁用账号或重置密码会立即
 撤销该用户现有会话。生产环境应设置 `COOKIE_SECURE=true` 并通过 HTTPS 暴露站点。
 
+原生手机客户端使用短期 Bearer 访问令牌和强制轮换的刷新令牌：访问令牌默认 15 分钟，
+刷新令牌默认 30 天，可分别用 `ACCESS_TOKEN_TTL_MINUTES` 和
+`REFRESH_TOKEN_TTL_DAYS` 调整。数据库只保存 SHA-256 哈希，不保存令牌明文。Bearer
+写请求不执行浏览器 CSRF 校验；Cookie 写请求仍必须提供双提交 CSRF。生产手机客户端必须
+通过 HTTPS 调用明确配置的 API 地址，本服务不开放通配 CORS。
+
 前端位于 `web/`，开发环境由 Vite 把 `/api` 代理到本地 FastAPI：
 
 ```powershell
@@ -103,8 +109,8 @@ npm run dev
 
 访问 `http://localhost:5173` 登录。主题支持“跟随系统 / 浅色 / 深色”三态并按此顺序循环；没有保存偏好时默认跟随系统，系统配色变化会实时生效。选择保存在 `localStorage`，已有的 `ashare-theme=light/dark` 会继续作为显式覆盖；页面首屏脚本会在 React 启动前同步实际渲染主题和浏览器 `theme-color`，避免主题闪烁。
 
-登录后前端会把“自选股 + 模拟持仓”合并去重，在后台调用行情预取接口。报价仍按 15 秒刷新，后复权日 K 预热和缓存周期为 5 分钟；1/5/15/30/60 分钟线只在首次选择时按需加载并使用短期客户端缓存。实时行情缓存始终与研究、评分、报告和回测的不可变快照隔离。
-自选和模拟持仓按登录用户保存到 PostgreSQL，可在“自选与持仓”页新增、编辑或删除。Cookie 只承载认证会话，清除 Cookie 后重新登录同一账户仍会恢复资产数据；部署前仅存在浏览器内存中的自定义数据无法追溯，新表上线后从默认值开始并在首次修改后永久保存。这些手工数据只用于页面记账与行情预取，不会覆盖研究生成的版本化组合，也不会触发真实下单。
+登录后前端会把“自选股 + 我的持仓”合并去重，在后台调用行情预取接口。报价仍按 15 秒刷新，后复权日 K 预热和缓存周期为 5 分钟；1/5/15/30/60 分钟线只在首次选择时按需加载并使用短期客户端缓存。实时行情缓存始终与研究、评分、报告和回测的不可变快照隔离。
+自选、我的持仓和账户总资金按登录用户保存到 PostgreSQL，可在“我的持仓”页新增、编辑或删除。账户总资金包括持仓市值和可用现金；当前仓位按最新行情（不可用时按成本价估算）乘以持仓数量后除以账户总资金自动计算。Cookie 只承载认证会话，清除 Cookie 后重新登录同一账户仍会恢复资产数据；部署前仅存在浏览器内存中的自定义数据无法追溯，新表上线后从默认值开始并在首次修改后永久保存。这些手工数据只用于页面记账与行情预取，不会覆盖研究生成的版本化组合，也不会触发真实下单。
 
 ### 完整 Docker 栈
 
@@ -129,11 +135,11 @@ PostgreSQL、Redis 和 MinIO，并为基础服务配置健康检查。WebGUI 由
 ```powershell
 docker compose ps
 docker compose exec api ashare-ai doctor
-docker compose logs research-worker backtest-worker --tail 100
+docker compose logs research-worker backtest-worker trade-plan-worker --tail 100
 ```
 
 生产调度默认使用仓库内置的 `ApplicationPipeline + BuiltinDailyBackend`：开发环境会生成确定性全 A 风格 demo bundle，完整跑通股票池、三类特征、严格 Agent Schema、综合评分、预测分位、事件风控、15 股组合和日报；生产环境必须通过 `ASHARE_CANONICAL_BUNDLE` 提供强类型 canonical JSON，否则 fail closed。也可替换 `ASHARE_STAGE_BACKEND_FACTORY` 接入获授权的数据源与模型实现，而不修改编排图。
-首版的 15/8%/25%/20%、评分权重、风格限额、熔断、容量阈值和三类必需基准集中在 `configs/first_release.v1.json`；生产运行会把该文件哈希写入 Manifest，缺失时拒绝启动日跑。
+当前生产默认使用 `configs/first_release.v2.json`：保留 15/8%/25%/20%、风格限额、熔断、容量阈值和三类必需基准，并新增分红/新闻评分及 Trade Plan 优化配置。`configs/first_release.v1.json` 保留用于历史结果回放；每次运行都会把实际配置版本和文件哈希写入 Manifest。
 
 ### 开发检查
 
@@ -150,6 +156,9 @@ npm run build
 
 - `POST /api/v1/auth/login`
 - `POST /api/v1/auth/logout`
+- `POST /api/v1/auth/token`
+- `POST /api/v1/auth/refresh`
+- `POST /api/v1/auth/revoke`
 - `GET /api/v1/auth/me`
 - `GET|POST /api/v1/admin/users`
 - `PATCH /api/v1/admin/users/{user_id}`
@@ -160,6 +169,9 @@ npm run build
 - `GET /api/v1/search/financial?q=贵州茅台股价`
 - `GET /api/v1/search/status`
 - `POST /api/v1/research/runs`
+- `POST /api/v1/research/runs/{run_id}/cancel`
+- `GET /api/v1/research/runs?limit=5&trading_date=YYYY-MM-DD`
+- `GET|PUT /api/v1/research/settings`
 - `GET /api/v1/runs`
 - `GET /api/v1/health`
 - `GET /api/v1/reports/{trading_date}`
@@ -169,14 +181,22 @@ npm run build
 - `GET /api/v1/scores/{trading_date}/{symbol}/lineage`
 - `POST /api/v1/backtests`
 - `GET /api/v1/backtests/{backtest_id}`
+- `POST /api/v1/backtests/{backtest_id}/retry`
 - `GET /api/v1/runs/{run_id}`
 - `GET /api/v1/runs/{run_id}/audit`
 - `GET /api/v1/reports/{report_id}/content`
+- `POST|GET /api/v1/reports/{report_id}/trade-plans`
+- `GET /api/v1/trade-plans/{plan_id}`
 
 除健康检查和登录外，业务接口均要求登录；修改类请求还必须携带登录时下发的 CSRF
-Cookie 对应请求头。每日研究和回测提交写入 PostgreSQL 后进入各自 Redis
-pending/processing 确认队列；同一用户重复提交同一交易日的进行中研究会返回既有任务。
+Cookie 对应请求头。每日研究、回测和 Trade Plan 提交写入 PostgreSQL 后进入各自 Redis
+pending/processing 确认队列；同一用户重复提交同一报告和参数的进行中 Trade Plan 会返回既有任务。
 每个运行都记录用户归属、状态、失败原因和审计事件。
+每日研究可由任务所有者请求安全停止：排队任务直接进入 `CANCELLED`，运行中任务先进入
+`CANCEL_REQUESTED`，并在当前原子阶段完成后停止；终态任务不会被重新取消。
+`FUSED` 是已完成的观察模式终态：评分、候选和对应 `run_id` 的报告可正常读取，但不会
+生成模拟组合；组合接口会返回明确的观察模式状态，不会回退到同日旧组合。每日研究页按
+交易日展示最近 5 次运行及阶段、进度、失败原因和报告入口。
 
 行情以 AKShare 为主。实时快照使用共享 15 秒缓存与单次上游请求合并；日 K 使用独立的
 300 秒缓存。`POST /api/v1/market/prefetch` 单次最多接受 50 个去重后的标准代码，默认并发
@@ -220,13 +240,24 @@ API 还对相同查询执行 15 秒缓存和 single-flight 合并，默认最多
 每个登录用户每分钟最多 30 次，以免搜索子进程挤占业务线程。
 
 每日研究默认 `CANONICAL_BUNDLE_MODE=akshare`：HTTP 提交只冻结交易日、决策时点、
-供应商和版本配置，真实证券、后复权历史与基准数据由 Research Worker 异步采集后写入
-不可变对象和 Manifest。AKShare 无法提供可靠 PIT 基本面、公告或新闻时，系统写入明确
-标注的中性占位证据并自动进入 `OBSERVE_ONLY/FUSED`，不会伪装成真实基本面结论。
-当日任务默认在上海时间 15:05 后允许提交，可通过 `DAILY_RESEARCH_START_HOUR` 和
-`DAILY_RESEARCH_START_MINUTE` 调整；实际提交时刻会写入 `decision_at` 并继续执行 PIT 校验。
-配置 `TUSHARE_TOKEN` 后，Research Worker 也只在 AKShare 失败或历史缺失时补用 Tushare，
-并把每条证券与 K 线的实际来源写入冻结记录。
+供应商和版本配置，真实证券、未复权历史与基准数据由 Research Worker 异步采集后写入
+不可变对象和 Manifest。免费链路读取东方财富个股新闻、财新免费新闻流、巨潮官方公告与
+现金分红，并用新浪免费分红记录交叉补充；同时读取新浪三大财报，以报告期、公告/更新
+时间执行 PIT 过滤；单股票数据失败或字段不完整时才写入明确标注的中性占位证据，不会
+伪装成真实基本面或公告结论。数据门禁按股票执行：不完整股票仍保留评分和观察报告，但不
+进入正式组合候选或累计回测信号；正式可用股票少于 15 只时才进入 `OBSERVE_ONLY/FUSED`。
+WebGUI 可选择动态市场股票池、当前用户的自选与持仓，或手工输入单只/多只 A 股代码；
+定向研究只对通过股票池可交易性校验的指定证券生成特征、评分、候选和报告。研究请求还可
+冻结总资金预算、单股最高投入和最高可接受股价：全市场或不少于 15 只的定向研究会把这些
+限制用于下一交易日模拟组合试算，少于 15 只时只发布逐股研究结果，不放宽首版固定的 15 股
+组合约束。研究范围和预算均进入运行输入哈希，表单中的实时价格只用于下单手数预览，不进入
+不可变研究快照。
+每位用户的自动日研默认关闭；开启后调度器在上海交易日 15:05 起检查数据就绪状态，未就绪
+时每 5 分钟重试、最长 2 小时，数据就绪前不创建运行或冻结 `decision_at`。自动任务固定使用
+全市场、总资金 100 万元、单股 8 万元且无股价上限；手动任务使用独立 `MANUAL` 幂等键，
+可以和同日 `AUTO` 任务并行。冻结快照模式由系统强制开启，界面只读展示。
+配置 `TUSHARE_TOKEN` 后，Research Worker 也只在免费源失败、历史缺失或财报/公告字段
+不完整时补用 Tushare，并把各数据集的实际来源写入冻结记录。
 Demo 数据必须同时显式设置 `CANONICAL_BUNDLE_MODE=demo` 和 `ALLOW_DEMO_DATA=true`。
 管理员可在 WebGUI 的“模型设置”页配置 OpenAI-compatible Responses API。配置以不可变
 版本保存，API Key 使用 `MODEL_SETTINGS_ENCRYPTION_KEYS` 加密且永不回传；搜索模型与研究
@@ -234,19 +265,33 @@ Demo 数据必须同时显式设置 `CANONICAL_BUNDLE_MODE=demo` 和 `ALLOW_DEMO
 生效。每次日研会把配置 ID、版本和哈希固定到 Manifest，排队或运行中的任务不会跟随
 后续热切换。未启用模型配置时仍可使用确定性的内置 Agent 完成合规验收。
 AKShare 每个证券列表、股票历史或基准历史逻辑请求默认执行两轮受限尝试，每轮依次访问东方财富和新浪；空响应、连接中断、超时和 JSON 解码失败均会触发备用源或下一轮。可通过 `AKSHARE_FETCH_MAX_ATTEMPTS=2` 和 `AKSHARE_FETCH_BACKOFF_SECONDS=1` 调整轮数与轮间退避。单个非必需股票失败会脱敏记录并跳过，但有效标的仍不得少于 15；证券列表或基准在全部尝试后失败时任务安全终止，不会使用前一日缓存或不完整数据冒充当日快照。
-历史采集只允许在下一工作日 09:00 前冻结最近一个已完成交易日，更早日期必须提供已冻结
-canonical 文件，防止用当前截面回构历史证券池。
+新闻风险按来源可信度分层：巨潮等官方来源可产生 HIGH/CRITICAL，免费媒体重大负面最多为
+MEDIUM，不能单独硬阻断；跨源新闻按标题、日期和内容哈希去重。评分只使用
+`available_at <= decision_at` 的近 30 日新闻以及决策前已实施现金分红。
 
 完成的日研会生成带用户归属、文件哈希、日历范围和 PIT 信号的 `backtest_bundle`
 快照，回测工作台可直接选择。首次单日研究尚没有后续执行日，因此不会暴露为可执行
 回测快照；累计至少两个不同研究日后即可形成可执行快照。Worker 使用 Redis 租约和
 心跳，只回收租约过期任务，避免扩容或重启时重复抢占其他 Worker 的运行。
 `FUSED` 运行仍会生成明确标注“观察模式”的研究模拟快照，但不会生成可执行组合或
-实盘建议；累计快照承接上一份已提交 Parquet，避免用当前股票集合重写历史持仓。
+实盘建议；Manifest、报告和 API 会区分“完整股票不足”和“最大回撤熔断”，并记录正式
+可用股票、被排除股票及原因码。累计快照承接上一份已提交 Parquet，避免用当前股票集合
+重写历史持仓。
 
 `builtin_backtest.write_backtest_bundle` 生成标准 `kind + payload_json` Parquet bundle；
 Backtest Worker 校验 Manifest 状态、文件哈希、RAW 价格和时点约束，再写回绩效、三基准、
 容量、归因、产物哈希和审计事件。
+证券行业分类允许随研究日变化。行业总损益按证券终止暴露日（期末仍持有则为回测结束日，
+否则为最后成交日）之前最近一次研究信号的行业归集；分类变化会写入结果 `warnings` 和
+归因产物。失败回测不会自动重跑，所有者可在工作台确认后手动重试；重试会重新校验已提交
+快照及文件哈希，保留原失败审计并清空旧结果引用后重新排队。
+
+日报 HTML 仍是不可变沙箱内容；报告页外层可以选择同一 `run_id` 的正式候选股，异步生成
+模拟交易方案。确定性优化器最多读取 240 个已冻结交易日，隔离训练/样本外窗口，枚举限价、
+止盈、止损、移动止盈和最长持有期，并复用涨跌停、T+1、费用、滑点和容量规则。样本外净
+收益不为正、最大回撤超过 12% 或完整交易少于 5 笔时输出 `NO_BUY`，不会放宽条件。AI 仅解释
+确定性方案，模型不可用时标记“AI解释未生成”，不影响数值结果。所有方案只用于研究、回测
+和模拟盘，不承诺未来收益、不自动下单。
 
 ## 供应商与授权
 
