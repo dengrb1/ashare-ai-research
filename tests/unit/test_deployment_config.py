@@ -8,40 +8,37 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_compose_declares_control_plane_workers_and_object_bucket_init() -> None:
+def test_compose_declares_low_memory_control_plane() -> None:
     compose = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
     services = compose["services"]
     assert {
         "web",
         "api",
+        "job-worker",
         "worker",
         "backtest-worker",
         "research-worker",
         "postgres",
         "redis",
-        "minio",
-        "minio-init",
     } <= set(services)
-    assert services["api"]["depends_on"]["minio-init"]["condition"] == (
-        "service_completed_successfully"
-    )
+    assert "minio" not in services["api"]["depends_on"]
+    assert "minio" not in services
+    assert "minio-init" not in services
+    assert services["research-worker"]["profiles"] == ["parallel-workers"]
+    assert services["job-worker"]["mem_limit"] == "700m"
+    assert services["api"]["mem_limit"] == "320m"
     assert "healthcheck" in services["api"]
     assert "healthcheck" in services["web"]
     assert "healthcheck" in services["postgres"]
     assert "healthcheck" in services["redis"]
-    assert "healthcheck" in services["minio"]
     assert ".env.docker" in services["api"]["env_file"]
-    assert "host.docker.internal:host-gateway" in services["research-worker"]["extra_hosts"]
+    assert "host.docker.internal:host-gateway" in services["job-worker"]["extra_hosts"]
     web_loopback = "${WEB_BIND_ADDRESS:-127.0.0.1}"
     service_loopback = "${SERVICE_BIND_ADDRESS:-127.0.0.1}"
     assert services["web"]["ports"] == [f"{web_loopback}:80:80"]
     assert services["api"]["ports"] == [f"{service_loopback}:8000:8000"]
     assert services["postgres"]["ports"] == [f"{service_loopback}:5432:5432"]
     assert services["redis"]["ports"] == [f"{service_loopback}:6379:6379"]
-    assert services["minio"]["ports"] == [
-        f"{service_loopback}:9000:9000",
-        f"{service_loopback}:9001:9001",
-    ]
 
 
 def test_local_and_docker_environment_templates_are_separated() -> None:
@@ -58,11 +55,11 @@ def test_local_and_docker_environment_templates_are_separated() -> None:
     assert "WEB_BIND_ADDRESS=127.0.0.1" in local
     assert "SERVICE_BIND_ADDRESS=127.0.0.1" in local
     assert "AUTH_LOGIN_RATE_LIMIT_PER_MINUTE=10" in local
-    assert "redis://127.0.0.1:6379/0" in local
-    assert "http://127.0.0.1:9000" in local
-    assert "@postgres:5432/ashare" in docker
-    assert "redis://redis:6379/0" in docker
-    assert "http://minio:9000" in docker
+    assert "redis://:change-this-local-redis-password@127.0.0.1:6379/0" in local
+    assert "OBJECT_STORE_ENDPOINT=\n" in local
+    assert "${POSTGRES_PASSWORD}@postgres:5432/ashare" in docker
+    assert "redis://:${REDIS_PASSWORD}@redis:6379/0" in docker
+    assert "OBJECT_STORE_ENDPOINT=\n" in docker
     assert "AGENT_BACKEND=" not in docker
     assert "LLM_BASE_URL=" not in docker
     assert "MODEL_SETTINGS_ENCRYPTION_KEYS=" in local
@@ -75,13 +72,22 @@ def test_local_and_docker_environment_templates_are_separated() -> None:
 def test_container_install_uses_dependency_lock() -> None:
     dockerfile = (ROOT / "docker" / "app.Dockerfile").read_text(encoding="utf-8")
     assert "requirements.lock" in dockerfile
-    assert "pip install --requirement requirements.lock" in dockerfile
+    assert "pip install --no-cache-dir --requirement requirements.runtime.lock" in dockerfile
     assert "NEODATA_FINANCIAL_SEARCH_COMMIT=" in dockerfile
     assert "NEODATA_FINANCIAL_SEARCH_SHA256=" in dockerfile
     assert "NEODATA_FINANCIAL_SEARCH_PATH=/opt/neodata-financial-search/query.py" in dockerfile
     lock = (ROOT / "requirements.lock").read_text(encoding="utf-8")
+    runtime_lock = (ROOT / "requirements.runtime.lock").read_text(encoding="utf-8")
     assert len(lock) > 100
-    assert 'pywin32==312 ; sys_platform == "win32"' in lock
+    assert "prefect==" not in runtime_lock
+    assert "pytest==" not in runtime_lock
+    assert "redis==" in runtime_lock
+
+
+def test_postgres_runtime_replaces_vulnerable_gosu_binary() -> None:
+    dockerfile = (ROOT / "docker" / "postgres.Dockerfile").read_text(encoding="utf-8")
+    assert "su-exec" in dockerfile
+    assert "rm -f /usr/local/bin/gosu" in dockerfile
 
 
 def test_web_container_builds_vite_assets_and_nginx_proxies_api() -> None:
@@ -99,6 +105,9 @@ def test_web_container_builds_vite_assets_and_nginx_proxies_api() -> None:
     )
     assert 'add_header X-Content-Type-Options "nosniff" always' in nginx
     assert 'add_header X-Frame-Options "DENY" always' in nginx
+    assert "Content-Security-Policy" in nginx
+    assert "proxy_set_header X-Forwarded-For $remote_addr" in nginx
+    assert "$proxy_add_x_forwarded_for" not in nginx
     assert "proxy_hide_header X-Content-Type-Options" in nginx
 
 

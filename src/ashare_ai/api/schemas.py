@@ -53,18 +53,18 @@ class UserResponse(OrmResponse):
 
 class UserCreateRequest(BaseModel):
     username: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
-    password: str = Field(min_length=10, max_length=256)
+    password: str = Field(min_length=12, max_length=256)
     role: str = Field(default="USER", pattern=r"^(USER|ADMIN)$")
 
 
 class UserUpdateRequest(BaseModel):
     enabled: bool | None = None
     role: str | None = Field(default=None, pattern=r"^(USER|ADMIN)$")
-    password: str | None = Field(default=None, min_length=10, max_length=256)
+    password: str | None = Field(default=None, min_length=12, max_length=256)
 
 
 class PasswordResetRequest(BaseModel):
-    password: str = Field(min_length=10, max_length=256)
+    password: str = Field(min_length=12, max_length=256)
 
 
 class ModelSettingsRequest(BaseModel):

@@ -15,7 +15,7 @@ class ObjectStore(Protocol):
 
 class LocalObjectStore:
     def __init__(self, root: str | Path) -> None:
-        self.root = Path(root)
+        self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
 
     def put(
@@ -38,8 +38,16 @@ class LocalObjectStore:
             path = Path(raw_path)
         else:
             path = Path(uri)
-        payload = path.read_bytes()
-        expected = path.name
+        resolved = path.resolve(strict=True)
+        if not resolved.is_relative_to(self.root):
+            raise ValueError("object URI is outside the configured object root")
+        relative = resolved.relative_to(self.root)
+        if len(relative.parts) != 3 or relative.parts[0] != "sha256":
+            raise ValueError("object URI is not a content-addressed object")
+        expected = resolved.name
+        if relative.parts[1] != expected[:2] or len(expected) != 64:
+            raise ValueError("object URI has an invalid content-addressed path")
+        payload = resolved.read_bytes()
         actual = sha256_bytes(payload)
         if expected != actual:
             raise ValueError(f"object hash mismatch: expected={expected}, actual={actual}")

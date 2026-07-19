@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ashare_ai.core.hashing import stable_hash
+from ashare_ai.core.security import safe_error_message
 from ashare_ai.core.time import SHANGHAI
 from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.orchestration.research_jobs import enqueue_research
@@ -241,7 +242,7 @@ def _submit_auto_for_user(
             if run is not None:
                 run.status = "FAILED"
                 run.active_research_key = None
-                run.error_message = str(exc)
+                run.error_message = safe_error_message(exc)
                 run.completed_at = datetime.now(UTC)
                 AuditLogger(session).record(
                     run_id,

@@ -32,7 +32,7 @@ src/ashare_ai/
   api/             FastAPI 查询和回测任务 API
 ```
 
-PostgreSQL 保存控制面、规则、运行、评分、组合和审计；Parquet 保存不可变数据快照与分析明细；DuckDB 只查询显式提交的 Manifest；MinIO/S3 保存公告原文、模型和报告。
+PostgreSQL 保存控制面、规则、运行、评分、组合和审计；Parquet 保存不可变数据快照与分析明细；DuckDB 只查询显式提交的 Manifest；本地内容寻址对象卷或外部 S3 保存公告原文、模型和报告。
 
 ## 本地开发
 
@@ -44,7 +44,7 @@ python -m venv .venv
 .\.venv\Scripts\python -m pip install ".[dev]"
 ```
 
-不要把真实密码、Token 或 API Key 写回任何 `*.example` 文件。仓库中的本地模板使用宿主机地址：PostgreSQL `127.0.0.1:5432`、Redis `127.0.0.1:6379`、MinIO `127.0.0.1:9000`；Docker 模板改用 `postgres`、`redis`、`minio` 服务名和 `/data` 容器路径。
+不要把真实密码、Token 或 API Key 写回任何 `*.example` 文件。仓库中的本地模板使用宿主机地址：PostgreSQL `127.0.0.1:5432`、Redis `127.0.0.1:6379`；Docker 模板改用 `postgres`、`redis` 服务名和 `/data` 容器路径。
 
 ### 本地完整链路
 
@@ -52,7 +52,7 @@ python -m venv .venv
 
 ```powershell
 Copy-Item .env.docker.example .env.docker
-docker compose up -d postgres redis minio minio-init
+docker compose up -d postgres redis
 ```
 
 基础服务健康后执行只读诊断和迁移：
@@ -86,12 +86,14 @@ docker compose up -d postgres redis minio minio-init
 
 ```powershell
 $env:ADMIN_USERNAME = "admin"
-$env:ADMIN_PASSWORD = "请替换为至少10位的强密码"
+$env:ADMIN_PASSWORD = "请替换为至少14位的强密码"
 ```
 
-管理员通过 WebGUI 创建、禁用和重置其他账号。认证使用服务端数据库会话、
+管理员通过 WebGUI 创建、禁用和重置其他账号；新建和重置密码至少 12 位，生产启动管理员
+密码至少 14 位。认证使用服务端数据库会话、
 HttpOnly Cookie、双提交 CSRF 校验和 Argon2 密码哈希；禁用账号或重置密码会立即
-撤销该用户现有会话。生产环境应设置 `COOKIE_SECURE=true` 并通过 HTTPS 暴露站点。
+撤销该用户现有会话。生产环境必须设置 `COOKIE_SECURE=true`、显式 `TRUSTED_HOSTS`，
+并通过 HTTPS 暴露站点；不满足生产安全约束时 API 会拒绝启动。
 
 原生手机客户端使用短期 Bearer 访问令牌和强制轮换的刷新令牌：访问令牌默认 15 分钟，
 刷新令牌默认 30 天，可分别用 `ACCESS_TOKEN_TTL_MINUTES` 和
@@ -126,16 +128,30 @@ Copy-Item .env.docker.example .env.docker
 docker compose up --build
 ```
 
-Compose 包含 Nginx WebGUI、API、Prefect 调度进程、每日研究 Worker、回测 Worker、
-PostgreSQL、Redis 和 MinIO，并为基础服务配置健康检查。WebGUI 由 Nginx 提供静态文件并把
-`/api` 反向代理到 FastAPI；浏览器只需访问 `http://localhost`。PostgreSQL、Redis、MinIO API/Console 同时开放 `5432`、`6379`、`9000/9001`，可供宿主机本地开发进程复用。
+默认 Compose 面向 1.5GB 小型主机：包含 Nginx WebGUI、API、单一串行 `job-worker`、
+PostgreSQL 和 Redis，并为服务设置内存/PID/日志上限。`job-worker` 同时承担收盘后调度，按
+Research、Trade Plan、Backtest 三类 Redis 租约队列逐个取任务；每个重任务在隔离子进程中
+执行，结束后释放 Pandas/PyArrow 等科学计算堆，避免三类 Worker 并发触发 OOM。WebGUI 由
+Nginx 提供静态文件并把 `/api` 反向代理到 FastAPI；本地浏览器访问 `http://localhost`。
+PostgreSQL、Redis 和 API 默认仅绑定 `127.0.0.1`，Redis 强制密码认证。
+
+内置流水线使用 `object-data` 内容寻址卷。仓库不再捆绑安全更新滞后的 MinIO/MC 镜像；确需
+S3 兼容时，通过 `OBJECT_STORE_ENDPOINT` 接入受维护的外部 S3 服务。需要三类独立并行
+Worker 时使用 `docker compose --profile parallel-workers up -d --scale job-worker=0`；
+1.5GB 主机不要启用该扩展配置。
+
+公网部署先复制 `.env.production.example` 为未跟踪的 `.env`，逐项填写强随机数据库、Redis、
+管理员密码和加密密钥，再复制 `.env.docker.example`。将 `TRUSTED_HOSTS` 设置为实际域名，
+将 `MODEL_ALLOWED_HOSTS` 设置为管理员可配置的模型网关主机白名单；生产模型 URL 只允许
+HTTPS 和该白名单。Nginx 端口继续绑定 `127.0.0.1`，由同机 Caddy/Nginx 或受信任云负载
+均衡器终止 TLS，禁止直接暴露 API、PostgreSQL、Redis 或对象存储端点。
 
 启动后使用以下命令验收服务和配置：
 
 ```powershell
 docker compose ps
 docker compose exec api ashare-ai doctor
-docker compose logs research-worker backtest-worker trade-plan-worker --tail 100
+docker compose logs job-worker --tail 100
 ```
 
 生产调度默认使用仓库内置的 `ApplicationPipeline + BuiltinDailyBackend`：开发环境会生成确定性全 A 风格 demo bundle，完整跑通股票池、三类特征、严格 Agent Schema、综合评分、预测分位、事件风控、15 股组合和日报；生产环境必须通过 `ASHARE_CANONICAL_BUNDLE` 提供强类型 canonical JSON，否则 fail closed。也可替换 `ASHARE_STAGE_BACKEND_FACTORY` 接入获授权的数据源与模型实现，而不修改编排图。
@@ -199,11 +215,12 @@ Cookie 对应请求头。原生手机客户端通过 `/api/v1/auth/token` 获取
 报告的 `/symbols` 资源会返回每只股票的正式研究状态、确定性评分、数据门禁原因和交易建议
 资格，符合资格的股票可由报告 Trade Plan 接口生成购买建议。每日研究、回测和 Trade Plan 提交写入 PostgreSQL 后进入各自 Redis
 pending/processing 确认队列；同一用户重复提交同一报告和参数的进行中 Trade Plan 会返回既有任务。
-密码登录和 Token 签发共享按来源地址计算的失败尝试限流，超过阈值返回 `429` 和
+密码登录和 Token 签发共享按来源地址计算的失败尝试限流，Nginx 同时按不可伪造的直连来源
+执行边缘限流；超过阈值返回 `429` 和
 `Retry-After`；成功认证会清除该来源的失败计数。业务 API 默认返回 `Cache-Control: no-store`
-及基础浏览器安全响应头，生产环境关闭 Swagger、ReDoc 和 OpenAPI 公共入口。本地 Compose 的
-Web、API、PostgreSQL、Redis 和 MinIO 默认只绑定 `127.0.0.1`；物理手机联调或正式部署不得
-直接暴露数据库、Redis、MinIO，API 必须通过受信任的 HTTPS 反向代理发布并启用安全 Cookie。
+及 CSP、HSTS 等浏览器安全响应头，生产环境关闭 Swagger、ReDoc 和 OpenAPI 公共入口。本地 Compose 的
+Web、API、PostgreSQL 和 Redis 默认只绑定 `127.0.0.1`；物理手机联调或正式部署不得
+直接暴露数据库、Redis 或对象存储，API 必须通过受信任的 HTTPS 反向代理发布并启用安全 Cookie。
 实体手机在受信任局域网内联调时，只把 `WEB_BIND_ADDRESS` 显式设为主机局域网地址或
 `0.0.0.0`；保持 `SERVICE_BIND_ADDRESS=127.0.0.1`，手机统一经 Nginx 的 `/api` 访问后端。
 每个运行都记录用户归属、状态、失败原因和审计事件。

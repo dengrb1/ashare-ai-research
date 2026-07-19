@@ -7,19 +7,7 @@
     <meta name="description" content="A 股 AI 研究终端" />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2216%22 fill=%22%234cd3b5%22/><text x=%2232%22 y=%2243%22 text-anchor=%22middle%22 font-size=%2236%22 fill=%22%23071018%22>霁</text></svg>" />
     <title>霁衡 · A 股研究终端</title>
-    <script>
-      (() => {
-        let mode = 'system'
-        try {
-          const saved = localStorage.getItem('ashare-theme')
-          if (saved === 'light' || saved === 'dark' || saved === 'system') mode = saved
-        } catch {}
-        const resolved = mode === 'system' && window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : mode === 'dark' ? 'dark' : 'light'
-        document.documentElement.dataset.theme = resolved
-        document.documentElement.style.colorScheme = resolved
-        document.querySelector('meta[name="theme-color"]').content = resolved === 'dark' ? '#071018' : '#f4f7f8'
-      })()
-    </script>
+    <script src="/theme-init.js"></script>
   </head>
   <body>
     <div id="root"></div>

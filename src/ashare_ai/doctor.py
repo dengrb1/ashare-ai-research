@@ -11,6 +11,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
 from ashare_ai.core.config import Settings, get_settings
+from ashare_ai.core.security import safe_error_message
 
 Level = Literal["PASS", "WARN", "FAIL"]
 
@@ -26,7 +27,16 @@ def _result(name: str, function: Callable[[], str], *, warning: bool = False) ->
     try:
         return DoctorCheck(name, "PASS", function())
     except Exception as exc:
-        return DoctorCheck(name, "WARN" if warning else "FAIL", f"{type(exc).__name__}: {exc}")
+        return DoctorCheck(
+            name,
+            "WARN" if warning else "FAIL",
+            f"{type(exc).__name__}: {safe_error_message(exc)}",
+        )
+
+
+def _production_security(settings: Settings) -> str:
+    settings.validate_production_security()
+    return "production security invariants are satisfied"
 
 
 def _factory(path: str | None) -> str:
@@ -110,6 +120,7 @@ def _worker_modules() -> str:
     for module_name in (
         "ashare_ai.orchestration.research_worker",
         "ashare_ai.orchestration.backtest_worker",
+        "ashare_ai.orchestration.serial_worker",
         "ashare_ai.orchestration.redis_queue",
     ):
         import_module(module_name)
@@ -139,7 +150,17 @@ def run_doctor(*, settings: Settings | None = None, check_market: bool = True) -
         os.environ.get("ASHARE_BACKTEST_EXECUTOR_FACTORY")
         or effective.ashare_backtest_executor_factory
     )
+    production_check = (
+        _result("production-security", lambda: _production_security(effective))
+        if effective.app_env.casefold() == "production"
+        else DoctorCheck(
+            "production-security",
+            "WARN",
+            "APP_ENV is not production; public-deployment checks are inactive",
+        )
+    )
     checks = [
+        production_check,
         _result("policy-config", lambda: _policy(effective)),
         _result("dependency-lock", lambda: _dependency_lock(effective)),
         _result("pipeline-factory", lambda: _factory(pipeline_factory)),

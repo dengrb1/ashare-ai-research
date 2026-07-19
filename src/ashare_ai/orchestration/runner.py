@@ -7,9 +7,15 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from ashare_ai.core.time import SHANGHAI
-from ashare_ai.orchestration.daily import auto_research_dispatch_flow
 
 logger = logging.getLogger(__name__)
+
+
+def dispatch_auto_research_once() -> dict[str, Any]:
+    """Run the lightweight scheduler check without starting a Prefect API server."""
+    from ashare_ai.orchestration.research_schedule import dispatch_auto_research
+
+    return dispatch_auto_research()
 
 
 def seconds_until_next_tick(now: datetime, *, interval_minutes: int = 5) -> float:
@@ -26,7 +32,7 @@ def seconds_until_next_tick(now: datetime, *, interval_minutes: int = 5) -> floa
 
 def run_scheduler_loop(
     *,
-    dispatch: Callable[[], Any] = auto_research_dispatch_flow,
+    dispatch: Callable[[], Any] = dispatch_auto_research_once,
     now_factory: Callable[[], datetime] = lambda: datetime.now(SHANGHAI),
     sleep: Callable[[float], None] = time.sleep,
     max_iterations: int | None = None,

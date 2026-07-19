@@ -23,6 +23,7 @@ from ashare_ai.backtest.trade_plan import (
 )
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.hashing import canonical_json, stable_hash
+from ashare_ai.core.security import safe_error_message
 from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.orchestration.builtin_backtest import read_backtest_bundle
 from ashare_ai.orchestration.daily import flow
@@ -331,7 +332,7 @@ def mark_trade_plan_failed(
         if row is None:
             return
         row.status = "FAILED"
-        row.error_message = str(error)
+        row.error_message = safe_error_message(error)
         row.active_trade_plan_key = None
         row.completed_at = datetime.now(UTC)
         AuditLogger(session).record(

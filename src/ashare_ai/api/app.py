@@ -12,6 +12,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, s
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from ashare_ai import __version__
 from ashare_ai.agents.model_settings import (
@@ -82,6 +83,7 @@ from ashare_ai.api.schemas import (
 )
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.hashing import sha256_bytes, stable_hash
+from ashare_ai.core.security import safe_error_message
 from ashare_ai.core.time import SHANGHAI
 from ashare_ai.market.service import get_market_data_service
 from ashare_ai.observability.audit import AuditLogger
@@ -129,6 +131,7 @@ from ashare_ai.trading.default_rules import ensure_builtin_trading_rules
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    get_settings().validate_production_security()
     with SessionLocal() as session:
         bootstrap_admin(session)
         ensure_builtin_trading_rules(session)
@@ -148,6 +151,7 @@ app = FastAPI(
     redoc_url=None if _production_api else "/redoc",
     openapi_url=None if _production_api else "/openapi.json",
 )
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=_api_settings.trusted_host_list or ["*"])
 DbSession = Annotated[Session, Depends(get_db)]
 Current = Annotated[AuthContext, Depends(get_auth_context)]
 Writer = Annotated[AuthContext, Depends(get_write_context)]
@@ -162,8 +166,13 @@ async def api_security_headers(
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
     if request.url.path.startswith("/api/v1/"):
         response.headers.setdefault("Cache-Control", "no-store")
+        response.headers.setdefault(
+            "Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"
+        )
     return response
 
 
@@ -1099,7 +1108,7 @@ def submit_trade_plan(
         if failed is not None:
             failed.status = "FAILED"
             failed.active_trade_plan_key = None
-            failed.error_message = str(exc)
+            failed.error_message = safe_error_message(exc)
             failed.completed_at = datetime.now(UTC)
             db.commit()
         raise HTTPException(status_code=503, detail="trade plan queue unavailable") from exc
@@ -1322,7 +1331,7 @@ def submit_research(
     except Exception as exc:
         run.status = "FAILED"
         run.active_research_key = None
-        run.error_message = str(exc)
+        run.error_message = safe_error_message(exc)
         run.completed_at = datetime.now(UTC)
         AuditLogger(db).record(
             run_id,
@@ -1591,7 +1600,7 @@ def submit_backtest(
     except Exception as exc:
         failed_at = datetime.now(UTC)
         job.status = "FAILED"
-        job.error_message = str(exc)
+        job.error_message = safe_error_message(exc)
         job.completed_at = failed_at
         backtest.status = "FAILED"
         backtest.completed_at = failed_at
@@ -1689,7 +1698,7 @@ def retry_backtest(backtest_id: str, db: DbSession, context: Writer) -> Backtest
         row.status = "FAILED"
         row.completed_at = failed_at
         job.status = "FAILED"
-        job.error_message = str(exc)
+        job.error_message = safe_error_message(exc)
         job.completed_at = failed_at
         AuditLogger(db).record(
             job.run_id,

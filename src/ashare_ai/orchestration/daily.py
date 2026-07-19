@@ -12,13 +12,17 @@ from ashare_ai.core.time import SHANGHAI
 F = TypeVar("F", bound=Callable[..., Any])
 _prefect_flow: Callable[..., Any] | None
 _prefect_task: Callable[..., Any] | None
-try:
-    from prefect import flow as _flow_implementation
-    from prefect import task as _task_implementation
+if get_settings().enable_prefect_flows:
+    try:
+        from prefect import flow as _flow_implementation
+        from prefect import task as _task_implementation
 
-    _prefect_flow = cast(Callable[..., Any], _flow_implementation)
-    _prefect_task = cast(Callable[..., Any], _task_implementation)
-except ImportError:  # Core/test environments do not require the heavy orchestration extra.
+        _prefect_flow = cast(Callable[..., Any], _flow_implementation)
+        _prefect_task = cast(Callable[..., Any], _task_implementation)
+    except ImportError:  # The low-memory runtime intentionally excludes Prefect.
+        _prefect_flow = None
+        _prefect_task = None
+else:
     _prefect_flow = None
     _prefect_task = None
 

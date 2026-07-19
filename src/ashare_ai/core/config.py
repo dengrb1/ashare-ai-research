@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -31,6 +32,7 @@ class Settings(BaseSettings):
     refresh_token_ttl_days: int = Field(default=30, ge=1, le=365)
     auth_login_rate_limit_per_minute: int = Field(default=10, ge=1, le=120)
     cookie_secure: bool = False
+    trusted_hosts: str = "*"
     market_cache_seconds: int = Field(default=15, ge=1, le=300)
     market_kline_cache_seconds: int = Field(default=300, ge=15, le=3600)
     market_prefetch_max_workers: int = Field(default=4, ge=1, le=16)
@@ -71,11 +73,87 @@ class Settings(BaseSettings):
     llm_reasoning_effort: str = "high"
     llm_timeout_seconds: float = Field(default=90.0, gt=0, le=600)
     model_settings_encryption_keys: str | None = None
+    model_allowed_hosts: str | None = None
+    enable_prefect_flows: bool = False
 
     @field_validator("neodata_financial_search_path", mode="before")
     @classmethod
     def empty_neodata_path_is_unconfigured(cls, value: object) -> object:
         return None if isinstance(value, str) and not value.strip() else value
+
+    @property
+    def trusted_host_list(self) -> list[str]:
+        return [item.strip() for item in self.trusted_hosts.split(",") if item.strip()]
+
+    @property
+    def model_allowed_host_set(self) -> frozenset[str]:
+        return frozenset(
+            item.strip().casefold().rstrip(".")
+            for item in (self.model_allowed_hosts or "").split(",")
+            if item.strip()
+        )
+
+    def validate_production_security(self) -> None:
+        """Fail closed when a production process is configured unsafely."""
+        if self.app_env.casefold() != "production":
+            return
+        problems: list[str] = []
+        if not self.cookie_secure:
+            problems.append("COOKIE_SECURE must be true")
+        if not self.trusted_host_list or "*" in self.trusted_host_list:
+            problems.append("TRUSTED_HOSTS must contain explicit public host names")
+        if not self.admin_username or not self.admin_password:
+            problems.append("ADMIN_USERNAME and ADMIN_PASSWORD are required")
+        elif len(self.admin_password) < 14 or self.admin_password.casefold() in {
+            "change-this-before-starting",
+            "password",
+            "admin-password",
+        }:
+            problems.append("ADMIN_PASSWORD must be a non-default value of at least 14 characters")
+
+        database = urlsplit(self.database_url)
+        if not database.scheme.startswith("postgresql"):
+            problems.append("DATABASE_URL must use PostgreSQL")
+        if (
+            not database.password
+            or database.password.casefold() in {"ashare", "password", "postgres"}
+            or database.password.casefold().startswith("change-this")
+        ):
+            problems.append("DATABASE_URL must contain a non-default database password")
+
+        redis = urlsplit(self.redis_url)
+        if redis.scheme not in {"redis", "rediss"} or not redis.password:
+            problems.append("REDIS_URL must contain Redis authentication credentials")
+        elif redis.password.casefold() in {"password", "redis", "local-redis-only"} or (
+            redis.password.casefold().startswith("change-this")
+        ):
+            problems.append("REDIS_URL must contain a non-default Redis password")
+
+        if self.object_store_endpoint:
+            endpoint = urlsplit(self.object_store_endpoint)
+            if endpoint.scheme != "https" or not self.object_store_secure:
+                problems.append("external object-store endpoints must use HTTPS")
+            if not self.object_store_access_key or not self.object_store_secret_key:
+                problems.append(
+                    "object-store credentials are required when an endpoint is configured"
+                )
+            elif (
+                self.object_store_access_key.casefold() == "minioadmin"
+                or self.object_store_secret_key.casefold() == "minioadmin"
+            ):
+                problems.append("object-store default credentials are forbidden")
+        elif (self.object_store_access_key or self.object_store_secret_key) and (
+            not self.object_store_secure
+        ):
+            problems.append("external object-store credentials require TLS")
+        if not self.model_allowed_host_set:
+            problems.append("MODEL_ALLOWED_HOSTS must explicitly allow model gateway hosts")
+        if self.agent_backend == "openai_compatible" and not self.model_settings_encryption_keys:
+            problems.append("MODEL_SETTINGS_ENCRYPTION_KEYS is required for the model backend")
+        if self.allow_demo_data or self.canonical_bundle_mode == "demo":
+            problems.append("demo market data is forbidden in production")
+        if problems:
+            raise ValueError("unsafe production configuration: " + "; ".join(problems))
 
 
 @lru_cache(maxsize=1)

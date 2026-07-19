@@ -263,8 +263,6 @@ def _non_negative_int(value: Any) -> int:
 
 
 def _http_error_message(response: httpx.Response) -> str:
-    body = response.text.strip()
-    if len(body) > 500:
-        body = f"{body[:500]}..."
-    detail = f": {body}" if body else ""
-    return f"Responses API request failed with status {response.status_code}{detail}"
+    # Upstream bodies are untrusted and may reflect prompts, credentials, or
+    # internal diagnostics. Persist and expose only the stable status code.
+    return f"Responses API request failed with status {response.status_code}"

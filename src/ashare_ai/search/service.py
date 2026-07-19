@@ -158,7 +158,9 @@ class NeoDataFinancialSearchProvider:
             upstream="sina-finance",
             mode=self.mode,
             available=True,
-            script_path=str(self.script_path) if self.script_path else None,
+            # Keep the response field for v1 compatibility without exposing a
+            # server filesystem path to authenticated remote clients.
+            script_path=None,
             message=(
                 "使用已发现的 NeoData query.py"
                 if self.mode == "cli"

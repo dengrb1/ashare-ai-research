@@ -19,7 +19,15 @@ from sqlalchemy.orm import Session
 from ashare_ai.core.config import Settings, get_settings
 from ashare_ai.storage.models import UserAccount, UserSession
 
-_PASSWORD_HASHER = PasswordHasher()
+_PASSWORD_HASHER = PasswordHasher(
+    time_cost=2,
+    memory_cost=19_456,
+    parallelism=1,
+    hash_len=32,
+    salt_len=16,
+)
+_DUMMY_PASSWORD_HASH = _PASSWORD_HASHER.hash("timing-defense-not-a-real-password")
+_PASSWORD_VERIFY_SEMAPHORE = threading.BoundedSemaphore(2)
 _AUTH_ATTEMPTS: dict[str, deque[float]] = defaultdict(deque)
 _AUTH_ATTEMPTS_LOCK = threading.Lock()
 
@@ -48,6 +56,8 @@ def _aware(value: datetime) -> datetime:
 
 
 def hash_password(password: str) -> str:
+    # Existing hashes and bootstrap credentials remain backward compatible;
+    # all public create/reset schemas require 12 and production startup requires 14.
     if len(password) < 10:
         raise ValueError("password must contain at least 10 characters")
     return _PASSWORD_HASHER.hash(password)
@@ -55,7 +65,8 @@ def hash_password(password: str) -> str:
 
 def verify_password(password_hash: str, password: str) -> bool:
     try:
-        return _PASSWORD_HASHER.verify(password_hash, password)
+        with _PASSWORD_VERIFY_SEMAPHORE:
+            return _PASSWORD_HASHER.verify(password_hash, password)
     except (InvalidHashError, VerifyMismatchError):
         return False
 
@@ -87,7 +98,9 @@ def bootstrap_admin(db: Session, settings: Settings | None = None) -> UserAccoun
 
 def authenticate(db: Session, username: str, password: str) -> UserAccount | None:
     user = db.scalar(select(UserAccount).where(UserAccount.username == username.strip().casefold()))
-    if user is None or not user.enabled or not verify_password(user.password_hash, password):
+    password_hash = user.password_hash if user is not None else _DUMMY_PASSWORD_HASH
+    valid_password = verify_password(password_hash, password)
+    if user is None or not user.enabled or not valid_password:
         return None
     if _PASSWORD_HASHER.check_needs_rehash(user.password_hash):
         user.password_hash = hash_password(password)
@@ -103,12 +116,15 @@ def _auth_source(request: Request) -> str:
     except ValueError:
         trusted_proxy = False
     if trusted_proxy:
-        forwarded = request.headers.get("x-forwarded-for", "").partition(",")[0].strip()
-        try:
-            if forwarded:
-                return str(ipaddress.ip_address(forwarded))
-        except ValueError:
-            pass
+        # Use the proxy-adjacent (right-most) address. The first X-Forwarded-For
+        # value is attacker-controlled unless every upstream proxy overwrites it.
+        forwarded = request.headers.get("x-forwarded-for", "")
+        for candidate in reversed(forwarded.split(",")):
+            try:
+                if candidate.strip():
+                    return str(ipaddress.ip_address(candidate.strip()))
+            except ValueError:
+                continue
     return peer
 
 
@@ -255,7 +271,7 @@ def rotate_refresh_token(
         select(UserSession).where(
             UserSession.refresh_token_hash == _digest(refresh_token),
             UserSession.session_type == "APP",
-        )
+        ).with_for_update()
     )
     now = datetime.now(UTC)
     if (

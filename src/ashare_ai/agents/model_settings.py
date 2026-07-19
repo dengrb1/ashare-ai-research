@@ -165,7 +165,7 @@ class ModelConfigurationService:
         user_id: str | None,
         probe: ModelProbeResult | None,
     ) -> ModelConfigurationVersion:
-        base_url = normalize_base_url(draft.base_url)
+        base_url = normalize_base_url(draft.base_url, self.settings)
         current = self.resolve(session, require_enabled=False)
         api_key = draft.api_key or (current.api_key if current else None)
         if not api_key:
@@ -237,7 +237,7 @@ class ModelConfigurationService:
         return row
 
     async def probe(self, draft: ModelSettingsDraft, session: Session) -> ModelProbeResult:
-        base_url = normalize_base_url(draft.base_url)
+        base_url = normalize_base_url(draft.base_url, self.settings)
         current = self.resolve(session, require_enabled=False)
         api_key = draft.api_key or (current.api_key if current else None)
         if not api_key:
@@ -278,7 +278,7 @@ class ModelConfigurationService:
         )
 
     async def list_models(self, draft: ModelSettingsDraft, session: Session) -> list[str]:
-        base_url = normalize_base_url(draft.base_url)
+        base_url = normalize_base_url(draft.base_url, self.settings)
         current = self.resolve(session, require_enabled=False)
         api_key = draft.api_key or (current.api_key if current else None)
         if not api_key:
@@ -352,7 +352,7 @@ class ModelConfigurationService:
             or not self.settings.llm_api_key
         ):
             return None
-        base_url = normalize_base_url(self.settings.llm_base_url)
+        base_url = normalize_base_url(self.settings.llm_base_url, self.settings)
         config_hash = _config_hash(
             base_url=base_url,
             api_key=self.settings.llm_api_key,
@@ -394,11 +394,25 @@ class ModelConfigurationService:
         return MultiFernet(fernets), key_id
 
 
-def normalize_base_url(value: str) -> str:
+def normalize_base_url(value: str, settings: Settings | None = None) -> str:
     normalized = value.strip().rstrip("/")
     parsed = urlparse(normalized)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc or "," in parsed.netloc:
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or "," in parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
         raise ModelSettingsError("Base URL 必须是合法的 http(s) 地址")
+    if settings is not None and settings.app_env.casefold() == "production":
+        host = (parsed.hostname or "").casefold().rstrip(".")
+        if parsed.scheme != "https":
+            raise ModelSettingsError("生产环境模型 Base URL 必须使用 HTTPS")
+        if host not in settings.model_allowed_host_set:
+            raise ModelSettingsError("模型 Base URL 主机不在 MODEL_ALLOWED_HOSTS 白名单中")
     return normalized if normalized.endswith("/v1") else f"{normalized}/v1"
 
 
@@ -413,5 +427,10 @@ def _validate_effort(value: str) -> None:
 
 
 def _safe_error(exc: Exception) -> str:
-    text = str(exc).replace("\n", " ").strip()
-    return (text[:300] if text else type(exc).__name__).replace("Bearer ", "")
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"model endpoint returned HTTP {exc.response.status_code}"
+    if isinstance(exc, httpx.RequestError):
+        return "model endpoint connection failed"
+    if isinstance(exc, OpenAICompatibleError):
+        return "model endpoint rejected the structured-output probe"
+    return "model endpoint validation failed"

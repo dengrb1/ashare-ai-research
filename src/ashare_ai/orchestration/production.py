@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from ashare_ai.agents.model_settings import ModelConfigurationService
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.hashing import sha256_bytes, stable_hash
+from ashare_ai.core.security import safe_error_message
 from ashare_ai.core.time import SHANGHAI, market_decision_time
 from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.storage.database import SessionLocal
@@ -164,7 +165,7 @@ class ApplicationPipeline:
                     cancel_requested = run.status == "CANCEL_REQUESTED"
                     if not cancel_requested:
                         run.status = "FAILED"
-                        run.error_message = str(exc)
+                        run.error_message = safe_error_message(exc)
                         run.completed_at = datetime.now(UTC)
                     AuditLogger(session).record(
                         run_id,
