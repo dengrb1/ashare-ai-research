@@ -45,6 +45,7 @@
 - 为移动网络设计接口时，优先提供摘要、按 ID 详情和增量刷新能力；使用合理缓存头、ETag/`If-None-Match` 或版本/更新时间字段。缓存不得绕过用户权限、PIT `decision_at` 校验、Manifest 不可变性或报告版本边界。
 - 所有 App 路由继续执行 `require_auth`、用户角色/资源归属校验、限流和统一错误格式；客户端传入的用户 ID、权限、运行状态、评分、交易参数、`decision_at`、Manifest/配置哈希均不可信，必须由服务端校验或派生。任何交易建议仍只适用于模拟组合，不得扩展为自动实盘下单接口。
 - 修改认证、公开 API、异步任务载荷或响应模型时，同步更新 OpenAPI、`README.md` 接口清单、Web 调用方、客户端契约文档和测试。至少覆盖：Bearer 鉴权、令牌续期/撤销、401/403/422/429、分页与空结果、幂等重试、任务状态以及旧客户端兼容性；为将来 iOS/Android 客户端预留与 Web 无关的 API 测试夹具。
+- API 契约文档统一维护在 `docs/API.md`；新增、删除或改变公开端点、请求字段、响应字段、状态码、排序或权限时，必须同步更新该文档，并用代码实际注册的 FastAPI 路由核对文档端点清单。
 
 ## 协作与文件所有权
 
@@ -56,8 +57,9 @@
 
 ## 本地运行、验证与安全
 
-- 每次更新代码后，交付前必须执行 `docker compose up -d --build`，将最新镜像重新构建并部署到本机 Docker Desktop；随后至少运行 `docker compose ps` 并检查 Web、API 和 Worker 的健康状态。若受环境或权限限制无法完成，必须在交付说明中明确列出原因和未验证项。
-- 本地完整链路：基础依赖由 `docker compose up -d postgres redis minio minio-init` 提供；随后运行 `ashare-ai doctor`、`ashare-ai migrate`，再分别启动 API、Research Worker、Backtest Worker 和（如需）调度器。不要在 Docker 基础服务启动后又在容器内重复启动 API/Worker。
+- 每次更新代码后，交付前必须执行 `docker compose -p ashare-ai-src -f compose.yaml up -d --build`，将最新镜像重新构建并部署到本机 Docker Desktop；随后至少运行 `docker compose -p ashare-ai-src -f compose.yaml ps`，并检查 Web、API、PostgreSQL、Redis 和 Worker 的健康状态。若受环境或权限限制无法完成，必须在交付说明中明确列出原因和未验证项。使用显式项目名是强制要求，避免当前目录名、临时 ASCII 构建目录和旧 Compose 配置创建多个互不相同的项目。
+- 本地完整链路：基础依赖由 `docker compose -p ashare-ai-src -f compose.yaml up -d postgres redis` 提供；当前默认低内存栈不再捆绑 MinIO，使用 `object-data` 卷或外部 HTTPS S3。随后运行 `ashare-ai doctor`、`ashare-ai migrate`，再启动 API 和串行 `job-worker`；不要在 Docker 基础服务启动后又在容器内重复启动 API/Worker。
+- Docker 故障恢复必须先检查同一 Compose 项目的依赖：`docker compose -p ashare-ai-src -f compose.yaml ps -a`、`docker compose ls --all` 和 `docker ps -a`。若 API 日志出现 `failed to resolve host 'postgres'`，或 Worker 日志出现 `failed to resolve host 'redis'`，先启动对应的 `postgres`、`redis` 并等待其 healthcheck 通过，再启动 API/Worker；不得通过反复重启应用容器掩盖依赖未运行。`Exited (0)` 且日志含 `SIGTERM` 表示容器被正常停止，不等同于 OOM 或应用崩溃；恢复时不得删除数据库、Redis、lake 或 object 数据卷。
 - 前端开发使用 `cd web; npm ci; npm run dev`，默认访问 `http://localhost:5173`，并把 `/api` 代理到 `http://127.0.0.1:8000`。完整 Docker 栈由 Nginx 在 `http://localhost` 暴露网页。
 - Python 修改至少运行受影响的 `pytest` 用例；跨层、数据或交易语义修改运行完整 `\.venv\Scripts\python -m pytest`（环境允许时）。前端修改至少运行 `cd web; npm test -- --run`，并在交付前运行 `npm run build`。
 - 提交前执行相应范围的 Ruff 与 mypy；不能运行的集成检查需说明原因，不能以跳过测试替代验证。
