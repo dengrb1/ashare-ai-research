@@ -18,11 +18,26 @@ concurrency:
 env:
   PYTHON_VERSION: "3.11"
   REGISTRY: ghcr.io
-  IMAGE_NAME: ghcr.io/${{ github.repository }}
 
 jobs:
   docker:
-    name: Build Docker image
+    name: Build ${{ matrix.image_name }} image
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image_name: application
+            image_suffix: ""
+            context: .
+            file: docker/app.Dockerfile
+          - image_name: web
+            image_suffix: "-web"
+            context: ./web
+            file: Dockerfile
+          - image_name: postgres
+            image_suffix: "-postgres"
+            context: .
+            file: docker/postgres.Dockerfile
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -46,7 +61,7 @@ jobs:
         id: metadata
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ github.repository }}${{ matrix.image_suffix }}
           tags: |
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=ref,event=branch
@@ -56,8 +71,8 @@ jobs:
       - name: Build and publish Docker image
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: docker/app.Dockerfile
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
           push: ${{ github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}

@@ -1,0 +1,39 @@
+# GHCR deployment override. It removes local build instructions and makes all
+# application images pullable from GitHub Container Registry.
+#
+# Usage:
+#   docker compose -p ashare-ai -f compose.yaml -f compose.ghcr.yaml pull
+#   docker compose -p ashare-ai -f compose.yaml -f compose.ghcr.yaml up -d
+
+services:
+  web:
+    image: ${ASHARE_WEB_IMAGE:-ghcr.io/dengrb1/ashare-ai-research-web:latest}
+    build: null
+
+  api:
+    image: ${ASHARE_APP_IMAGE:-ghcr.io/dengrb1/ashare-ai-research:latest}
+    build: null
+
+  job-worker:
+    image: ${ASHARE_APP_IMAGE:-ghcr.io/dengrb1/ashare-ai-research:latest}
+    build: null
+
+  worker:
+    image: ${ASHARE_APP_IMAGE:-ghcr.io/dengrb1/ashare-ai-research:latest}
+    build: null
+
+  backtest-worker:
+    image: ${ASHARE_APP_IMAGE:-ghcr.io/dengrb1/ashare-ai-research:latest}
+    build: null
+
+  research-worker:
+    image: ${ASHARE_APP_IMAGE:-ghcr.io/dengrb1/ashare-ai-research:latest}
+    build: null
+
+  trade-plan-worker:
+    image: ${ASHARE_APP_IMAGE:-ghcr.io/dengrb1/ashare-ai-research:latest}
+    build: null
+
+  postgres:
+    image: ${ASHARE_POSTGRES_IMAGE:-ghcr.io/dengrb1/ashare-ai-research-postgres:latest}
+    build: null

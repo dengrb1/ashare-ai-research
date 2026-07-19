@@ -171,17 +171,36 @@ npm run build
 ### GitHub 自动构建
 
 向任意分支推送提交后，GitHub Actions 会自动执行两类构建；推送到 `main` 分支或 `v*` 格式的版本标签时，
-还会发布 Docker 镜像：
+还会发布可直接从 GHCR 拉取的 Docker 镜像：
 
-- 将后端镜像 `docker/app.Dockerfile` 构建并发布到 GitHub Container Registry：
-  `ghcr.io/<GitHub 用户名>/ashare-ai-research`。`main` 分支会更新 `latest`，每次构建还会生成
-  `sha-<commit>` 标签；
+- 将应用镜像 `docker/app.Dockerfile` 发布为 `ghcr.io/<GitHub 用户名>/ashare-ai-research`；
+- 将 Web 镜像发布为 `ghcr.io/<GitHub 用户名>/ashare-ai-research-web`；
+- 将 PostgreSQL 定制镜像发布为 `ghcr.io/<GitHub 用户名>/ashare-ai-research-postgres`。三类镜像的
+  `main` 分支都会更新 `latest`，发布构建还会生成分支、版本或 `sha-<commit>` 标签；
 - 使用 PyInstaller 生成 Linux x86_64 和 Windows x86_64 的独立 `ashare-ai` CLI，并将两个文件作为
   GitHub Actions 构建产物保存 14 天。
 
 也可以在仓库的 Actions 页面手动运行 `Build and publish`。独立可执行文件包含 CLI 所需的迁移、配置和
 报告模板资源，但运行 API 或迁移仍需提供外部 PostgreSQL/Redis 等服务；不要把 `.env`、密码或 Token
 打包进产物。
+
+### 直接使用 GHCR 镜像
+
+仓库提供 [compose.ghcr.yaml](<F:/code/AI炒股/compose.ghcr.yaml>)，会移除本地 `build` 配置，改为直接
+拉取 GHCR 的 Web、应用和 PostgreSQL 镜像。先将 GHCR 对应的三个 Package 设置为 **Public**（否则需要
+先执行 `docker login ghcr.io`），然后：
+
+```powershell
+Copy-Item .env.production.example .env
+Copy-Item .env.docker.example .env.docker
+# 在 .env 中填写生产数据库、Redis、管理员密码和加密密钥
+docker compose -p ashare-ai -f compose.yaml -f compose.ghcr.yaml pull
+docker compose -p ashare-ai -f compose.yaml -f compose.ghcr.yaml up -d
+```
+
+默认镜像地址对应本仓库；如果是 Fork，运行前设置 `ASHARE_APP_IMAGE`、`ASHARE_WEB_IMAGE` 和
+`ASHARE_POSTGRES_IMAGE` 为自己的 GHCR 地址即可。该方式仍然是完整多服务栈，不把 PostgreSQL、Redis
+和 API 强行塞进一个容器；访问入口仍为 Nginx WebGUI 的 `http://localhost`。
 
 ## API
 
