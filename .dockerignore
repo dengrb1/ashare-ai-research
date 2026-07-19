@@ -11,6 +11,8 @@ web/node_modules
 web/dist
 data
 artifacts
+build
+dist
 htmlcov
 *.db
 *.duckdb

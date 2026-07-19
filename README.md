@@ -168,6 +168,21 @@ npm test -- --run
 npm run build
 ```
 
+### GitHub 自动构建
+
+向任意分支推送提交后，GitHub Actions 会自动执行两类构建；推送到 `main` 分支或 `v*` 格式的版本标签时，
+还会发布 Docker 镜像：
+
+- 将后端镜像 `docker/app.Dockerfile` 构建并发布到 GitHub Container Registry：
+  `ghcr.io/<GitHub 用户名>/ashare-ai-research`。`main` 分支会更新 `latest`，每次构建还会生成
+  `sha-<commit>` 标签；
+- 使用 PyInstaller 生成 Linux x86_64 和 Windows x86_64 的独立 `ashare-ai` CLI，并将两个文件作为
+  GitHub Actions 构建产物保存 14 天。
+
+也可以在仓库的 Actions 页面手动运行 `Build and publish`。独立可执行文件包含 CLI 所需的迁移、配置和
+报告模板资源，但运行 API 或迁移仍需提供外部 PostgreSQL/Redis 等服务；不要把 `.env`、密码或 Token
+打包进产物。
+
 ## API
 
 - `POST /api/v1/auth/login`

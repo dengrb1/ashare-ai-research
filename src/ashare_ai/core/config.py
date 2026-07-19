@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -9,6 +10,16 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def runtime_resource_path(relative_path: str) -> Path:
+    """Return a bundled resource path when running as a PyInstaller binary."""
+
+    if getattr(sys, "frozen", False):
+        bundle_root = getattr(sys, "_MEIPASS", None)
+        if bundle_root:
+            return Path(bundle_root) / relative_path
+    return Path(relative_path)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -16,7 +27,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+pysqlite:///./data/ashare.db"
     redis_url: str = "redis://localhost:6379/0"
     lake_root: Path = Path("data/lake")
-    policy_config_path: Path = Path("configs/first_release.v2.json")
+    policy_config_path: Path = runtime_resource_path("configs/first_release.v2.json")
     object_store_endpoint: str | None = None
     object_store_bucket: str = "ashare-research"
     object_store_access_key: str | None = None
@@ -55,7 +66,7 @@ class Settings(BaseSettings):
     ashare_pipeline_factory: str | None = None
     ashare_stage_backend_factory: str | None = None
     ashare_backtest_executor_factory: str | None = None
-    dependency_lock_path: Path = Path("requirements.lock")
+    dependency_lock_path: Path = runtime_resource_path("requirements.lock")
     git_sha: str = "UNVERSIONED"
     log_level: str = "INFO"
     decision_hour: int = Field(default=18, ge=0, le=23)
