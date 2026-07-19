@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import secrets
+import threading
+import time
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -16,6 +20,8 @@ from ashare_ai.core.config import Settings, get_settings
 from ashare_ai.storage.models import UserAccount, UserSession
 
 _PASSWORD_HASHER = PasswordHasher()
+_AUTH_ATTEMPTS: dict[str, deque[float]] = defaultdict(deque)
+_AUTH_ATTEMPTS_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -88,6 +94,71 @@ def authenticate(db: Session, username: str, password: str) -> UserAccount | Non
         user.updated_at = datetime.now(UTC)
         db.commit()
     return user
+
+
+def _auth_source(request: Request) -> str:
+    peer = request.client.host if request.client else "unknown"
+    try:
+        trusted_proxy = ipaddress.ip_address(peer).is_private
+    except ValueError:
+        trusted_proxy = False
+    if trusted_proxy:
+        forwarded = request.headers.get("x-forwarded-for", "").partition(",")[0].strip()
+        try:
+            if forwarded:
+                return str(ipaddress.ip_address(forwarded))
+        except ValueError:
+            pass
+    return peer
+
+
+def check_auth_rate_limit(
+    request: Request,
+    username: str,
+    settings: Settings | None = None,
+    *,
+    now: float | None = None,
+) -> str:
+    """Rate-limit password attempts by source and account for one API process."""
+    effective = settings or get_settings()
+    account = hashlib.sha256(username.strip().casefold().encode("utf-8")).hexdigest()[:16]
+    source = f"{_auth_source(request)}:{account}"
+    current = time.monotonic() if now is None else now
+    cutoff = current - 60
+    with _AUTH_ATTEMPTS_LOCK:
+        attempts = _AUTH_ATTEMPTS[source]
+        while attempts and attempts[0] <= cutoff:
+            attempts.popleft()
+        if len(attempts) >= effective.auth_login_rate_limit_per_minute:
+            retry_after = max(1, round(60 - (current - attempts[0])))
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="authentication rate limit exceeded",
+                headers={"Retry-After": str(retry_after)},
+            )
+    return source
+
+
+def record_auth_failure(source: str, *, now: float | None = None) -> None:
+    current = time.monotonic() if now is None else now
+    with _AUTH_ATTEMPTS_LOCK:
+        if len(_AUTH_ATTEMPTS) >= 10_000 and source not in _AUTH_ATTEMPTS:
+            cutoff = current - 60
+            expired = [
+                key
+                for key, values in _AUTH_ATTEMPTS.items()
+                if not values or values[-1] <= cutoff
+            ]
+            for key in expired:
+                _AUTH_ATTEMPTS.pop(key, None)
+            if len(_AUTH_ATTEMPTS) >= 10_000:
+                _AUTH_ATTEMPTS.pop(next(iter(_AUTH_ATTEMPTS)))
+        _AUTH_ATTEMPTS[source].append(current)
+
+
+def clear_auth_failures(source: str) -> None:
+    with _AUTH_ATTEMPTS_LOCK:
+        _AUTH_ATTEMPTS.pop(source, None)
 
 
 def create_session(

@@ -938,6 +938,82 @@ def test_research_submission_prepares_frozen_manifest_and_deduplicates(monkeypat
         session.close()
 
 
+def test_watchlist_research_accepts_a_selected_subset_and_rejects_outside_symbols(
+    monkeypatch,
+) -> None:
+    session, _, user = _database()
+    pipeline = PreparedPipeline(session)
+    queued: list[str] = []
+    monkeypatch.setattr("ashare_ai.api.app.load_pipeline", lambda: pipeline)
+    monkeypatch.setattr("ashare_ai.api.app.enqueue_research", queued.append)
+
+    def override_db():
+        yield session
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        client = TestClient(app)
+        client.post(
+            "/api/v1/auth/login",
+            json={"username": "alice", "password": "alice-password"},
+        )
+        csrf = client.cookies.get("ashare_csrf")
+        assets = client.put(
+            "/api/v1/assets",
+            json={"watchlist": ["600519.SH", "000858.SZ"], "positions": []},
+            headers={"x-csrf-token": csrf},
+        )
+        assert assets.status_code == 200
+
+        empty = client.post(
+            "/api/v1/research/runs",
+            json={
+                "trading_date": "2026-07-14",
+                "scope": "WATCHLIST",
+                "symbols": [],
+            },
+            headers={"x-csrf-token": csrf},
+        )
+        assert empty.status_code == 422
+        assert empty.json()["detail"] == "请至少选择一只自选股或持仓股票"
+
+        outside = client.post(
+            "/api/v1/research/runs",
+            json={
+                "trading_date": "2026-07-14",
+                "scope": "WATCHLIST",
+                "symbols": ["300750.SZ"],
+            },
+            headers={"x-csrf-token": csrf},
+        )
+        assert outside.status_code == 422
+        assert "不在当前自选股或持仓中" in outside.json()["detail"]
+
+        selected = client.post(
+            "/api/v1/research/runs",
+            json={
+                "trading_date": "2026-07-14",
+                "scope": "WATCHLIST",
+                "symbols": ["600519.SH"],
+                "total_budget": 1_000_000,
+                "per_symbol_budget": 80_000,
+            },
+            headers={"x-csrf-token": csrf},
+        )
+        assert selected.status_code == 202
+        run = session.get(JobRun, "prepared-run")
+        assert run is not None
+        assert run.user_id == user.user_id
+        assert run.manifest["research_scope"] == "WATCHLIST"
+        assert run.manifest["target_symbols"] == ["600519.SH"]
+        assert run.manifest["tracked_symbols"] == ["600519.SH"]
+        assert pipeline.start_calls == 1
+        assert queued == ["prepared-run"]
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+
 def test_snapshot_listing_and_submission_hide_unusable_research_runs() -> None:
     session, _, user = _database()
     now = datetime.now(UTC)

@@ -38,4 +38,34 @@ describe('login flow', () => {
   it('keeps the assets page heading when nginx redirects to a trailing slash', () => {
     expect(titleForPathname('/assets/')).toEqual(['自选与持仓', '关注列表与个人持仓记录'])
   })
+
+  it('opens and closes the mobile navigation drawer without leaving page scroll locked', async () => {
+    const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/auth/me')) return jsonResponse({ user_id: 'u1', username: 'analyst', role: 'USER', enabled: true, created_at: '2026-07-15T00:00:00Z' })
+      if (url.endsWith('/assets')) return jsonResponse({ watchlist: [], positions: [] })
+      if (url.endsWith('/market/prefetch') && init?.method === 'POST') return jsonResponse({ quotes: [], klines: {}, errors: {} })
+      return jsonResponse([])
+    })
+    vi.stubGlobal('fetch', mockFetch)
+
+    const view = render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>)
+    await waitFor(() => expect(view.container.querySelector('h1')).toHaveTextContent('全局仪表盘'))
+    const menuButton = view.container.querySelector<HTMLButtonElement>('.mobile-menu-button')!
+    const overlay = view.container.querySelector<HTMLButtonElement>('.nav-overlay')!
+
+    expect(menuButton).toHaveAttribute('aria-expanded', 'false')
+    await userEvent.click(menuButton)
+    expect(menuButton).toHaveAttribute('aria-expanded', 'true')
+    expect(document.body.style.overflow).toBe('hidden')
+
+    await userEvent.click(overlay)
+    expect(menuButton).toHaveAttribute('aria-expanded', 'false')
+    await waitFor(() => expect(document.body.style.overflow).toBe(''))
+
+    await userEvent.click(menuButton)
+    await userEvent.keyboard('{Escape}')
+    expect(menuButton).toHaveAttribute('aria-expanded', 'false')
+    await waitFor(() => expect(document.body.style.overflow).toBe(''))
+  })
 })

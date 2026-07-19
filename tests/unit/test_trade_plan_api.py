@@ -17,6 +17,7 @@ from ashare_ai.storage.models import (
     CandidateRow,
     JobRun,
     ReportRow,
+    ScoreRow,
     SnapshotManifestRow,
     TradePlanRow,
     UserAccount,
@@ -224,6 +225,101 @@ def test_trade_plan_rejects_fused_and_critical_candidates(monkeypatch) -> None:
             json={"symbols": ["600000.SH"]},
         )
         assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "GLOBAL_RISK_FUSE_ACTIVE"
+        run.status = "SUCCEEDED"
+        run.manifest = {"data_quality_gate": {"formal_eligible_symbols": ["600000.SH"]}}
+        session.commit()
+        critical = client.post(
+            "/api/v1/reports/report-2/trade-plans",
+            json={"symbols": ["600000.SH"]},
+        )
+        assert critical.status_code == 409
+        assert critical.json()["detail"]["code"] == "CRITICAL_EVENT_RISK"
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+
+def test_report_symbols_include_data_limited_stock_as_no_buy() -> None:
+    session, now = _database()
+    run = JobRun(
+        run_id="run-symbols",
+        user_id="user-1",
+        run_type="DAILY",
+        trading_date=date(2026, 7, 15),
+        decision_at=now,
+        status="SUCCEEDED",
+        idempotency_key="run-symbols-key",
+        manifest={
+            "target_symbols": ["600000.SH", "600001.SH"],
+            "data_quality_gate": {
+                "formal_eligible_symbols": ["600000.SH"],
+                "excluded_symbols": {"600001.SH": ["MISSING_OFFICIAL_DISCLOSURE"]},
+            },
+        },
+        input_hash="a" * 64,
+        started_at=now,
+        completed_at=now,
+    )
+    report = ReportRow(
+        report_id="report-symbols",
+        run_id=run.run_id,
+        trading_date=run.trading_date,
+        report_type="DAILY_RESEARCH",
+        object_uri="file:///report",
+        content_sha256="b" * 64,
+        created_at=now,
+    )
+    scores = [
+        ScoreRow(
+            run_id=run.run_id,
+            symbol=symbol,
+            trading_date=run.trading_date,
+            decision_at=now,
+            fundamental_score=70,
+            technical_score=70,
+            sentiment_score=70,
+            quality_confidence_score=70,
+            base_total_score=70,
+            dividend_bonus=0,
+            event_risk_multiplier=1,
+            total_score=70,
+            formula_version="v2",
+            agent_bundle_sha256="c" * 64,
+            evidence_bundle_sha256="d" * 64,
+            feature_snapshot_id="feature",
+        )
+        for symbol in ("600000.SH", "600001.SH")
+    ]
+    candidate = CandidateRow(
+        run_id=run.run_id,
+        symbol="600000.SH",
+        trading_date=run.trading_date,
+        decision_at=now,
+        rank=1,
+        total_score=70,
+        prediction_percentile=1,
+        industry_code="BANK",
+        event_risk_multiplier=1,
+        style_exposures={},
+        evidence_hash="e" * 64,
+    )
+    session.add_all([run, report, *scores, candidate])
+    session.commit()
+    client = _client(session)
+    try:
+        response = client.get("/api/v1/reports/report-symbols/symbols")
+        assert response.status_code == 200
+        rows = {item["symbol"]: item for item in response.json()}
+        assert rows["600000.SH"]["advice_eligible"] is True
+        assert rows["600001.SH"]["recommendation"] == "NO_BUY"
+        assert rows["600001.SH"]["exclusion_reasons"] == ["MISSING_OFFICIAL_DISCLOSURE"]
+        other_client = _client(session, user_id="other-user")
+        assert other_client.get("/api/v1/reports/report-symbols/symbols").status_code == 404
+        assert other_client.post(
+            "/api/v1/reports/report-symbols/trade-plans",
+            json={"symbols": ["600000.SH"]},
+        ).status_code == 404
     finally:
         app.dependency_overrides.clear()
         session.close()

@@ -32,7 +32,16 @@ def test_compose_declares_control_plane_workers_and_object_bucket_init() -> None
     assert "healthcheck" in services["minio"]
     assert ".env.docker" in services["api"]["env_file"]
     assert "host.docker.internal:host-gateway" in services["research-worker"]["extra_hosts"]
-    assert services["redis"]["ports"] == ["6379:6379"]
+    web_loopback = "${WEB_BIND_ADDRESS:-127.0.0.1}"
+    service_loopback = "${SERVICE_BIND_ADDRESS:-127.0.0.1}"
+    assert services["web"]["ports"] == [f"{web_loopback}:80:80"]
+    assert services["api"]["ports"] == [f"{service_loopback}:8000:8000"]
+    assert services["postgres"]["ports"] == [f"{service_loopback}:5432:5432"]
+    assert services["redis"]["ports"] == [f"{service_loopback}:6379:6379"]
+    assert services["minio"]["ports"] == [
+        f"{service_loopback}:9000:9000",
+        f"{service_loopback}:9001:9001",
+    ]
 
 
 def test_local_and_docker_environment_templates_are_separated() -> None:
@@ -46,6 +55,9 @@ def test_local_and_docker_environment_templates_are_separated() -> None:
         assert factory in local
         assert factory in docker
     assert "@127.0.0.1:5432/ashare" in local
+    assert "WEB_BIND_ADDRESS=127.0.0.1" in local
+    assert "SERVICE_BIND_ADDRESS=127.0.0.1" in local
+    assert "AUTH_LOGIN_RATE_LIMIT_PER_MINUTE=10" in local
     assert "redis://127.0.0.1:6379/0" in local
     assert "http://127.0.0.1:9000" in local
     assert "@postgres:5432/ashare" in docker
@@ -67,7 +79,9 @@ def test_container_install_uses_dependency_lock() -> None:
     assert "NEODATA_FINANCIAL_SEARCH_COMMIT=" in dockerfile
     assert "NEODATA_FINANCIAL_SEARCH_SHA256=" in dockerfile
     assert "NEODATA_FINANCIAL_SEARCH_PATH=/opt/neodata-financial-search/query.py" in dockerfile
-    assert (ROOT / "requirements.lock").stat().st_size > 100
+    lock = (ROOT / "requirements.lock").read_text(encoding="utf-8")
+    assert len(lock) > 100
+    assert 'pywin32==312 ; sys_platform == "win32"' in lock
 
 
 def test_web_container_builds_vite_assets_and_nginx_proxies_api() -> None:
@@ -83,6 +97,9 @@ def test_web_container_builds_vite_assets_and_nginx_proxies_api() -> None:
         and "set $api_upstream api:8000" in nginx
         and "proxy_pass http://$api_upstream" in nginx
     )
+    assert 'add_header X-Content-Type-Options "nosniff" always' in nginx
+    assert 'add_header X-Frame-Options "DENY" always' in nginx
+    assert "proxy_hide_header X-Content-Type-Options" in nginx
 
 
 def test_first_release_policy_fixes_required_constraints() -> None:

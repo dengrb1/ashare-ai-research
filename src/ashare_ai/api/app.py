@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal, NoReturn
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
@@ -23,11 +23,14 @@ from ashare_ai.api.auth import (
     AuthContext,
     authenticate,
     bootstrap_admin,
+    check_auth_rate_limit,
     clear_auth_cookies,
+    clear_auth_failures,
     create_session,
     create_token_session,
     hash_password,
     invalidate_user_sessions,
+    record_auth_failure,
     require_admin,
     revoke_refresh_token,
     revoke_session,
@@ -35,6 +38,11 @@ from ashare_ai.api.auth import (
 )
 from ashare_ai.api.dependencies import get_auth_context, get_db, get_write_context
 from ashare_ai.api.schemas import (
+    MAX_RESEARCH_SYMBOLS,
+    MAX_TRADE_PLAN_SYMBOLS,
+    MAX_WATCHLIST_SYMBOLS,
+    AppBootstrapResponse,
+    AppCapabilitiesResponse,
     AssetStateRequest,
     AssetStateResponse,
     AuditEventResponse,
@@ -56,6 +64,7 @@ from ashare_ai.api.schemas import (
     RefreshTokenRequest,
     ReportBodyResponse,
     ReportResponse,
+    ReportSymbolResponse,
     ResearchRequest,
     ResearchRunResponse,
     ResearchSettingsRequest,
@@ -128,16 +137,34 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     yield
 
 
+_api_settings = get_settings()
+_production_api = _api_settings.app_env.casefold() == "production"
 app = FastAPI(
     title="A-share AI Research API",
     version=__version__,
     description="Authenticated research, live market data and asynchronous fixed-snapshot jobs.",
     lifespan=lifespan,
+    docs_url=None if _production_api else "/docs",
+    redoc_url=None if _production_api else "/redoc",
+    openapi_url=None if _production_api else "/openapi.json",
 )
 DbSession = Annotated[Session, Depends(get_db)]
 Current = Annotated[AuthContext, Depends(get_auth_context)]
 Writer = Annotated[AuthContext, Depends(get_write_context)]
 SearchService = Annotated[FinancialSearchService, Depends(get_financial_search_service)]
+
+
+@app.middleware("http")
+async def api_security_headers(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    if request.url.path.startswith("/api/v1/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+    return response
 
 
 def _admin(context: AuthContext) -> None:
@@ -212,6 +239,28 @@ def _trade_plan_policy_payload(run: JobRun) -> dict[str, Any]:
     }
 
 
+def _configured_portfolio_target_count() -> int:
+    path = get_settings().policy_config_path
+    try:
+        parsed = json.loads(path.read_bytes())
+        value = parsed["portfolio"]["target_count"]
+        target_count = int(value)
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=503, detail="versioned portfolio target_count is unavailable"
+        ) from exc
+    if target_count <= 0:
+        raise HTTPException(status_code=503, detail="portfolio target_count must be positive")
+    return target_count
+
+
+def _trade_plan_error(code: str, message: str, *, symbols: list[str] | None = None) -> NoReturn:
+    detail: dict[str, Any] = {"code": code, "message": message}
+    if symbols:
+        detail["symbols"] = symbols
+    raise HTTPException(status_code=409, detail=detail)
+
+
 def _backtest_response(db: Session, row: BacktestRun) -> BacktestResponse:
     job = db.get(JobRun, row.run_id) if row.run_id else None
     return BacktestResponse.model_validate(
@@ -246,9 +295,7 @@ def _research_run_response(db: Session, row: JobRun) -> ResearchRunResponse:
     normalized = row.status.upper()
     if normalized in {"SUCCEEDED", "FUSED"}:
         phase, progress = (
-            ("观察模式报告已发布", 100)
-            if normalized == "FUSED"
-            else ("研究结果已发布", 100)
+            ("观察模式报告已发布", 100) if normalized == "FUSED" else ("研究结果已发布", 100)
         )
     elif normalized in {"FAILED", "CANCEL_REQUESTED", "CANCELLED"}:
         latest = db.scalar(
@@ -282,9 +329,14 @@ def _research_run_response(db: Session, row: JobRun) -> ResearchRunResponse:
     gate = gate if isinstance(gate, dict) else {}
     risk_outcome = manifest.get("risk_outcome")
     risk_outcome = risk_outcome if isinstance(risk_outcome, dict) else {}
-    portfolio_generated = db.scalar(
-        select(PortfolioRow.portfolio_id).where(PortfolioRow.run_id == row.run_id).limit(1)
-    ) is not None
+    portfolio_outcome = manifest.get("portfolio_outcome")
+    portfolio_outcome = portfolio_outcome if isinstance(portfolio_outcome, dict) else {}
+    portfolio_generated = (
+        db.scalar(
+            select(PortfolioRow.portfolio_id).where(PortfolioRow.run_id == row.run_id).limit(1)
+        )
+        is not None
+    )
     return ResearchRunResponse.model_validate(
         {
             **{column.name: getattr(row, column.name) for column in row.__table__.columns},
@@ -304,6 +356,8 @@ def _research_run_response(db: Session, row: JobRun) -> ResearchRunResponse:
             "reason_message": risk_outcome.get("reason_message"),
             "formal_eligible_count": gate.get("formal_eligible_count"),
             "excluded_symbol_count": len(gate.get("excluded_symbols", {})),
+            "portfolio_reason_code": portfolio_outcome.get("reason_code"),
+            "portfolio_reason_message": portfolio_outcome.get("reason_message"),
             "trigger_source": manifest.get("trigger_source", "MANUAL"),
             "requested_date": manifest.get("requested_date", row.trading_date),
         }
@@ -329,9 +383,12 @@ def login(
     payload: LoginRequest, request: Request, response: Response, db: DbSession
 ) -> UserResponse:
     bootstrap_admin(db)
+    source = check_auth_rate_limit(request, payload.username)
     user = authenticate(db, payload.username, payload.password)
     if user is None:
+        record_auth_failure(source)
         raise HTTPException(status_code=401, detail="invalid username or password")
+    clear_auth_failures(source)
     create_session(db, user, response, request)
     return UserResponse.model_validate(user)
 
@@ -339,9 +396,12 @@ def login(
 @app.post("/api/v1/auth/token", response_model=TokenResponse)
 def issue_token(payload: LoginRequest, request: Request, db: DbSession) -> TokenResponse:
     bootstrap_admin(db)
+    source = check_auth_rate_limit(request, payload.username)
     user = authenticate(db, payload.username, payload.password)
     if user is None:
+        record_auth_failure(source)
         raise HTTPException(status_code=401, detail="invalid username or password")
+    clear_auth_failures(source)
     pair = create_token_session(db, user, request)
     return TokenResponse(
         access_token=pair.access_token,
@@ -383,6 +443,39 @@ def asset_state(db: DbSession, context: Current) -> AssetStateResponse:
     return AssetStateResponse.model_validate(UserAssetService(db).get(context.user.user_id))
 
 
+@app.get("/api/v1/app/bootstrap", response_model=AppBootstrapResponse)
+def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
+    """Return the stable, authenticated initialization contract for native clients."""
+    assets = AssetStateResponse.model_validate(UserAssetService(db).get(context.user.user_id))
+    return AppBootstrapResponse(
+        server_time=datetime.now(UTC),
+        user=UserResponse.model_validate(context.user),
+        assets=assets,
+        capabilities=AppCapabilitiesResponse(
+            max_watchlist_symbols=MAX_WATCHLIST_SYMBOLS,
+            max_research_symbols=MAX_RESEARCH_SYMBOLS,
+            max_trade_plan_symbols=MAX_TRADE_PLAN_SYMBOLS,
+            portfolio_target_count=_configured_portfolio_target_count(),
+            features={
+                "watchlist_research_selection": True,
+                "formal_watchlist_reports": True,
+                "report_symbol_eligibility": True,
+                "trade_plan_generation": True,
+                "research_cancellation": True,
+                "paper_portfolio_only": True,
+            },
+            endpoints={
+                "assets": "/api/v1/assets",
+                "research_runs": "/api/v1/research/runs",
+                "research_settings": "/api/v1/research/settings",
+                "report_symbols": "/api/v1/reports/{report_id}/symbols",
+                "report_trade_plans": "/api/v1/reports/{report_id}/trade-plans",
+                "trade_plan": "/api/v1/trade-plans/{plan_id}",
+            },
+        ),
+    )
+
+
 @app.put("/api/v1/assets", response_model=AssetStateResponse)
 def update_asset_state(
     payload: AssetStateRequest, db: DbSession, context: Writer
@@ -391,9 +484,7 @@ def update_asset_state(
         context.user.user_id,
         payload.watchlist,
         [position.model_dump(mode="json", exclude_none=True) for position in payload.positions],
-        payload.total_assets
-        if "total_assets" in payload.model_fields_set
-        else UNSET_TOTAL_ASSETS,
+        payload.total_assets if "total_assets" in payload.model_fields_set else UNSET_TOTAL_ASSETS,
     )
     return AssetStateResponse.model_validate(state)
 
@@ -641,18 +732,20 @@ def score_lineage(
 def candidates(
     trading_date: date, db: DbSession, context: Current, run_id: str | None = None
 ) -> list[CandidateResponse]:
-    rows = QueryRepository(db).candidates(
-        trading_date, run_id=run_id, **_result_access(context)
+    rows = QueryRepository(db).candidates(trading_date, run_id=run_id, **_result_access(context))
+    scores = (
+        {
+            (item.run_id, item.symbol): item
+            for item in db.scalars(
+                select(ScoreRow).where(
+                    ScoreRow.run_id.in_({row.run_id for row in rows}),
+                    ScoreRow.symbol.in_({row.symbol for row in rows}),
+                )
+            ).all()
+        }
+        if rows
+        else {}
     )
-    scores = {
-        (item.run_id, item.symbol): item
-        for item in db.scalars(
-            select(ScoreRow).where(
-                ScoreRow.run_id.in_({row.run_id for row in rows}),
-                ScoreRow.symbol.in_({row.symbol for row in rows}),
-            )
-        ).all()
-    } if rows else {}
     return [
         CandidateResponse.model_validate(
             {
@@ -678,9 +771,7 @@ def portfolio(
     trading_date: date, db: DbSession, context: Current, run_id: str | None = None
 ) -> PortfolioResponse:
     repository = QueryRepository(db)
-    selected_run_id = repository.result_run_id(
-        trading_date, run_id, **_result_access(context)
-    )
+    selected_run_id = repository.result_run_id(trading_date, run_id, **_result_access(context))
     selected_run = db.get(JobRun, selected_run_id) if selected_run_id else None
     if selected_run is not None and selected_run.status == "FUSED":
         manifest = dict(selected_run.manifest or {})
@@ -694,13 +785,10 @@ def portfolio(
             status="FUSED",
             observation_only=True,
             message=str(
-                risk_outcome.get("reason_message")
-                or "正式组合条件未满足，当前仅发布观察报告"
+                risk_outcome.get("reason_message") or "正式组合条件未满足，当前仅发布观察报告"
             ),
             reason_code=(
-                str(risk_outcome["reason_code"])
-                if risk_outcome.get("reason_code")
-                else None
+                str(risk_outcome["reason_code"]) if risk_outcome.get("reason_code") else None
             ),
             formal_eligible_symbols=list(gate.get("formal_eligible_symbols", [])),
             excluded_symbols=dict(gate.get("excluded_symbols", {})),
@@ -710,9 +798,15 @@ def portfolio(
         manifest = dict(selected_run.manifest or {}) if selected_run is not None else {}
         outcome = manifest.get("portfolio_outcome")
         outcome = outcome if isinstance(outcome, dict) else {}
-        if selected_run is not None and selected_run.status == "SUCCEEDED" and (
-            not bool(manifest.get("portfolio_requested", True))
-            or outcome.get("generated") is False
+        gate = manifest.get("data_quality_gate")
+        gate = gate if isinstance(gate, dict) else {}
+        if (
+            selected_run is not None
+            and selected_run.status == "SUCCEEDED"
+            and (
+                not bool(manifest.get("portfolio_requested", True))
+                or outcome.get("generated") is False
+            )
         ):
             reason = manifest.get("research_only_reason")
             failure = outcome.get("reason")
@@ -723,7 +817,12 @@ def portfolio(
                 trading_date=trading_date,
                 status="SUCCEEDED",
                 research_only=True,
-                message=str(reason or "本次研究未请求生成模拟组合"),
+                message=str(
+                    outcome.get("reason_message") or reason or "本次研究未请求生成模拟组合"
+                ),
+                reason_code=(str(outcome["reason_code"]) if outcome.get("reason_code") else None),
+                formal_eligible_symbols=list(gate.get("formal_eligible_symbols", [])),
+                excluded_symbols=dict(gate.get("excluded_symbols", {})),
             )
         raise HTTPException(status_code=404, detail="portfolio not found")
     return PortfolioResponse.model_validate(row)
@@ -765,6 +864,79 @@ def report_content(report_id: str, db: DbSession, context: Current) -> ReportBod
     return ReportBodyResponse(report_id=row.report_id, content_type="text/html", content=content)
 
 
+@app.get("/api/v1/reports/{report_id}/symbols", response_model=list[ReportSymbolResponse])
+def report_symbols(report_id: str, db: DbSession, context: Current) -> list[ReportSymbolResponse]:
+    report_row = db.get(ReportRow, report_id)
+    if report_row is None:
+        raise HTTPException(status_code=404, detail="report not found")
+    run = db.get(JobRun, report_row.run_id)
+    if run is None or not _owns(run, context):
+        raise HTTPException(status_code=404, detail="report not found")
+    manifest = dict(run.manifest or {})
+    gate = manifest.get("data_quality_gate")
+    gate = gate if isinstance(gate, dict) else {}
+    gate_declared = "formal_eligible_symbols" in gate
+    eligible = set(str(item) for item in gate.get("formal_eligible_symbols", []))
+    raw_excluded = gate.get("excluded_symbols")
+    raw_excluded = raw_excluded if isinstance(raw_excluded, dict) else {}
+    candidates = {
+        item.symbol: item
+        for item in db.scalars(select(CandidateRow).where(CandidateRow.run_id == run.run_id)).all()
+    }
+    scores = list(
+        db.scalars(
+            select(ScoreRow).where(ScoreRow.run_id == run.run_id).order_by(ScoreRow.symbol)
+        ).all()
+    )
+    quality = manifest.get("symbol_data_quality")
+    quality = quality if isinstance(quality, dict) else {}
+    global_fused = run.status == "FUSED"
+    result: list[ReportSymbolResponse] = []
+    for score in scores:
+        candidate = candidates.get(score.symbol)
+        reasons = [str(item) for item in raw_excluded.get(score.symbol, [])]
+        if global_fused:
+            risk = manifest.get("risk_outcome")
+            risk = risk if isinstance(risk, dict) else {}
+            reasons = list(
+                dict.fromkeys([*reasons, str(risk.get("reason_code") or "GLOBAL_RISK_FUSE_ACTIVE")])
+            )
+        elif score.event_risk_multiplier <= 0:
+            reasons = list(dict.fromkeys([*reasons, "CRITICAL_EVENT_RISK"]))
+        advice_eligible = (
+            not global_fused
+            and (score.symbol in eligible if gate_declared else candidate is not None)
+            and score.event_risk_multiplier > 0
+            and candidate is not None
+        )
+        status_value: Literal["FORMAL", "FORMAL_WITH_LIMITATIONS", "RISK_BLOCKED"] = (
+            "FORMAL"
+            if advice_eligible
+            else "RISK_BLOCKED"
+            if global_fused or score.event_risk_multiplier <= 0
+            else "FORMAL_WITH_LIMITATIONS"
+        )
+        result.append(
+            ReportSymbolResponse(
+                symbol=score.symbol,
+                research_status=status_value,
+                advice_eligible=advice_eligible,
+                recommendation=None if advice_eligible else "NO_BUY",
+                exclusion_reasons=reasons,
+                data_quality=(
+                    quality.get(score.symbol, {})
+                    if isinstance(quality.get(score.symbol), dict)
+                    else {}
+                ),
+                score=ScoreResponse.model_validate(score),
+                rank=candidate.rank if candidate else None,
+                prediction_percentile=candidate.prediction_percentile if candidate else None,
+                industry_code=candidate.industry_code if candidate else None,
+            )
+        )
+    return result
+
+
 @app.post(
     "/api/v1/reports/{report_id}/trade-plans",
     response_model=TradePlanResponse,
@@ -784,10 +956,16 @@ def submit_trade_plan(
     if run is None or not _owns(run, context):
         raise HTTPException(status_code=404, detail="report not found")
     if run.status != "SUCCEEDED":
-        raise HTTPException(
-            status_code=409,
-            detail="FUSED or incomplete research runs cannot generate a buy plan",
+        _trade_plan_error(
+            "GLOBAL_RISK_FUSE_ACTIVE",
+            "全局风控熔断或研究尚未成功，不能生成购买建议",
         )
+    manifest = dict(run.manifest or {})
+    target_symbols = set(str(item) for item in manifest.get("target_symbols", []))
+    if target_symbols:
+        outside = sorted(set(payload.symbols) - target_symbols)
+        if outside:
+            _trade_plan_error("SYMBOL_NOT_IN_REPORT", "股票不属于本次研究范围", symbols=outside)
     candidates = list(
         db.scalars(
             select(CandidateRow).where(
@@ -799,21 +977,30 @@ def submit_trade_plan(
     by_symbol = {item.symbol: item for item in candidates}
     missing = sorted(set(payload.symbols) - set(by_symbol))
     if missing:
-        raise HTTPException(
-            status_code=422,
-            detail=f"symbols are not formal candidates of this report: {missing}",
-        )
+        gate = manifest.get("data_quality_gate")
+        gate = gate if isinstance(gate, dict) else {}
+        excluded = gate.get("excluded_symbols")
+        excluded = excluded if isinstance(excluded, dict) else {}
+        incomplete = [symbol for symbol in missing if symbol in excluded]
+        if incomplete:
+            _trade_plan_error(
+                "SYMBOL_DATA_INCOMPLETE", "股票未通过个股数据完整性门禁", symbols=incomplete
+            )
+        _trade_plan_error("SYMBOL_NOT_IN_REPORT", "股票不是本次报告的正式研究对象", symbols=missing)
     blocked = sorted(
         symbol for symbol, item in by_symbol.items() if item.event_risk_multiplier <= 0
     )
     if blocked:
-        raise HTTPException(
-            status_code=409,
-            detail=f"CRITICAL-risk candidates cannot generate a buy plan: {blocked}",
+        _trade_plan_error(
+            "CRITICAL_EVENT_RISK", "股票存在重大事件风险，固定为 NO_BUY", symbols=blocked
         )
-    gate = run.manifest.get("data_quality_gate", {}) if isinstance(run.manifest, dict) else {}
-    if isinstance(gate, dict) and gate.get("passed") is False:
-        raise HTTPException(status_code=409, detail="research data-quality gate did not pass")
+    gate = manifest.get("data_quality_gate", {})
+    formal = set(gate.get("formal_eligible_symbols", [])) if isinstance(gate, dict) else set()
+    incomplete = sorted(set(payload.symbols) - formal) if formal else []
+    if incomplete:
+        _trade_plan_error(
+            "SYMBOL_DATA_INCOMPLETE", "股票未通过个股数据完整性门禁", symbols=incomplete
+        )
     snapshot = db.scalar(
         select(SnapshotManifestRow)
         .where(
@@ -825,12 +1012,9 @@ def submit_trade_plan(
         .limit(1)
     )
     if snapshot is None:
-        raise HTTPException(status_code=409, detail="report has no committed backtest snapshot")
+        _trade_plan_error("INSUFFICIENT_VALIDATION_HISTORY", "报告没有已提交的个股验证快照")
     if len(snapshot.details.get("future_trading_dates", [])) < 3:
-        raise HTTPException(
-            status_code=409,
-            detail="report snapshot lacks three frozen future trading sessions",
-        )
+        _trade_plan_error("INSUFFICIENT_VALIDATION_HISTORY", "验证快照缺少三个已冻结的未来交易日")
     request_payload = {
         **payload.model_dump(mode="json"),
         "optimizer_policy": _trade_plan_policy_payload(run),
@@ -926,9 +1110,7 @@ def submit_trade_plan(
     "/api/v1/reports/{report_id}/trade-plans",
     response_model=list[TradePlanResponse],
 )
-def report_trade_plans(
-    report_id: str, db: DbSession, context: Current
-) -> list[TradePlanResponse]:
+def report_trade_plans(report_id: str, db: DbSession, context: Current) -> list[TradePlanResponse]:
     report_row = db.get(ReportRow, report_id)
     if report_row is None:
         raise HTTPException(status_code=404, detail="report not found")
@@ -946,9 +1128,7 @@ def report_trade_plans(
 @app.get("/api/v1/trade-plans/{plan_id}", response_model=TradePlanResponse)
 def trade_plan(plan_id: str, db: DbSession, context: Current) -> TradePlanResponse:
     row = db.get(TradePlanRow, plan_id)
-    if row is None or (
-        context.user.role != "ADMIN" and row.user_id != context.user.user_id
-    ):
+    if row is None or (context.user.role != "ADMIN" and row.user_id != context.user.user_id):
         raise HTTPException(status_code=404, detail="trade plan not found")
     return TradePlanResponse.model_validate(row)
 
@@ -992,7 +1172,7 @@ def submit_research(
     actual_research_date = _manual_research_date(requested_date, datetime.now(SHANGHAI))
     if payload.scope == "WATCHLIST":
         assets = UserAssetService(db).get(context.user.user_id)
-        target_symbols: list[str] = sorted(
+        available_symbols = sorted(
             set(str(symbol) for symbol in assets.get("watchlist", []))
             | {
                 str(position.get("symbol", "")).upper()
@@ -1000,8 +1180,21 @@ def submit_research(
                 if position.get("symbol")
             }
         )
-        if not target_symbols:
+        if not available_symbols:
             raise HTTPException(status_code=422, detail="自选股与持仓为空，无法发起定向研究")
+        if "symbols" in payload.model_fields_set:
+            if not payload.symbols:
+                raise HTTPException(status_code=422, detail="请至少选择一只自选股或持仓股票")
+            outside = sorted(set(payload.symbols) - set(available_symbols))
+            if outside:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"所选股票不在当前自选股或持仓中：{'、'.join(outside)}",
+                )
+            target_symbols = sorted(payload.symbols)
+        else:
+            # Keep older clients compatible: omitting symbols still means all saved assets.
+            target_symbols = available_symbols
     elif payload.scope == "CUSTOM":
         target_symbols = list(payload.symbols)
     else:
@@ -1015,7 +1208,8 @@ def submit_research(
             str(payload.max_stock_price) if payload.max_stock_price is not None else None
         ),
     }
-    portfolio_requested = payload.scope == "MARKET" or len(target_symbols) >= 15
+    target_count = _configured_portfolio_target_count()
+    portfolio_requested = payload.scope == "MARKET" or len(target_symbols) >= target_count
     active_key = stable_hash(
         {
             "kind": "ACTIVE_DAILY_RESEARCH",
@@ -1043,9 +1237,7 @@ def submit_research(
     try:
         run_id = load_pipeline().start_run(actual_research_date)
     except Exception as exc:
-        raise HTTPException(
-            status_code=503, detail=str(exc) or "research pipeline unavailable"
-        ) from exc
+        raise HTTPException(status_code=503, detail="research pipeline unavailable") from exc
     run = db.get(JobRun, run_id)
     if run is None:
         raise HTTPException(status_code=500, detail="pipeline did not create a run")
@@ -1066,8 +1258,7 @@ def submit_research(
                 )
                 .order_by(JobRun.trading_date.desc(), CandidateRow.rank)
                 .limit(80)
-            )
-            .all()
+            ).all()
         )
     frozen_manifest = {
         **dict(run.manifest),
@@ -1083,7 +1274,7 @@ def submit_research(
         "research_only_reason": (
             None
             if portfolio_requested
-            else "定向研究标的少于 15 只，仅生成评分、候选和报告"
+            else f"定向研究标的少于 {target_count} 只，正式个股研究正常完成但不生成整体组合"
         ),
     }
     run.manifest = frozen_manifest
@@ -1147,8 +1338,9 @@ def submit_research(
 
 @app.get("/api/v1/research/settings", response_model=ResearchSettingsResponse)
 def research_settings(db: DbSession, context: Current) -> ResearchSettingsResponse:
+    settings = ResearchSettingsService(db).get(context.user.user_id)
     return ResearchSettingsResponse.model_validate(
-        ResearchSettingsService(db).get(context.user.user_id)
+        {**settings, "portfolio_target_count": _configured_portfolio_target_count()}
     )
 
 
@@ -1156,10 +1348,11 @@ def research_settings(db: DbSession, context: Current) -> ResearchSettingsRespon
 def update_research_settings(
     payload: ResearchSettingsRequest, db: DbSession, context: Writer
 ) -> ResearchSettingsResponse:
+    settings = ResearchSettingsService(db).update(
+        context.user.user_id, auto_enabled=payload.auto_enabled
+    )
     return ResearchSettingsResponse.model_validate(
-        ResearchSettingsService(db).update(
-            context.user.user_id, auto_enabled=payload.auto_enabled
-        )
+        {**settings, "portfolio_target_count": _configured_portfolio_target_count()}
     )
 
 
@@ -1515,7 +1708,7 @@ def market_quotes(symbols: str, _: Current, refresh: bool = False) -> list[Quote
     try:
         rows = get_market_data_service().quotes(symbols.split(","), force_refresh=refresh)
     except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail="market quotes unavailable") from exc
     return [QuoteResponse.model_validate(row) for row in rows]
 
 
@@ -1547,7 +1740,7 @@ def market_klines(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail="market kline unavailable") from exc
 
 
 @app.post("/api/v1/market/prefetch", response_model=MarketPrefetchResponse)
@@ -1588,7 +1781,7 @@ def financial_search(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except TimeoutError as exc:
-        raise HTTPException(status_code=504, detail=str(exc)) from exc
+        raise HTTPException(status_code=504, detail="financial search timed out") from exc
     except FinancialSearchBusyError as exc:
         raise HTTPException(
             status_code=429,
@@ -1596,7 +1789,7 @@ def financial_search(
             headers={"Retry-After": "1"},
         ) from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail="financial search unavailable") from exc
 
 
 @app.get("/api/v1/search/status", response_model=FinancialSearchStatus)

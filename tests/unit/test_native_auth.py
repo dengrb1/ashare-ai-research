@@ -7,9 +7,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from ashare_ai.api import auth as auth_module
 from ashare_ai.api.app import app
 from ashare_ai.api.auth import hash_password
 from ashare_ai.api.dependencies import get_db
+from ashare_ai.core.config import Settings
 from ashare_ai.storage.models import Base, UserAccount, UserSession
 
 
@@ -39,6 +41,10 @@ def test_native_bearer_refresh_rotation_revoke_expiry_and_disable() -> None:
     app.dependency_overrides[get_db] = override_db
     try:
         client = TestClient(app)
+        anonymous = client.get("/api/v1/app/bootstrap")
+        assert anonymous.status_code == 401
+        assert anonymous.headers["cache-control"] == "no-store"
+        assert anonymous.headers["x-content-type-options"] == "nosniff"
         issued = client.post(
             "/api/v1/auth/token",
             json={"username": "native-user", "password": "native-password"},
@@ -54,6 +60,31 @@ def test_native_bearer_refresh_rotation_revoke_expiry_and_disable() -> None:
 
         headers = {"Authorization": f"Bearer {first['access_token']}"}
         assert client.get("/api/v1/auth/me", headers=headers).status_code == 200
+        bootstrap = client.get("/api/v1/app/bootstrap", headers=headers)
+        assert bootstrap.status_code == 200
+        bootstrap_body = bootstrap.json()
+        assert bootstrap_body["user"]["username"] == "native-user"
+        assert bootstrap_body["assets"] == client.get(
+            "/api/v1/assets", headers=headers
+        ).json()
+        assert bootstrap_body["capabilities"]["api_version"] == "v1"
+        assert bootstrap_body["capabilities"]["authentication"] == "BEARER_REFRESH"
+        assert bootstrap_body["capabilities"]["supported_research_scopes"] == [
+            "MARKET",
+            "WATCHLIST",
+            "CUSTOM",
+        ]
+        assert bootstrap_body["capabilities"]["features"] == {
+            "watchlist_research_selection": True,
+            "formal_watchlist_reports": True,
+            "report_symbol_eligibility": True,
+            "trade_plan_generation": True,
+            "research_cancellation": True,
+            "paper_portfolio_only": True,
+        }
+        assert bootstrap_body["capabilities"]["endpoints"]["report_symbols"] == (
+            "/api/v1/reports/{report_id}/symbols"
+        )
         assert client.put(
             "/api/v1/assets",
             headers=headers,
@@ -94,5 +125,40 @@ def test_native_bearer_refresh_rotation_revoke_expiry_and_disable() -> None:
             headers={"Authorization": f"Bearer {replacement['access_token']}"},
         ).status_code == 401
     finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+
+def test_password_endpoints_are_rate_limited_without_account_enumeration(monkeypatch) -> None:
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    session = Session(engine, expire_on_commit=False)
+
+    def override_db():
+        yield session
+
+    settings = Settings(auth_login_rate_limit_per_minute=2)
+    monkeypatch.setattr(auth_module, "get_settings", lambda: settings)
+    with auth_module._AUTH_ATTEMPTS_LOCK:
+        auth_module._AUTH_ATTEMPTS.clear()
+    app.dependency_overrides[get_db] = override_db
+    try:
+        client = TestClient(app)
+        payload = {"username": "unknown-user", "password": "wrong-password"}
+        assert client.post("/api/v1/auth/login", json=payload).status_code == 401
+        second = client.post("/api/v1/auth/token", json=payload)
+        assert second.status_code == 401
+        assert second.json()["detail"] == "invalid username or password"
+        limited = client.post("/api/v1/auth/token", json=payload)
+        assert limited.status_code == 429
+        assert limited.headers["retry-after"]
+        assert limited.json()["detail"] == "authentication rate limit exceeded"
+    finally:
+        with auth_module._AUTH_ATTEMPTS_LOCK:
+            auth_module._AUTH_ATTEMPTS.clear()
         app.dependency_overrides.clear()
         session.close()

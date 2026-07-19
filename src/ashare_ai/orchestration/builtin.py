@@ -1038,7 +1038,15 @@ class BuiltinDailyBackend:
         if control.state == PortfolioRiskState.OBSERVE_ONLY:
             reason_code = "MAX_DRAWDOWN_FUSE_ACTIVE"
             reason_message = "最大回撤熔断仍在生效，需满足恢复阈值、观察期和人工恢复要求"
-        elif len(formal_eligible) < self.policy.portfolio.target_count:
+        _, _, manifest = self._run_context(run_id)
+        research_scope = str(manifest.get("research_scope", "MARKET")).upper()
+        portfolio_requested = bool(manifest.get("portfolio_requested", True))
+        insufficient_for_portfolio = len(formal_eligible) < self.policy.portfolio.target_count
+        if (
+            control.state != PortfolioRiskState.OBSERVE_ONLY
+            and insufficient_for_portfolio
+            and research_scope == "MARKET"
+        ):
             control = DrawdownControlState(
                 state=PortfolioRiskState.OBSERVE_ONLY,
                 drawdown=control.drawdown,
@@ -1061,12 +1069,32 @@ class BuiltinDailyBackend:
                 raise KeyError(run_id)
             updated = dict(run.manifest)
             updated["data_quality_gate"] = gate
+            updated["symbol_data_quality"] = {
+                symbol: dict(bundle.data_quality.get(symbol, {})) for symbol in universe.included
+            }
             updated["risk_outcome"] = {
                 "state": control.state.value,
                 "drawdown": str(control.drawdown),
                 "reason_code": reason_code,
                 "reason_message": reason_message,
             }
+            if insufficient_for_portfolio and research_scope != "MARKET":
+                updated["portfolio_outcome"] = {
+                    "requested": portfolio_requested,
+                    "eligible": False,
+                    "generated": False,
+                    "reason_code": "INSUFFICIENT_DIVERSIFICATION",
+                    "reason_message": (
+                        f"正式合格股票仅 {len(formal_eligible)} 只，少于组合要求的 "
+                        f"{self.policy.portfolio.target_count} 只；不影响个股正式研究"
+                    ),
+                }
+            else:
+                outcome = updated.get("portfolio_outcome")
+                outcome = dict(outcome) if isinstance(outcome, dict) else {}
+                outcome.setdefault("requested", portfolio_requested)
+                outcome.setdefault("eligible", portfolio_requested)
+                updated["portfolio_outcome"] = outcome
             run.manifest = updated
             session.commit()
         self._write_stage(
@@ -1092,16 +1120,11 @@ class BuiltinDailyBackend:
             quality = bundle.data_quality.get(symbol, {})
             reasons: list[str] = []
             if quality.get("fundamental_placeholder"):
-                reasons.extend(
-                    str(item)
-                    for item in quality.get("fundamental_reason_codes", ())
-                )
+                reasons.extend(str(item) for item in quality.get("fundamental_reason_codes", ()))
                 if not quality.get("fundamental_reason_codes"):
                     reasons.append("FUNDAMENTAL_DATA_INCOMPLETE")
             if quality.get("sentiment_placeholder"):
-                reasons.extend(
-                    str(item) for item in quality.get("sentiment_reason_codes", ())
-                )
+                reasons.extend(str(item) for item in quality.get("sentiment_reason_codes", ()))
                 if not quality.get("sentiment_reason_codes"):
                     reasons.append("DISCLOSURE_DATA_INCOMPLETE")
             if reasons:
@@ -1112,7 +1135,12 @@ class BuiltinDailyBackend:
 
     def portfolio_requested(self, run_id: str) -> bool:
         _, _, manifest = self._run_context(run_id)
-        return bool(manifest.get("portfolio_requested", True))
+        outcome = manifest.get("portfolio_outcome")
+        outcome = outcome if isinstance(outcome, dict) else {}
+        return (
+            bool(manifest.get("portfolio_requested", True))
+            and outcome.get("eligible", True) is not False
+        )
 
     def build_portfolio(self, run_id: str, candidate_snapshot_id: str) -> str | None:
         if candidate_snapshot_id != self._stage_digest(run_id, "candidates"):
@@ -1150,8 +1178,7 @@ class BuiltinDailyBackend:
                 lot_size=100,
             )
             for candidate in artifact.candidates
-            if max_stock_price is None
-            or latest_bars[candidate.symbol].close <= max_stock_price
+            if max_stock_price is None or latest_bars[candidate.symbol].close <= max_stock_price
         )
         maximum_single_weight = self.policy.portfolio.maximum_single_weight
         if per_symbol_budget is not None:
@@ -1187,11 +1214,15 @@ class BuiltinDailyBackend:
         )
         if not result.success or result.portfolio is None:
             if any(value is not None for value in budget.values()):
-                failure = result.failure.model_dump(mode="json") if result.failure else {
-                    "code": "UNKNOWN",
-                    "message": "预算约束下未生成模拟组合",
-                    "details": {},
-                }
+                failure = (
+                    result.failure.model_dump(mode="json")
+                    if result.failure
+                    else {
+                        "code": "UNKNOWN",
+                        "message": "预算约束下未生成模拟组合",
+                        "details": {},
+                    }
+                )
                 with self.session_factory() as session:
                     run = session.get(JobRun, run_id)
                     if run is None:
@@ -1232,6 +1263,8 @@ class BuiltinDailyBackend:
                 raise KeyError(run_id)
             updated = dict(run.manifest)
             updated["portfolio_outcome"] = {
+                "requested": True,
+                "eligible": True,
                 "generated": True,
                 "position_count": len(portfolio.positions),
                 "nav": str(total_budget),
@@ -1251,6 +1284,8 @@ class BuiltinDailyBackend:
         bundle = self._read_stage(run_id, "bundle", CanonicalDailyBundle)
         candidates = self._read_stage(run_id, "candidates", CandidateArtifact)
         universe = self._read_stage(run_id, "universe", UniverseResult)
+        scores = self._read_stage(run_id, "scores", ScoreArtifact)
+        agents = self._read_stage(run_id, "agents", AgentArtifact)
         try:
             risk_artifact = self._read_stage(run_id, "risk", RiskArtifact)
             risk_reason_code = risk_artifact.reason_code
@@ -1292,6 +1327,39 @@ class BuiltinDailyBackend:
                     bool(item.get("industry_placeholder")) for item in quality_rows
                 ),
             }
+            if risk_state != "OBSERVE_ONLY" and portfolio_id is None:
+                try:
+                    create_backtest_snapshot(
+                        session=session,
+                        run=run,
+                        bundle=bundle,
+                        lake_root=self._settings.lake_root,
+                        policy=self.policy,
+                        phase="SINGLE_SYMBOL_ADVICE",
+                        dataset="backtest_bundle",
+                        extra_details={
+                            "snapshot_purpose": "SINGLE_SYMBOL_ADVICE",
+                            "formal_eligible_symbols": list(formal_eligible_symbols),
+                            "data_quality_gate": run.manifest.get("data_quality_gate", {}),
+                            "risk_outcome": run.manifest.get("risk_outcome", {}),
+                        },
+                    )
+                    updated = dict(run.manifest)
+                    updated["advice_snapshot_outcome"] = {
+                        "generated": True,
+                        "purpose": "SINGLE_SYMBOL_ADVICE",
+                    }
+                    run.manifest = updated
+                    manifest = updated
+                except (RuntimeError, ValueError) as exc:
+                    updated = dict(run.manifest)
+                    updated["advice_snapshot_outcome"] = {
+                        "generated": False,
+                        "reason_code": "INSUFFICIENT_VALIDATION_HISTORY",
+                        "reason_message": str(exc),
+                    }
+                    run.manifest = updated
+                    manifest = updated
             if risk_state == "OBSERVE_ONLY":
                 self._persist_cumulative_backtest_snapshot(
                     session,
@@ -1317,6 +1385,16 @@ class BuiltinDailyBackend:
                     "run_status": "FUSED" if risk_state == "OBSERVE_ONLY" else "SUCCEEDED",
                     "fused": risk_state == "OBSERVE_ONLY",
                     "candidates": candidates.candidates,
+                    "report_symbols": self._report_symbol_rows(
+                        bundle=bundle,
+                        scores=scores,
+                        agents=agents,
+                        candidates=candidates,
+                        formal_eligible_symbols=formal_eligible_symbols,
+                        excluded_symbols=excluded_symbols,
+                        global_fused=risk_state == "OBSERVE_ONLY",
+                        global_reason_code=risk_reason_code,
+                    ),
                     "positions": positions,
                     "risks": [f"risk_state={risk_state}"],
                     "risk_reason_code": risk_reason_code,
@@ -1347,6 +1425,75 @@ class BuiltinDailyBackend:
         )
         return report.report_id
 
+    @staticmethod
+    def _report_symbol_rows(
+        *,
+        bundle: CanonicalDailyBundle,
+        scores: ScoreArtifact,
+        agents: AgentArtifact,
+        candidates: CandidateArtifact,
+        formal_eligible_symbols: Sequence[str],
+        excluded_symbols: Mapping[str, Sequence[str]],
+        global_fused: bool,
+        global_reason_code: str | None,
+    ) -> list[dict[str, Any]]:
+        securities = {item.symbol: item for item in bundle.securities}
+        agent_by_symbol = {item.symbol: item for item in agents.items}
+        candidate_by_symbol = {item.symbol: item for item in candidates.candidates}
+        eligible = set(formal_eligible_symbols)
+        rows: list[dict[str, Any]] = []
+        for score in sorted(scores.scores, key=lambda item: (-item.total_score, item.symbol)):
+            reasons = list(excluded_symbols.get(score.symbol, ()))
+            if global_fused:
+                reasons.append(global_reason_code or "GLOBAL_RISK_FUSE_ACTIVE")
+            elif score.event_risk_multiplier <= 0:
+                reasons.append("CRITICAL_EVENT_RISK")
+            reasons = list(dict.fromkeys(reasons))
+            advice_eligible = (
+                not global_fused and score.symbol in eligible and score.event_risk_multiplier > 0
+            )
+            components = {
+                item.component: {
+                    "score": item.score,
+                    "confidence": item.confidence,
+                    "positive_factors": item.positive_factors,
+                    "negative_factors": item.negative_factors,
+                    "risk_flags": item.risk_flags,
+                    "evidence": [
+                        {
+                            "source": evidence.source,
+                            "source_record_id": evidence.source_record_id,
+                            "available_at": evidence.available_at.isoformat(),
+                            "excerpt": evidence.excerpt,
+                        }
+                        for evidence in item.evidence
+                    ],
+                }
+                for item in agent_by_symbol[score.symbol].results
+            }
+            candidate = candidate_by_symbol.get(score.symbol)
+            rows.append(
+                {
+                    "symbol": score.symbol,
+                    "name": securities[score.symbol].short_name,
+                    "score": score,
+                    "candidate": candidate,
+                    "components": components,
+                    "data_quality": bundle.data_quality.get(score.symbol, {}),
+                    "research_status": (
+                        "FORMAL"
+                        if advice_eligible
+                        else "RISK_BLOCKED"
+                        if global_fused or score.event_risk_multiplier <= 0
+                        else "FORMAL_WITH_LIMITATIONS"
+                    ),
+                    "advice_eligible": advice_eligible,
+                    "recommendation": None if advice_eligible else "NO_BUY",
+                    "exclusion_reasons": reasons,
+                }
+            )
+        return rows
+
     def _persist_cumulative_backtest_snapshot(
         self,
         session: Session,
@@ -1374,6 +1521,7 @@ class BuiltinDailyBackend:
                 "dropped_signal_symbols": sorted(dropped_symbols),
                 "observe_only": observe_only or prior_observe_only,
                 "current_run_observe_only": observe_only,
+                "snapshot_purpose": "PORTFOLIO_BACKTEST",
                 "run_status": "FUSED" if observe_only else "SUCCEEDED",
                 "data_quality_gate": run.manifest.get("data_quality_gate", {}),
                 "risk_outcome": run.manifest.get("risk_outcome", {}),

@@ -92,6 +92,60 @@ describe('research observation mode and precise reports', () => {
     })
   })
 
+  it('selects any subset of watchlist symbols and freezes only checked stocks', async () => {
+    const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/assets')) return jsonResponse({ watchlist: ['600519.SH', '000858.SZ', '300750.SZ'], positions: [] })
+      if (url.includes('/market/quotes')) return jsonResponse([
+        { symbol: '600519.SH', name: '贵州茅台', price: 1400, change_pct: 1 },
+        { symbol: '000858.SZ', name: '五粮液', price: 120, change_pct: -1 },
+        { symbol: '300750.SZ', name: '宁德时代', price: 220, change_pct: 0.5 },
+      ])
+      if (url.endsWith('/research/settings')) return jsonResponse({ auto_enabled: false, portfolio_target_count: 15 })
+      if (url.includes('/research/runs?')) return jsonResponse([])
+      if (url.endsWith('/research/runs') && init?.method === 'POST') return jsonResponse({ run_id: 'watchlist-run', trading_date: '2026-07-17', status: 'PENDING' }, 202)
+      throw new Error(`unexpected request ${url} ${init?.method}`)
+    })
+    vi.stubGlobal('fetch', mockFetch)
+    const user = userEvent.setup()
+    render(researchWrapper(<ResearchPage />))
+    await screen.findByText('暂无研究任务')
+    await user.selectOptions(screen.getByLabelText('研究范围'), 'WATCHLIST')
+    expect(await screen.findByText('已选择 3 / 3 只；未勾选股票不会进入本次冻结快照。')).toBeInTheDocument()
+    await user.type(screen.getByPlaceholderText('输入股票名称或代码'), '五粮')
+    expect(screen.getByText('当前显示 1 只')).toBeInTheDocument()
+    await user.click(screen.getByRole('checkbox', { name: /五粮液/ }))
+    expect(screen.getByText('已选择 2 / 3 只；未勾选股票不会进入本次冻结快照。')).toBeInTheDocument()
+    expect(screen.getByText('预算预览 · 2 只')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /启动每日研究/ }))
+    await waitFor(() => expect(mockFetch.mock.calls.some(([url, init]) => String(url).endsWith('/research/runs') && init?.method === 'POST')).toBe(true))
+    const call = mockFetch.mock.calls.find(([url, init]) => String(url).endsWith('/research/runs') && init?.method === 'POST')
+    expect(JSON.parse(String(call?.[1]?.body))).toMatchObject({
+      scope: 'WATCHLIST', symbols: ['600519.SH', '300750.SZ'],
+    })
+  })
+
+  it('does not submit watchlist research when every stock is unchecked', async () => {
+    const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/assets')) return jsonResponse({ watchlist: ['600519.SH'], positions: [] })
+      if (url.includes('/market/quotes')) return jsonResponse([])
+      if (url.endsWith('/research/settings')) return jsonResponse({ auto_enabled: false, portfolio_target_count: 15 })
+      if (url.includes('/research/runs?')) return jsonResponse([])
+      if (url.endsWith('/research/runs') && init?.method === 'POST') throw new Error('empty selection must not submit')
+      throw new Error(`unexpected request ${url} ${init?.method}`)
+    })
+    vi.stubGlobal('fetch', mockFetch)
+    const user = userEvent.setup()
+    render(researchWrapper(<ResearchPage />))
+    await screen.findByText('暂无研究任务')
+    await user.selectOptions(screen.getByLabelText('研究范围'), 'WATCHLIST')
+    await user.click(screen.getByRole('button', { name: '清空' }))
+    await user.click(screen.getByRole('button', { name: /启动每日研究/ }))
+    expect(await screen.findByText('请至少选择一只自选股或持仓股票')).toBeInTheDocument()
+    expect(mockFetch.mock.calls.some(([url, init]) => String(url).endsWith('/research/runs') && init?.method === 'POST')).toBe(false)
+  })
+
   it('shows a submitted run, lists cross-date activity, and confirms cancellation', async () => {
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
     let cancelled = false
@@ -148,7 +202,7 @@ describe('research observation mode and precise reports', () => {
     render(<MemoryRouter initialEntries={['/reports?date=2026-07-17&run_id=run-1']}><RefreshProvider><ReportsPage /></RefreshProvider></MemoryRouter>)
     expect(await screen.findByText(/历史样本中风险调整后表现最优/)).toBeInTheDocument()
     expect(screen.getByRole('radio', { name: /600000.SH/ })).toHaveAttribute('aria-checked', 'true')
-    await userEvent.click(screen.getByRole('button', { name: '生成总结与近期判断' }))
+    await userEvent.click(screen.getByRole('button', { name: '生成购买建议' }))
     await waitFor(() => expect(mockFetch.mock.calls.some(([url, init]) => String(url).endsWith('/reports/report-1/trade-plans') && init?.method === 'POST')).toBe(true))
     const call = mockFetch.mock.calls.find(([url, init]) => String(url).endsWith('/reports/report-1/trade-plans') && init?.method === 'POST')
     expect(JSON.parse(String(call?.[1]?.body))).toMatchObject({ symbols: ['600000.SH'], objective: 'RISK_ADJUSTED_RETURN' })
@@ -223,11 +277,38 @@ describe('research observation mode and precise reports', () => {
     vi.stubGlobal('fetch', mockFetch)
     render(<MemoryRouter initialEntries={['/reports?date=2026-07-17&run_id=run-fused']}><RefreshProvider><ReportsPage /></RefreshProvider></MemoryRouter>)
 
-    expect(await screen.findByText('固定观察结论')).toBeInTheDocument()
+    expect(await screen.findByText('全局风控熔断，禁止生成交易方案')).toBeInTheDocument()
     expect(screen.getByRole('radio', { name: /600000.SH/ })).toBeInTheDocument()
     expect(await screen.findByText('composite-v2')).toBeInTheDocument()
     expect(screen.getByText(/实时行情或 K 线加载失败/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '生成总结与近期判断' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '生成购买建议' })).toBeDisabled()
+    expect(mockFetch.mock.calls.some(([url, init]) => String(url).endsWith('/trade-plans') && init?.method === 'POST')).toBe(false)
+  })
+
+  it('shows data-limited report stocks as NO_BUY without submitting a plan', async () => {
+    const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/reports/2026-07-17')) return jsonResponse({ report_id: 'report-limited', run_id: 'run-limited', trading_date: '2026-07-17', report_type: 'DAILY_RESEARCH' })
+      if (url.includes('/research/runs?')) return jsonResponse([{ run_id: 'run-limited', trading_date: '2026-07-17', status: 'SUCCEEDED', portfolio_generated: false }])
+      if (url.endsWith('/reports/report-limited/symbols')) return jsonResponse([{
+        symbol: '600001.SH', name: '受限股票', research_status: 'FORMAL_WITH_LIMITATIONS',
+        advice_eligible: false, recommendation: 'NO_BUY', exclusion_reasons: ['MISSING_OFFICIAL_DISCLOSURE'],
+        data_quality: {}, score: { symbol: '600001.SH', total_score: 60, event_risk_multiplier: 1 },
+      }])
+      if (url.includes('/candidates/2026-07-17')) return jsonResponse([])
+      if (url.endsWith('/reports/report-limited/content')) return jsonResponse({ content: '<html><body>正式报告</body></html>' })
+      if (url.endsWith('/reports/report-limited/trade-plans') && init?.method === 'POST') throw new Error('limited stock must not submit')
+      if (url.endsWith('/reports/report-limited/trade-plans')) return jsonResponse([])
+      if (url.includes('/market/quotes') || url.includes('/market/klines/')) return jsonResponse({ detail: 'market unavailable' }, 503)
+      if (url.includes('/scores/2026-07-17/600001.SH')) return jsonResponse({ symbol: '600001.SH', total_score: 60, event_risk_multiplier: 1 })
+      throw new Error(`unexpected request ${url}`)
+    })
+    vi.stubGlobal('fetch', mockFetch)
+    render(<MemoryRouter initialEntries={['/reports?date=2026-07-17&run_id=run-limited']}><RefreshProvider><ReportsPage /></RefreshProvider></MemoryRouter>)
+
+    expect(await screen.findByText('数据受限')).toBeInTheDocument()
+    expect(screen.getByText(/缺少官方披露/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'NO_BUY' })).toBeDisabled()
     expect(mockFetch.mock.calls.some(([url, init]) => String(url).endsWith('/trade-plans') && init?.method === 'POST')).toBe(false)
   })
 

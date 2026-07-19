@@ -5,7 +5,7 @@ import { CandlestickChart } from '../components/CandlestickChart'
 import { Empty, ErrorNotice, formatNumber, formatTime, Loading, Panel, StatusPill, today } from '../components/Ui'
 import { usePageRefresh } from '../context/RefreshContext'
 import { getKlineRangePlan, KLINE_PERIODS, KLINE_RANGES, trimBarsToRange } from '../marketKlines'
-import type { Candidate, KlineBar, KlineRange, MarketDataStatus, Quote, Report, Run, Score, TradePlan } from '../types'
+import type { Candidate, KlineBar, KlineRange, MarketDataStatus, Quote, Report, ReportSymbol, Run, Score, TradePlan } from '../types'
 import { resolvePublishedResearchRun } from '../researchRuns'
 
 function displayReportHtml(content: string) {
@@ -32,6 +32,38 @@ function explanationSection(explanation: Record<string, unknown>, keys: string[]
 
 const PLAN_ACTIVE = new Set(['PENDING', 'QUEUED', 'RUNNING', 'PROCESSING'])
 
+const REASON_LABELS: Record<string, string> = {
+  CRITICAL_EVENT_RISK: '重大事件风险，禁止买入',
+  GLOBAL_RISK_FUSE_ACTIVE: '全局风控熔断',
+  INCOMPLETE_LATEST_FINANCIAL_PERIOD: '最新财报期数据不完整',
+  MISSING_OFFICIAL_DISCLOSURE: '缺少官方披露',
+  FUNDAMENTAL_DATA_INCOMPLETE: '基本面数据不完整',
+  DISCLOSURE_DATA_INCOMPLETE: '公告或情绪数据不完整',
+}
+
+function fallbackReportSymbol(candidate: Candidate): ReportSymbol {
+  return {
+    symbol: candidate.symbol,
+    research_status: 'FORMAL',
+    advice_eligible: (candidate.event_risk_multiplier ?? 1) > 0,
+    recommendation: (candidate.event_risk_multiplier ?? 1) > 0 ? null : 'NO_BUY',
+    exclusion_reasons: (candidate.event_risk_multiplier ?? 1) > 0 ? [] : ['CRITICAL_EVENT_RISK'],
+    data_quality: {},
+    score: {
+      symbol: candidate.symbol,
+      total_score: candidate.total_score,
+      base_total_score: candidate.base_total_score ?? undefined,
+      dividend_bonus: candidate.dividend_bonus,
+      event_risk_multiplier: candidate.event_risk_multiplier,
+      prediction_percentile: candidate.prediction_percentile,
+      rank: candidate.rank,
+    },
+    rank: candidate.rank,
+    prediction_percentile: candidate.prediction_percentile,
+    industry_code: candidate.industry_code,
+  }
+}
+
 export function ReportsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [date, setDate] = useState(searchParams.get('date') || today())
@@ -41,6 +73,7 @@ export function ReportsPage() {
   const [content, setContent] = useState('')
   const [run, setRun] = useState<Run | null>(null)
   const [candidates, setCandidates] = useState<Candidate[]>([])
+  const [reportSymbols, setReportSymbols] = useState<ReportSymbol[]>([])
   const [symbol, setSymbol] = useState('')
   const [tradePlans, setTradePlans] = useState<TradePlan[]>([])
   const [score, setScore] = useState<Score | null>(null)
@@ -61,20 +94,24 @@ export function ReportsPage() {
     try {
       const selected = await resolvePublishedResearchRun(requestedDate, requestedRunId)
       if (!selected?.trading_date) {
-        setReport(null); setRun(null); setCandidates([]); setTradePlans([])
+        setReport(null); setRun(null); setCandidates([]); setReportSymbols([]); setTradePlans([])
         return
       }
       setDate(selected.trading_date)
       setRun(selected)
       const row = await api.report(selected.trading_date, selected.run_id)
       setReport(row)
-      const [candidatesResult, plansResult] = await Promise.allSettled([
-        api.candidates(selected.trading_date, row.run_id), api.reportTradePlans(row.report_id),
+      const [symbolsResult, candidatesResult, plansResult] = await Promise.allSettled([
+        api.reportSymbols(row.report_id), api.candidates(selected.trading_date, row.run_id), api.reportTradePlans(row.report_id),
       ])
       const formal = candidatesResult.status === 'fulfilled'
         ? candidatesResult.value.filter((item) => (item.event_risk_multiplier ?? 1) > 0).sort((left, right) => left.rank - right.rank) : []
+      const allSymbols = symbolsResult.status === 'fulfilled'
+        ? symbolsResult.value
+        : (candidatesResult.status === 'fulfilled' ? candidatesResult.value.map(fallbackReportSymbol) : [])
       setCandidates(formal)
-      setSymbol((current) => formal.some((item) => item.symbol === current) ? current : formal[0]?.symbol || '')
+      setReportSymbols(allSymbols)
+      setSymbol((current) => allSymbols.some((item) => item.symbol === current) ? current : allSymbols[0]?.symbol || '')
       setTradePlans(plansResult.status === 'fulfilled' ? plansResult.value : [])
       if (row.content || row.body) setContent(row.content || row.body || '')
       else {
@@ -82,7 +119,7 @@ export function ReportsPage() {
         catch { setContent('报告正文存储于对象存储，可通过审计记录核验内容哈希。') }
       }
     } catch (reason) {
-      setReport(null); setRun(null); setCandidates([]); setTradePlans([])
+      setReport(null); setRun(null); setCandidates([]); setReportSymbols([]); setTradePlans([])
       setError(reason instanceof Error ? reason.message : '报告加载失败')
     } finally { setLoading(false) }
   }, [requestedDate, requestedRunId])
@@ -116,6 +153,7 @@ export function ReportsPage() {
   }, [date, period, rangePlan, report, symbol])
 
   const selectedCandidate = candidates.find((item) => item.symbol === symbol)
+  const selectedResearch = reportSymbols.find((item) => item.symbol === symbol)
   const selectedPlan = tradePlans.find((plan) => plan.symbols.length === 1
     && plan.symbols[0] === symbol
     && (plan.status.toUpperCase() === 'SUCCEEDED' || PLAN_ACTIVE.has(plan.status.toUpperCase())))
@@ -128,7 +166,7 @@ export function ReportsPage() {
   }, [activePlanIds.join(','), report])
 
   async function submitPlan() {
-    if (!report || !symbol || fused || selectedPlan) return
+    if (!report || !symbol || fused || selectedPlan || !selectedResearch?.advice_eligible) return
     setPlanSubmitting(true); setError('')
     try {
       const created = await api.submitTradePlan(report.report_id, { symbols: [symbol], objective: 'RISK_ADJUSTED_RETURN' })
@@ -160,8 +198,8 @@ export function ReportsPage() {
       {loading ? <Loading /> : report ? content ? <iframe className="report-frame" title={`${date} A 股每日研究报告正文`} sandbox="" srcDoc={displayReportHtml(content)} /> : <Empty title="报告正文暂不可用" /> : <Empty title="该交易日暂无报告" />}
     </Panel>
 
-    {report && <Panel title="正式候选个股工作台" eyebrow="SINGLE-SYMBOL WORKBENCH" className="full-span">
-      {candidates.length ? <div className="candidate-tabs" role="radiogroup" aria-label="正式候选">{candidates.map((candidate) => <button role="radio" aria-checked={symbol === candidate.symbol} className={symbol === candidate.symbol ? 'active' : ''} key={candidate.symbol} onClick={() => setSymbol(candidate.symbol)}><strong>#{candidate.rank} {candidate.symbol}</strong><small>最终分 {formatNumber(candidate.total_score)}</small></button>)}</div> : <Empty title="没有正式候选" description="被风险门禁排除的股票不会进入工作台" />}
+    {report && <Panel title="自选股研究工作台" eyebrow="ALL TARGET SYMBOLS" className="full-span">
+      {reportSymbols.length ? <div className="candidate-tabs report-symbol-tabs" role="radiogroup" aria-label="本次全部研究股票">{reportSymbols.map((item) => <button role="radio" aria-checked={symbol === item.symbol} className={symbol === item.symbol ? 'active' : ''} key={item.symbol} onClick={() => setSymbol(item.symbol)}><strong>{item.rank ? `#${item.rank} ` : ''}{item.name || item.symbol}</strong><small>{item.symbol} · 最终分 {formatNumber(item.score.total_score)}</small><span className={`symbol-gate ${item.advice_eligible ? 'eligible' : 'blocked'}`}>{item.advice_eligible ? '正式可建议' : item.research_status === 'RISK_BLOCKED' ? '风险禁买' : '数据受限'}</span></button>)}</div> : <Empty title="本次报告没有股票明细" />}
       {symbol && <>
         <div className="workbench-grid">
           <section className="workbench-card"><span>最新行情</span><strong>{quote?.name || symbol} · {formatNumber(quote?.price)}</strong><small>{quote ? `${quote.change_pct >= 0 ? '+' : ''}${formatNumber(quote.change_pct)}%` : '行情暂不可用'}</small></section>
@@ -174,12 +212,13 @@ export function ReportsPage() {
 
         <h3>确定性评分</h3>
         {score ? <div className="score-grid">{[
-          ['最终分', score.total_score], ['基础分', score.base_total_score], ['基本面', score.fundamental_score], ['技术', score.technical_score], ['情绪', score.sentiment_score], ['质量', score.quality_confidence_score], ['分红加分', score.dividend_bonus], ['风险乘数', score.event_risk_multiplier], ['预测分位', selectedCandidate?.prediction_percentile ?? score.prediction_percentile], ['排名', selectedCandidate?.rank ?? score.rank],
+          ['最终分', score.total_score], ['基础分', score.base_total_score], ['基本面', score.fundamental_score], ['技术', score.technical_score], ['情绪', score.sentiment_score], ['质量', score.quality_confidence_score], ['分红加分', score.dividend_bonus], ['风险乘数', score.event_risk_multiplier], ['预测分位', selectedResearch?.prediction_percentile ?? selectedCandidate?.prediction_percentile ?? score.prediction_percentile], ['排名', selectedResearch?.rank ?? selectedCandidate?.rank ?? score.rank],
         ].map(([label, value]) => <div key={String(label)}><span>{label}</span><strong>{typeof value === 'number' ? formatNumber(value) : '—'}</strong></div>)}<div><span>公式版本</span><strong>{score.formula_version || String(lineage?.formula_version || '—')}</strong></div></div> : <Empty title="评分暂不可用" />}
 
         <div className="snapshot-callout"><span>◇</span><div><strong>确定性方案，AI 仅负责解释</strong><p>方案选择历史样本中风险调整后表现最优的合格参数；模型不可用时 BUY / NO_BUY、数量、限价、仓位和退出规则仍然有效。</p></div></div>
-        {fused && <div className="warning-box"><strong>固定观察结论</strong><p>FUSED 运行禁止生成交易方案。</p></div>}
-        <button className="primary" disabled={fused || planSubmitting || !symbol || Boolean(selectedPlan)} onClick={() => void submitPlan()}>{planSubmitting ? '正在生成…' : selectedPlan ? (PLAN_ACTIVE.has(selectedPlan.status.toUpperCase()) ? '方案生成中，已复用' : '已展示该股方案') : '生成总结与近期判断'}</button>
+        {fused && <div className="warning-box"><strong>全局风控熔断，禁止生成交易方案</strong><p>{run?.reason_message || '本次仅保留正式观察报告。'}</p></div>}
+        {!fused && selectedResearch && !selectedResearch.advice_eligible && <div className="warning-box"><strong>NO_BUY · {selectedResearch.research_status === 'RISK_BLOCKED' ? '风险禁买' : '数据受限'}</strong><p>{selectedResearch.exclusion_reasons.map((reason) => REASON_LABELS[reason] || reason).join('；') || '该股票未通过个股建议门禁。'}。不会生成买入价格、仓位或止损位。</p></div>}
+        <button className="primary" disabled={fused || planSubmitting || !symbol || Boolean(selectedPlan) || !selectedResearch?.advice_eligible} onClick={() => void submitPlan()}>{planSubmitting ? '正在生成…' : selectedPlan ? (PLAN_ACTIVE.has(selectedPlan.status.toUpperCase()) ? '方案生成中，已复用' : '已展示该股方案') : selectedResearch?.advice_eligible ? '生成购买建议' : 'NO_BUY'}</button>
 
         {selectedPlan && <article className="research-run-card plan-workbench"><div className="research-run-head"><div><strong>{symbol}</strong><code>{selectedPlan.plan_id}</code></div><StatusPill status={selectedPlan.status} /></div>
           {selectedPlan.status.toUpperCase() === 'FAILED' && <div className="failure-box"><strong>方案生成失败</strong><p>{selectedPlan.error_message || '请查看审计事件'}</p></div>}

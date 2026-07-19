@@ -16,6 +16,20 @@
     .config div { border: 1px solid #d5d8dc; border-radius: .5rem; padding: .75rem; }
     .config span { display: block; color: #6b7280; font-size: .85rem; }
     .audit { color: #566573; font-size: .9rem; overflow-wrap: anywhere; }
+    .table-scroll { overflow-x: auto; }
+    .symbol-report { border: 1px solid #d5d8dc; border-radius: .65rem; padding: 1rem; margin: 1rem 0; }
+    .symbol-head { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; }
+    .symbol-head h3 { margin: 0 auto 0 0; }
+    .tag { display: inline-block; border-radius: 999px; padding: .25rem .65rem; background: #eef6ff; font-size: .82rem; }
+    .tag.blocked { background: #fff3cd; }
+    .score-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: .5rem; margin: .8rem 0; }
+    .score-cards div { background: #f7f9fa; padding: .65rem; border-radius: .4rem; }
+    .score-cards span, .score-cards strong { display: block; }
+    .score-cards span { color: #6b7280; font-size: .78rem; }
+    .component-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .7rem; }
+    .component-grid section { background: #f7f9fa; padding: .75rem; border-radius: .4rem; }
+    .component-grid h4 { margin: 0 0 .4rem; }
+    @media (max-width: 640px) { body { margin: 1rem; } .component-grid { grid-template-columns: 1fr; } th, td { white-space: nowrap; } }
   </style>
 </head>
 <body>
@@ -30,6 +44,7 @@
   {% set risk_message = risk_reason_message|default(None) %}
   <h1>{{ trading_date }} A股 AI 投研日报</h1>
   <p>决策时点：{{ decision_at }}；运行状态：{{ run_status }}</p>
+  <p class="info">本报告是正式研究报告；是否允许生成交易建议，由个股数据门禁和全局风控分别决定。</p>
   {% if fused %}<p class="warning">当前为观察模式：{{ risk_message or '正式组合条件未满足' }}。仅输出研究结果，不生成新增模拟仓位。</p>{% endif %}
   <h2>本次研究配置</h2>
   <div class="config">
@@ -53,17 +68,46 @@
     <tbody>{% for symbol, reasons in exclusions.items() %}<tr><td>{{ symbol }}</td><td>{{ reasons|join('、') }}</td></tr>{% endfor %}</tbody>
   </table>
   {% endif %}
-  <h2>候选池</h2>
-  <table>
-    <thead><tr><th>证券</th><th>最终分</th><th>基础分</th><th>分红加分</th><th>事件乘数</th><th>Qlib 分位</th><th>行业</th></tr></thead>
-    <tbody>{% for row in candidates %}<tr><td>{{ row.symbol }}</td><td>{{ "%.2f"|format(row.total_score) }}</td><td>{{ "%.2f"|format(row.base_total_score if row.base_total_score is not none else row.total_score) }}</td><td>{{ "%.2f"|format(row.dividend_bonus|default(0)) }}</td><td>{{ "%.2f"|format(row.event_risk_multiplier) }}</td><td>{{ "%.2f"|format(row.prediction_percentile) }}</td><td>{{ ('行业数据暂缺（占位分组 ' ~ row.industry_code.split('_')[-1] ~ '）') if row.industry_code.startswith('PLACEHOLDER_') else row.industry_code }}</td></tr>{% endfor %}</tbody>
-  </table>
+  <h2>逐股正式研究结论</h2>
+  {% for row in report_symbols %}
+  <article class="symbol-report">
+    <div class="symbol-head">
+      <h3>{{ row.name }}（{{ row.symbol }}）</h3>
+      <span class="tag {{ '' if row.advice_eligible else 'blocked' }}">{{ '正式可建议' if row.advice_eligible else ('风险禁买' if row.research_status == 'RISK_BLOCKED' else '数据受限') }}</span>
+      <span class="tag {{ 'blocked' if row.recommendation == 'NO_BUY' else '' }}">{{ row.recommendation or '尚未生成建议' }}</span>
+    </div>
+    <div class="score-cards">
+      <div><span>最终分</span><strong>{{ "%.2f"|format(row.score.total_score) }}</strong></div>
+      <div><span>基础分</span><strong>{{ "%.2f"|format(row.score.base_total_score) }}</strong></div>
+      <div><span>基本面</span><strong>{{ "%.2f"|format(row.score.fundamental_score) }}</strong></div>
+      <div><span>技术面</span><strong>{{ "%.2f"|format(row.score.technical_score) }}</strong></div>
+      <div><span>情绪面</span><strong>{{ "%.2f"|format(row.score.sentiment_score) }}</strong></div>
+      <div><span>数据质量</span><strong>{{ "%.2f"|format(row.score.quality_confidence_score) }}</strong></div>
+      <div><span>风险乘数</span><strong>{{ "%.2f"|format(row.score.event_risk_multiplier) }}</strong></div>
+      <div><span>数据截止</span><strong>{{ row.score.decision_at }}</strong></div>
+    </div>
+    <div class="component-grid">
+      {% for key, label in [('fundamental', '基本面'), ('technical', '技术面'), ('sentiment', '情绪面')] %}
+      {% set component = row.components.get(key, {}) %}
+      <section><h4>{{ label }}结论</h4>
+        <p>得分 {{ component.get('score', '—') }}；置信度 {{ component.get('confidence', '—') }}</p>
+        {% if component.get('positive_factors') %}<p>积极因素：{{ component.get('positive_factors')|join('；') }}</p>{% endif %}
+        {% if component.get('negative_factors') %}<p>限制因素：{{ component.get('negative_factors')|join('；') }}</p>{% endif %}
+        {% if component.get('risk_flags') %}<p>风险：{{ component.get('risk_flags')|join('；') }}</p>{% endif %}
+      </section>
+      {% endfor %}
+    </div>
+    <p><strong>数据完整性：</strong>{{ '通过个股门禁' if row.advice_eligible else '存在限制' }}；<strong>风险等级：</strong>{{ '重大/全局风险' if row.research_status == 'RISK_BLOCKED' else ('受限' if row.research_status == 'FORMAL_WITH_LIMITATIONS' else '常规') }}</p>
+    {% if row.exclusion_reasons %}<p class="warning"><strong>NO_BUY 原因：</strong>{{ row.exclusion_reasons|join('、') }}。不输出虚构买入价、仓位或止损位。</p>{% endif %}
+    <p class="audit">证据与来源：{% for component in row.components.values() %}{% for evidence in component.get('evidence', []) %}{{ evidence.source }} / {{ evidence.source_record_id }} / available_at={{ evidence.available_at }}{% if not loop.last %}；{% endif %}{% endfor %}{% endfor %}</p>
+  </article>
+  {% endfor %}
   <h2>下一交易日模拟组合</h2>
-  <table>
+  <div class="table-scroll"><table>
     <thead><tr><th>证券</th><th>权重</th><th>目标股数</th><th>参考价</th></tr></thead>
     <tbody>{% for row in positions %}<tr><td>{{ row.symbol }}</td><td>{{ "%.2f%%"|format(row.weight * 100) }}</td><td>{{ row.target_shares }}</td><td>{{ row.reference_price }}</td></tr>{% endfor %}</tbody>
-  </table>
-  {% if not positions %}<p class="info">{{ risk_message or research_only_reason|default(None) or outcome.get('reason', {}).get('message') or '观察模式下不生成模拟组合。' }}</p>{% endif %}
+  </table></div>
+  {% if not positions %}<p class="info">{{ risk_message or outcome.get('reason_message') or research_only_reason|default(None) or outcome.get('reason', {}).get('message') or '本次未生成模拟组合。' }}</p>{% endif %}
   <h2>风险与审计</h2>
   <ul>{% for risk in risks %}<li>{{ risk }}</li>{% endfor %}{% if risk_code %}<li>{{ risk_code }}：{{ risk_message }}</li>{% endif %}</ul>
   <p class="audit">run_id={{ run_id }} · input_hash={{ input_hash }} · formula={{ formula_version }} · rule={{ trade_rule_version }}</p>

@@ -30,6 +30,7 @@ from ashare_ai.storage.models import (
     PortfolioRow,
     ReportRow,
     ScoreRow,
+    SnapshotManifestRow,
 )
 from ashare_ai.universe.builder import UniverseResult
 
@@ -306,6 +307,100 @@ def test_custom_research_scores_only_requested_eligible_symbols(tmp_path) -> Non
     assert universe.included == tuple(targets)
 
 
+def test_small_custom_research_succeeds_reports_all_symbols_and_freezes_advice_snapshot(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trading_date = date(2026, 7, 14)
+    base = make_demo_bundle(trading_date)
+    targets = [base.securities[0].symbol, base.securities[1].symbol, base.securities[2].symbol]
+    quality = dict(base.data_quality)
+    quality[targets[2]] = {
+        **quality[targets[2]],
+        "fundamental_placeholder": True,
+        "fundamental_reason_codes": ["INCOMPLETE_LATEST_FINANCIAL_PERIOD"],
+    }
+    bundle = base.model_copy(update={"data_quality": quality})
+
+    class Builder:
+        def __init__(self) -> None:
+            self.acquisition_events: list[dict[str, object]] = []
+
+        def build(self, value_date, decision_at, *, required_symbols=()):
+            del required_symbols
+            assert value_date == trading_date
+            assert decision_at == bundle.decision_at
+            return bundle
+
+    monkeypatch.setenv("CANONICAL_BUNDLE_MODE", "akshare")
+    get_settings.cache_clear()
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    backend = BuiltinDailyBackend(
+        session_factory=factory,
+        object_root=tmp_path / "objects",
+        state_root=tmp_path / "state",
+        policy_path="configs/first_release.v1.json",
+        canonical_builder=Builder(),  # type: ignore[arg-type]
+    )
+    pipeline = ApplicationPipeline(backend, session_factory=factory)
+    run_id = pipeline.start_run(trading_date)
+    with factory() as session:
+        run = session.get(JobRun, run_id)
+        assert run is not None
+        run.user_id = "user-small"
+        run.manifest = {
+            **run.manifest,
+            "research_scope": "CUSTOM",
+            "target_symbols": targets,
+            "tracked_symbols": targets,
+            "portfolio_requested": False,
+        }
+        session.commit()
+
+    pipeline.sync_reference_data(run_id)
+    snapshot_ids = pipeline.ingest_and_verify(run_id)
+    universe_id = pipeline.build_universe(run_id, snapshot_ids)
+    feature_id = pipeline.build_features(run_id, universe_id)
+    agent_id = pipeline.run_research_agents(run_id, feature_id)
+    score_id = pipeline.calculate_scores(run_id, agent_id)
+    candidate_id = pipeline.qlib_filter(run_id, score_id)
+    assert pipeline.risk_state(run_id) != "OBSERVE_ONLY"
+    assert pipeline.portfolio_requested(run_id) is False
+    report_id = pipeline.publish_report(run_id, None, "NORMAL")
+    result = pipeline.complete_run(run_id, report_id, "SUCCEEDED")
+
+    assert result["status"] == "SUCCEEDED"
+    with factory() as session:
+        run = session.get(JobRun, run_id)
+        assert run is not None
+        assert run.manifest["portfolio_outcome"]["reason_code"] == ("INSUFFICIENT_DIVERSIFICATION")
+        assert session.scalar(select(PortfolioRow).where(PortfolioRow.run_id == run_id)) is None
+        assert len(session.scalars(select(ScoreRow).where(ScoreRow.run_id == run_id)).all()) == 3
+        assert (
+            len(session.scalars(select(CandidateRow).where(CandidateRow.run_id == run_id)).all())
+            == 2
+        )
+        snapshot = session.scalar(
+            select(SnapshotManifestRow).where(
+                SnapshotManifestRow.run_id == run_id,
+                SnapshotManifestRow.dataset == "backtest_bundle",
+            )
+        )
+        assert snapshot is not None
+        assert snapshot.details["snapshot_purpose"] == "SINGLE_SYMBOL_ADVICE"
+        report = session.get(ReportRow, report_id)
+        assert report is not None
+        html = backend.object_store.get(report.object_uri).decode("utf-8")
+        assert all(symbol in html for symbol in targets)
+        assert "NO_BUY" in html
+        assert candidate_id == backend._stage_digest(run_id, "candidates")
+
+
 def test_builtin_demo_runs_full_daily_flow_and_is_reproducible(tmp_path) -> None:
     engine = create_engine(
         "sqlite+pysqlite://",
@@ -400,12 +495,8 @@ def test_formal_portfolio_gate_is_per_symbol(
             **values,
             "fundamental_placeholder": not complete,
             "sentiment_placeholder": not complete,
-            "fundamental_reason_codes": []
-            if complete
-            else ["INCOMPLETE_LATEST_FINANCIAL_PERIOD"],
-            "sentiment_reason_codes": []
-            if complete
-            else ["MISSING_OFFICIAL_DISCLOSURE"],
+            "fundamental_reason_codes": [] if complete else ["INCOMPLETE_LATEST_FINANCIAL_PERIOD"],
+            "sentiment_reason_codes": [] if complete else ["MISSING_OFFICIAL_DISCLOSURE"],
         }
     bundle = base.model_copy(update={"data_quality": quality})
 
@@ -455,9 +546,7 @@ def test_formal_portfolio_gate_is_per_symbol(
         )
         assert (portfolio is not None) is expected_portfolio
         if expected_status == "FUSED":
-            assert run.manifest["risk_outcome"]["reason_code"] == (
-                "INSUFFICIENT_COMPLETE_SYMBOLS"
-            )
+            assert run.manifest["risk_outcome"]["reason_code"] == ("INSUFFICIENT_COMPLETE_SYMBOLS")
 
 
 def test_builtin_production_requires_canonical_bundle_and_accepts_json(

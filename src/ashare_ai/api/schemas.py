@@ -6,6 +6,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+MAX_WATCHLIST_SYMBOLS = 100
+MAX_RESEARCH_SYMBOLS = 100
+MAX_TRADE_PLAN_SYMBOLS = 15
+
+
+def _supported_research_scopes() -> list[Literal["MARKET", "WATCHLIST", "CUSTOM"]]:
+    return ["MARKET", "WATCHLIST", "CUSTOM"]
+
 
 class OrmResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -128,7 +136,7 @@ class PaperPosition(BaseModel):
 
 
 class AssetStateRequest(BaseModel):
-    watchlist: list[str] = Field(max_length=100)
+    watchlist: list[str] = Field(max_length=MAX_WATCHLIST_SYMBOLS)
     positions: list[PaperPosition] = Field(max_length=15)
     total_assets: float | None = Field(default=None, gt=0, le=1_000_000_000_000)
 
@@ -167,6 +175,27 @@ class AssetStateResponse(BaseModel):
     updated_at: datetime | None = None
 
 
+class AppCapabilitiesResponse(BaseModel):
+    api_version: Literal["v1"] = "v1"
+    authentication: Literal["BEARER_REFRESH"] = "BEARER_REFRESH"
+    supported_research_scopes: list[Literal["MARKET", "WATCHLIST", "CUSTOM"]] = Field(
+        default_factory=_supported_research_scopes
+    )
+    max_watchlist_symbols: int = Field(gt=0)
+    max_research_symbols: int = Field(gt=0)
+    max_trade_plan_symbols: int = Field(gt=0)
+    portfolio_target_count: int = Field(gt=0)
+    features: dict[str, bool]
+    endpoints: dict[str, str]
+
+
+class AppBootstrapResponse(BaseModel):
+    server_time: datetime
+    user: UserResponse
+    assets: AssetStateResponse
+    capabilities: AppCapabilitiesResponse
+
+
 class ScoreResponse(OrmResponse):
     symbol: str
     trading_date: date
@@ -198,6 +227,20 @@ class CandidateResponse(OrmResponse):
     event_risk_multiplier: float
     style_exposures: dict[str, float]
     evidence_hash: str
+
+
+class ReportSymbolResponse(BaseModel):
+    symbol: str
+    name: str | None = None
+    research_status: Literal["FORMAL", "FORMAL_WITH_LIMITATIONS", "RISK_BLOCKED"]
+    advice_eligible: bool
+    recommendation: Literal["NO_BUY"] | None = None
+    exclusion_reasons: list[str] = Field(default_factory=list)
+    data_quality: dict[str, Any] = Field(default_factory=dict)
+    score: ScoreResponse
+    rank: int | None = None
+    prediction_percentile: float | None = None
+    industry_code: str | None = None
 
 
 class PortfolioResponse(OrmResponse):
@@ -236,11 +279,9 @@ class RunResponse(OrmResponse):
 class ResearchRequest(BaseModel):
     trading_date: date
     scope: Literal["MARKET", "WATCHLIST", "CUSTOM"] = "MARKET"
-    symbols: list[str] = Field(default_factory=list, max_length=100)
+    symbols: list[str] = Field(default_factory=list, max_length=MAX_RESEARCH_SYMBOLS)
     total_budget: Decimal | None = Field(default=None, gt=0, le=Decimal("100000000000"))
-    per_symbol_budget: Decimal | None = Field(
-        default=None, gt=0, le=Decimal("100000000000")
-    )
+    per_symbol_budget: Decimal | None = Field(default=None, gt=0, le=Decimal("100000000000"))
     max_stock_price: Decimal | None = Field(default=None, gt=0, le=Decimal("10000000"))
 
     @field_validator("scope", mode="before")
@@ -271,8 +312,8 @@ class ResearchRequest(BaseModel):
     def validate_scope_and_budget(self) -> ResearchRequest:
         if self.scope == "CUSTOM" and not self.symbols:
             raise ValueError("custom research requires at least one symbol")
-        if self.scope != "CUSTOM" and self.symbols:
-            raise ValueError("symbols are only accepted for custom research")
+        if self.scope == "MARKET" and self.symbols:
+            raise ValueError("symbols are only accepted for directed research")
         if (
             self.total_budget is not None
             and self.per_symbol_budget is not None
@@ -296,13 +337,12 @@ class ResearchSettingsResponse(BaseModel):
     schedule_timezone: Literal["Asia/Shanghai"] = "Asia/Shanghai"
     schedule_time: Literal["15:05"] = "15:05"
     snapshot_mode: Literal["SYSTEM_ENFORCED"] = "SYSTEM_ENFORCED"
+    portfolio_target_count: int = Field(gt=0)
 
 
 class TradePlanRequest(BaseModel):
-    symbols: list[str] = Field(min_length=1, max_length=15)
-    budget_override: Decimal | None = Field(
-        default=None, gt=0, le=Decimal("100000000000")
-    )
+    symbols: list[str] = Field(min_length=1, max_length=MAX_TRADE_PLAN_SYMBOLS)
+    budget_override: Decimal | None = Field(default=None, gt=0, le=Decimal("100000000000"))
     objective: Literal["RISK_ADJUSTED_RETURN"] = "RISK_ADJUSTED_RETURN"
 
     @field_validator("symbols", mode="before")
@@ -374,6 +414,8 @@ class ResearchRunResponse(RunResponse):
     reason_message: str | None = None
     formal_eligible_count: int | None = None
     excluded_symbol_count: int = 0
+    portfolio_reason_code: str | None = None
+    portfolio_reason_message: str | None = None
     trigger_source: Literal["AUTO", "MANUAL"] = "MANUAL"
     requested_date: date | None = None
 

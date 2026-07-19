@@ -226,6 +226,8 @@ export interface Run {
   reason_message?: string | null
   formal_eligible_count?: number | null
   excluded_symbol_count?: number
+  portfolio_reason_code?: string | null
+  portfolio_reason_message?: string | null
   trigger_source?: 'AUTO' | 'MANUAL'
   requested_date?: string | null
   reused?: boolean
@@ -252,6 +254,7 @@ export interface ResearchSettings {
   schedule_timezone: 'Asia/Shanghai'
   schedule_time: '15:05'
   snapshot_mode: 'SYSTEM_ENFORCED'
+  portfolio_target_count: number
 }
 
 export interface Score {
@@ -278,6 +281,20 @@ export interface Candidate {
   prediction_percentile?: number
   industry_code?: string
   event_risk_multiplier?: number
+}
+
+export interface ReportSymbol {
+  symbol: string
+  name?: string | null
+  research_status: 'FORMAL' | 'FORMAL_WITH_LIMITATIONS' | 'RISK_BLOCKED'
+  advice_eligible: boolean
+  recommendation?: 'NO_BUY' | null
+  exclusion_reasons: string[]
+  data_quality: Record<string, unknown>
+  score: Score
+  rank?: number | null
+  prediction_percentile?: number | null
+  industry_code?: string | null
 }
 
 export interface Portfolio {

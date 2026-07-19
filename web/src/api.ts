@@ -1,15 +1,17 @@
-import type { AssetState, AuditEvent, Candidate, DataEnvelope, FinancialSearchResult, FinancialSearchStatus, KlineBar, KlineQueryOptions, MarketPrefetchResponse, ModelSettings, ModelSettingsDraft, Portfolio, Quote, Report, ResearchSettings, ResearchSubmission, Run, Score, Snapshot, TokenPair, TradePlan, User } from './types'
+import type { AssetState, AuditEvent, Candidate, DataEnvelope, FinancialSearchResult, FinancialSearchStatus, KlineBar, KlineQueryOptions, MarketPrefetchResponse, ModelSettings, ModelSettingsDraft, Portfolio, Quote, Report, ReportSymbol, ResearchSettings, ResearchSubmission, Run, Score, Snapshot, TokenPair, TradePlan, User } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api/v1').replace(/\/$/, '')
 
 export class ApiError extends Error {
   status: number
   detail: string
+  code?: string
 
-  constructor(status: number, detail: string) {
+  constructor(status: number, detail: string, code?: string) {
     super(detail)
     this.status = status
     this.detail = detail
+    this.code = code
   }
 }
 
@@ -39,8 +41,10 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const type = response.headers.get('content-type') || ''
   const payload = type.includes('application/json') ? await response.json() : await response.text()
   if (!response.ok) {
-    const detail = typeof payload === 'object' && payload ? payload.detail || payload.message : payload
-    throw new ApiError(response.status, detail || `请求失败 (${response.status})`)
+    const rawDetail = typeof payload === 'object' && payload ? payload.detail || payload.message : payload
+    const code = rawDetail && typeof rawDetail === 'object' ? rawDetail.code : undefined
+    const detail = rawDetail && typeof rawDetail === 'object' ? rawDetail.message || code : rawDetail
+    throw new ApiError(response.status, detail || `请求失败 (${response.status})`, code)
   }
   return payload as T
 }
@@ -121,6 +125,7 @@ export const api = {
   portfolio: (date: string, runId?: string) => request<Portfolio>(`/portfolios/${date}${params({ run_id: runId })}`),
   report: (date: string, runId?: string) => request<Report>(`/reports/${date}${params({ run_id: runId })}`),
   reportContent: (reportId: string) => request<{ content?: string; body?: string }>(`/reports/${reportId}/content`),
+  reportSymbols: (reportId: string) => request<ReportSymbol[]>(`/reports/${reportId}/symbols`),
   reportTradePlans: (reportId: string) => request<TradePlan[]>(`/reports/${reportId}/trade-plans`),
   submitTradePlan: (reportId: string, payload: { symbols: string[]; budget_override?: number; objective?: 'RISK_ADJUSTED_RETURN' }) => request<TradePlan>(`/reports/${reportId}/trade-plans`, { method: 'POST', body: JSON.stringify(payload) }),
   tradePlan: (planId: string) => request<TradePlan>(`/trade-plans/${planId}`),

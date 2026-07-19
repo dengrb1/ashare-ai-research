@@ -36,6 +36,8 @@ export function ResearchPage() {
   const { watchlist, positions, quotes, subscribe } = useMarket()
   const [date, setDate] = useState(today())
   const [scope, setScope] = useState<ResearchScope>('MARKET')
+  const [excludedAssetSymbols, setExcludedAssetSymbols] = useState<string[]>([])
+  const [assetSearch, setAssetSearch] = useState('')
   const [customSymbols, setCustomSymbols] = useState('')
   const [totalBudget, setTotalBudget] = useState('1000000')
   const [perSymbolBudget, setPerSymbolBudget] = useState('80000')
@@ -55,9 +57,19 @@ export function ResearchPage() {
     ...positions.map((position) => position.symbol),
   ])), [watchlist, positions])
   const parsedCustomSymbols = useMemo(() => parseSymbols(customSymbols), [customSymbols])
-  const selectedSymbols = scope === 'WATCHLIST' ? assetSymbols : scope === 'CUSTOM' ? parsedCustomSymbols : []
+  const selectedAssetSymbols = useMemo(
+    () => assetSymbols.filter((symbol) => !excludedAssetSymbols.includes(symbol)),
+    [assetSymbols, excludedAssetSymbols],
+  )
+  const visibleAssetSymbols = useMemo(() => {
+    const query = assetSearch.trim().toUpperCase()
+    if (!query) return assetSymbols
+    return assetSymbols.filter((symbol) => symbol.includes(query) || (quotes[symbol]?.name || '').toUpperCase().includes(query))
+  }, [assetSearch, assetSymbols, quotes])
+  const selectedSymbols = scope === 'WATCHLIST' ? selectedAssetSymbols : scope === 'CUSTOM' ? parsedCustomSymbols : []
 
-  useEffect(() => selectedSymbols.length ? subscribe(selectedSymbols) : undefined, [selectedSymbols.join(','), subscribe])
+  const subscribedSymbols = scope === 'WATCHLIST' ? assetSymbols : selectedSymbols
+  useEffect(() => subscribedSymbols.length ? subscribe(subscribedSymbols) : undefined, [subscribedSymbols.join(','), subscribe])
   useEffect(() => { void api.researchSettings().then(setSettings).catch(() => setSettings(null)) }, [])
 
   const loadRuns = useCallback(async () => {
@@ -84,7 +96,9 @@ export function ResearchPage() {
     const perSymbol = positiveNumber(perSymbolBudget)
     const maxPrice = positiveNumber(maxStockPrice)
     if (scope !== 'MARKET' && !selectedSymbols.length) {
-      setError(scope === 'WATCHLIST' ? '自选股与持仓为空，请先添加股票' : '请输入至少一只有效 A 股代码')
+      setError(scope === 'WATCHLIST'
+        ? assetSymbols.length ? '请至少选择一只自选股或持仓股票' : '自选股与持仓为空，请先添加股票'
+        : '请输入至少一只有效 A 股代码')
       return
     }
     if (!total || !perSymbol) { setError('总资金预算和单股最高投入必须大于 0'); return }
@@ -96,7 +110,7 @@ export function ResearchPage() {
       const result = await api.submitResearch({
         trading_date: date,
         scope,
-        symbols: scope === 'CUSTOM' ? selectedSymbols : undefined,
+        symbols: scope === 'MARKET' ? undefined : selectedSymbols,
         total_budget: total,
         per_symbol_budget: perSymbol,
         max_stock_price: maxPrice,
@@ -129,6 +143,7 @@ export function ResearchPage() {
 
   const perSymbol = positiveNumber(perSymbolBudget) || 0
   const maxPrice = positiveNumber(maxStockPrice)
+  const targetCount = settings?.portfolio_target_count || 15
   return <div className="research-layout">
     <Panel title="自动每日研究" eyebrow="PER-USER SCHEDULE">
       <div className="snapshot-callout"><span>{settings?.auto_enabled ? '●' : '○'}</span><div><strong>{settings?.auto_enabled ? '已开启' : '默认关闭'}</strong><p>开启后仅在上海交易日 15:05 起检查收盘数据；未就绪时每 5 分钟重试，最长 2 小时。自动任务固定使用全市场、总资金 100 万元、单股 8 万元。</p></div></div>
@@ -139,20 +154,29 @@ export function ResearchPage() {
         <label>交易日<input type="date" value={date} max={today()} onChange={(event) => setDate(event.target.value)} /></label>
         <label>研究范围<select value={scope} onChange={(event) => setScope(event.target.value as ResearchScope)}><option value="MARKET">动态市场股票池</option><option value="WATCHLIST">我的自选与持仓</option><option value="CUSTOM">手工指定股票</option></select></label>
         {scope === 'CUSTOM' && <label className="wide">股票代码<textarea rows={3} value={customSymbols} onChange={(event) => setCustomSymbols(event.target.value)} placeholder="600519 或 600519.SH；多个代码用空格、逗号或换行分隔" /><small>已识别 {parsedCustomSymbols.length} 只：{parsedCustomSymbols.join('、') || '—'}</small></label>}
-        {scope === 'WATCHLIST' && <div className="snapshot-callout"><span>☆</span><div><strong>将研究 {assetSymbols.length} 只股票</strong><p>{assetSymbols.join('、') || '自选股和我的持仓目前为空'}</p></div></div>}
+        {scope === 'WATCHLIST' && <div className="research-symbol-selector wide">
+          <div className="research-symbol-selector-head"><div><strong>选择研究股票</strong><small>已选择 {selectedAssetSymbols.length} / {assetSymbols.length} 只；未勾选股票不会进入本次冻结快照。</small></div><div><button type="button" className="secondary" disabled={!assetSymbols.length || selectedAssetSymbols.length === assetSymbols.length} onClick={() => setExcludedAssetSymbols([])}>全选</button><button type="button" className="secondary" disabled={!selectedAssetSymbols.length} onClick={() => setExcludedAssetSymbols([...assetSymbols])}>清空</button></div></div>
+          {assetSymbols.length ? <><label className="research-symbol-search"><span>搜索自选股</span><input type="search" value={assetSearch} onChange={(event) => setAssetSearch(event.target.value)} placeholder="输入股票名称或代码" /><small>当前显示 {visibleAssetSymbols.length} 只</small></label><div className="research-symbol-scroll">{visibleAssetSymbols.map((assetSymbol) => {
+            const selected = selectedAssetSymbols.includes(assetSymbol)
+            const inWatchlist = watchlist.includes(assetSymbol)
+            const inPositions = positions.some((position) => position.symbol === assetSymbol)
+            const source = inWatchlist && inPositions ? '自选股 · 持仓' : inWatchlist ? '自选股' : '持仓'
+            return <label key={assetSymbol} className={selected ? 'selected' : ''}><input type="checkbox" checked={selected} onChange={() => setExcludedAssetSymbols((current) => selected ? [...current, assetSymbol] : current.filter((item) => item !== assetSymbol))} /><span><strong>{quotes[assetSymbol]?.name || assetSymbol}</strong><small>{assetSymbol} · {source}</small></span></label>
+          })}{!visibleAssetSymbols.length && <div className="research-symbol-empty">没有匹配的自选股</div>}</div></> : <div className="snapshot-callout"><span>☆</span><div><strong>暂无可选股票</strong><p>请先在“我的资产”中添加自选股或模拟持仓。</p></div></div>}
+        </div>}
         <div className="research-budget-grid">
           <label>总资金预算（元）<input type="number" min="1" step="10000" value={totalBudget} onChange={(event) => setTotalBudget(event.target.value)} /></label>
           <label>单股最高投入（元）<input type="number" min="1" step="1000" value={perSymbolBudget} onChange={(event) => setPerSymbolBudget(event.target.value)} /></label>
           <label>最高可接受股价（元）<input type="number" min="0.01" step="0.01" value={maxStockPrice} onChange={(event) => setMaxStockPrice(event.target.value)} placeholder="留空表示不限" /></label>
         </div>
-        {scope !== 'MARKET' && selectedSymbols.length > 0 && <div className="research-symbol-preview"><div><strong>预算预览</strong><small>股数按 A 股 100 股一手估算；正式报告使用冻结日线参考价。</small></div><div className="table-wrap"><table><thead><tr><th>证券</th><th>当前价</th><th>单股预算</th><th>估算可买</th><th>价格条件</th></tr></thead><tbody>{selectedSymbols.map((symbol) => {
+        {scope !== 'MARKET' && selectedSymbols.length > 0 && <details className="research-symbol-preview"><summary><strong>预算预览 · {selectedSymbols.length} 只</strong><small>按 A 股 100 股一手估算，点击展开</small></summary><div className="table-wrap"><table><thead><tr><th>证券</th><th>当前价</th><th>单股预算</th><th>估算可买</th><th>价格条件</th></tr></thead><tbody>{selectedSymbols.map((symbol) => {
           const price = quotes[symbol]?.price || 0
           const shares = price > 0 ? Math.floor(perSymbol / price / 100) * 100 : 0
           const allowed = !maxPrice || !price || price <= maxPrice
           return <tr key={symbol}><td><strong>{quotes[symbol]?.name || symbol}</strong><small>{symbol}</small></td><td>{price ? formatNumber(price) : '—'}</td><td>{perSymbol ? formatNumber(perSymbol) : '—'}</td><td>{shares ? `${shares} 股` : '—'}</td><td className={allowed ? 'price-up' : 'price-down'}>{allowed ? '符合' : '超过上限'}</td></tr>
-        })}</tbody></table></div></div>}
+        })}</tbody></table></div></details>}
         <div className="snapshot-callout"><span>▣</span><div><strong>冻结快照模式 · 系统强制开启（只读）</strong><p>不允许关闭。股票范围、预算与数据来源都会写入 Manifest；实时行情只用于表单预览，不进入本次研究。</p></div></div>
-        {scope !== 'MARKET' && selectedSymbols.length < 15 && <p className="form-hint">定向标的少于 15 只时只生成逐股评分和研究报告，不生成违反现有 15 股约束的模拟组合。</p>}
+        {scope !== 'MARKET' && selectedSymbols.length < targetCount && <p className="form-hint">个股正式报告正常生成；因少于版本策略要求的 {targetCount} 只，不生成整体组合。</p>}
         <button className="primary large" onClick={() => void submit()} disabled={submitting}>{submitting ? '正在提交…' : '启动每日研究'}<span>→</span></button>
         {submittedRun && <div className="success-box" role="status"><strong>{submittedRun.reused ? '已复用进行中的研究任务' : '研究任务已提交'}</strong><p>运行 ID：{submittedRun.run_id} · 实际交易日：{submittedRun.trading_date || date} · 状态：{submittedRun.status}</p></div>}
         <ErrorNotice message={error} />
@@ -178,7 +202,7 @@ export function ResearchPage() {
             <div className="research-run-meta"><span>{run.phase || (isActive ? '研究流水线运行中' : '已结束')}</span><span>{formatTime(run.started_at || run.created_at)}</span></div>
             {normalized === 'FAILED' && <div className="failure-box"><strong>运行失败</strong><p>{run.error_message || '未返回具体失败原因，请查看审计事件。'}</p></div>}
             {normalized === 'FUSED' && <div className="warning-box"><strong>观察模式 · {run.reason_code || 'UNSPECIFIED'}</strong><p>{run.reason_message || '正式组合条件未满足'}；正式可用 {run.formal_eligible_count ?? 0} 只，排除 {run.excluded_symbol_count || 0} 只。</p></div>}
-            {normalized === 'SUCCEEDED' && <div className="success-box"><strong>研究完成</strong><p>{run.portfolio_generated ? '评分、候选池、预算组合和日报已生成。' : '逐股评分、候选结果和日报已生成；本次范围不要求模拟组合。'}</p></div>}
+            {normalized === 'SUCCEEDED' && <div className="success-box"><strong>正式个股研究已完成</strong><p>{run.portfolio_generated ? '评分、候选池、预算组合和日报已生成。' : run.portfolio_reason_message || '全部目标股票的正式报告已生成；本次未生成整体组合。'}</p></div>}
             {run.report_id && ['SUCCEEDED', 'FUSED'].includes(normalized) && <Link className="report-link" to={reportLink}>打开本次报告 →</Link>}
           </article>
         })}

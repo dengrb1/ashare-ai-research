@@ -160,6 +160,8 @@ npm run build
 - `POST /api/v1/auth/refresh`
 - `POST /api/v1/auth/revoke`
 - `GET /api/v1/auth/me`
+- `GET /api/v1/app/bootstrap`
+- `GET|PUT /api/v1/assets`
 - `GET|POST /api/v1/admin/users`
 - `PATCH /api/v1/admin/users/{user_id}`
 - `GET /api/v1/market/quotes?symbols=600000.SH,000001.SZ`
@@ -185,12 +187,25 @@ npm run build
 - `GET /api/v1/runs/{run_id}`
 - `GET /api/v1/runs/{run_id}/audit`
 - `GET /api/v1/reports/{report_id}/content`
+- `GET /api/v1/reports/{report_id}/symbols`
 - `POST|GET /api/v1/reports/{report_id}/trade-plans`
 - `GET /api/v1/trade-plans/{plan_id}`
 
 除健康检查和登录外，业务接口均要求登录；修改类请求还必须携带登录时下发的 CSRF
-Cookie 对应请求头。每日研究、回测和 Trade Plan 提交写入 PostgreSQL 后进入各自 Redis
+Cookie 对应请求头。原生手机客户端通过 `/api/v1/auth/token` 获取 Bearer access/refresh token，
+随后调用 `/api/v1/app/bootstrap`，一次取得当前用户、自选股与持仓、研究范围和限制、新功能
+开关及相关资源路径；Bearer 修改请求不使用 Web CSRF Cookie。`WATCHLIST` 研究可在 `symbols`
+中提交自选股/持仓的任意非空子集；省略 `symbols` 继续兼容旧客户端并研究全部已保存标的。
+报告的 `/symbols` 资源会返回每只股票的正式研究状态、确定性评分、数据门禁原因和交易建议
+资格，符合资格的股票可由报告 Trade Plan 接口生成购买建议。每日研究、回测和 Trade Plan 提交写入 PostgreSQL 后进入各自 Redis
 pending/processing 确认队列；同一用户重复提交同一报告和参数的进行中 Trade Plan 会返回既有任务。
+密码登录和 Token 签发共享按来源地址计算的失败尝试限流，超过阈值返回 `429` 和
+`Retry-After`；成功认证会清除该来源的失败计数。业务 API 默认返回 `Cache-Control: no-store`
+及基础浏览器安全响应头，生产环境关闭 Swagger、ReDoc 和 OpenAPI 公共入口。本地 Compose 的
+Web、API、PostgreSQL、Redis 和 MinIO 默认只绑定 `127.0.0.1`；物理手机联调或正式部署不得
+直接暴露数据库、Redis、MinIO，API 必须通过受信任的 HTTPS 反向代理发布并启用安全 Cookie。
+实体手机在受信任局域网内联调时，只把 `WEB_BIND_ADDRESS` 显式设为主机局域网地址或
+`0.0.0.0`；保持 `SERVICE_BIND_ADDRESS=127.0.0.1`，手机统一经 Nginx 的 `/api` 访问后端。
 每个运行都记录用户归属、状态、失败原因和审计事件。
 每日研究可由任务所有者请求安全停止：排队任务直接进入 `CANCELLED`，运行中任务先进入
 `CANCEL_REQUESTED`，并在当前原子阶段完成后停止；终态任务不会被重新取消。
@@ -244,14 +259,19 @@ API 还对相同查询执行 15 秒缓存和 single-flight 合并，默认最多
 不可变对象和 Manifest。免费链路读取东方财富个股新闻、财新免费新闻流、巨潮官方公告与
 现金分红，并用新浪免费分红记录交叉补充；同时读取新浪三大财报，以报告期、公告/更新
 时间执行 PIT 过滤；单股票数据失败或字段不完整时才写入明确标注的中性占位证据，不会
-伪装成真实基本面或公告结论。数据门禁按股票执行：不完整股票仍保留评分和观察报告，但不
-进入正式组合候选或累计回测信号；正式可用股票少于 15 只时才进入 `OBSERVE_ONLY/FUSED`。
-WebGUI 可选择动态市场股票池、当前用户的自选与持仓，或手工输入单只/多只 A 股代码；
+伪装成真实基本面或公告结论。数据门禁按股票执行：不完整股票仍保留评分并进入正式报告，
+但固定显示 `NO_BUY`，不进入正式组合候选。`WATCHLIST`/`CUSTOM` 正式可用股票少于版本化
+组合目标时，研究仍以 `SUCCEEDED` 完成，只记录组合未生成；全市场研究保留严格组合门禁。
+`FUSED` 仅用于最大回撤等全局风险熔断。
+WebGUI 可选择动态市场股票池、从当前用户的自选与持仓中自由勾选任意非空子集，或手工输入
+单只/多只 A 股代码；自选范围提交的股票会由 API 再次校验归属并冻结到 Manifest，未勾选股票
+不会进入本次研究。
 定向研究只对通过股票池可交易性校验的指定证券生成特征、评分、候选和报告。研究请求还可
-冻结总资金预算、单股最高投入和最高可接受股价：全市场或不少于 15 只的定向研究会把这些
-限制用于下一交易日模拟组合试算，少于 15 只时只发布逐股研究结果，不放宽首版固定的 15 股
-组合约束。研究范围和预算均进入运行输入哈希，表单中的实时价格只用于下单手数预览，不进入
-不可变研究快照。
+冻结总资金预算、单股最高投入和最高可接受股价：全市场或达到版本化组合目标的定向研究会
+把这些限制用于下一交易日模拟组合试算。小规模定向研究仍发布覆盖全部目标股票的正式逐股
+报告，并为合格股票冻结用途为 `SINGLE_SYMBOL_ADVICE` 的验证快照，但不把单股信号伪装成
+组合信号，也不放宽组合约束。研究范围和预算均进入运行输入哈希，表单中的实时价格只用于
+下单手数预览，不进入不可变研究快照。
 每位用户的自动日研默认关闭；开启后调度器在上海交易日 15:05 起检查数据就绪状态，未就绪
 时每 5 分钟重试、最长 2 小时，数据就绪前不创建运行或冻结 `decision_at`。自动任务固定使用
 全市场、总资金 100 万元、单股 8 万元且无股价上限；手动任务使用独立 `MANUAL` 幂等键，

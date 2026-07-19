@@ -34,7 +34,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="ashare-ai")
     subparsers = parser.add_subparsers(dest="command", required=True)
     api = subparsers.add_parser("api", help="Run the FastAPI service")
-    api.add_argument("--host", default="0.0.0.0")
+    api.add_argument("--host", default="127.0.0.1")
     api.add_argument("--port", default=8000, type=int)
     subparsers.add_parser("migrate", help="Run database migrations")
     doctor = subparsers.add_parser("doctor", help="Run read-only configuration diagnostics")

@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     session_ttl_hours: int = Field(default=24, ge=1, le=24 * 30)
     access_token_ttl_minutes: int = Field(default=15, ge=1, le=24 * 60)
     refresh_token_ttl_days: int = Field(default=30, ge=1, le=365)
+    auth_login_rate_limit_per_minute: int = Field(default=10, ge=1, le=120)
     cookie_secure: bool = False
     market_cache_seconds: int = Field(default=15, ge=1, le=300)
     market_kline_cache_seconds: int = Field(default=300, ge=15, le=3600)
