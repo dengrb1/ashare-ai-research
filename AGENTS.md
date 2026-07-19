@@ -42,6 +42,7 @@
 
 ## 本地运行、验证与安全
 
+- 每次更新代码后，交付前必须执行 `docker compose up -d --build`，将最新镜像重新构建并部署到本机 Docker Desktop；随后至少运行 `docker compose ps` 并检查 Web、API 和 Worker 的健康状态。若受环境或权限限制无法完成，必须在交付说明中明确列出原因和未验证项。
 - 本地完整链路：基础依赖由 `docker compose up -d postgres redis minio minio-init` 提供；随后运行 `ashare-ai doctor`、`ashare-ai migrate`，再分别启动 API、Research Worker、Backtest Worker 和（如需）调度器。不要在 Docker 基础服务启动后又在容器内重复启动 API/Worker。
 - 前端开发使用 `cd web; npm ci; npm run dev`，默认访问 `http://localhost:5173`，并把 `/api` 代理到 `http://127.0.0.1:8000`。完整 Docker 栈由 Nginx 在 `http://localhost` 暴露网页。
 - Python 修改至少运行受影响的 `pytest` 用例；跨层、数据或交易语义修改运行完整 `\.venv\Scripts\python -m pytest`（环境允许时）。前端修改至少运行 `cd web; npm test -- --run`，并在交付前运行 `npm run build`。

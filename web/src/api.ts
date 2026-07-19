@@ -128,7 +128,7 @@ export const api = {
   submitResearch: (payload: string | ResearchSubmission) => request<Run>('/research/runs', { method: 'POST', body: JSON.stringify(typeof payload === 'string' ? { trading_date: payload } : payload) }),
   researchSettings: () => request<ResearchSettings>('/research/settings'),
   saveResearchSettings: (autoEnabled: boolean) => request<ResearchSettings>('/research/settings', { method: 'PUT', body: JSON.stringify({ auto_enabled: autoEnabled }) }),
-  researchRuns: (limit = 5, tradingDate?: string) => request<Run[]>(`/research/runs${params({ limit, trading_date: tradingDate, mine: 'true' })}`),
+  researchRuns: (limit = 5, tradingDate?: string, published = false) => request<Run[]>(`/research/runs${params({ limit, trading_date: tradingDate, mine: 'true', published: published ? 'true' : undefined })}`),
   cancelResearch: (runId: string) => request<Run>(`/research/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' }),
   runs: () => request<Run[] | { items: Run[] }>('/runs'),
   run: (runId: string) => request<Run>(`/runs/${runId}`),

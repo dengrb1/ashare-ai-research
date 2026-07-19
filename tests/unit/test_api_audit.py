@@ -418,6 +418,41 @@ def test_latest_fused_results_are_visible_without_reusing_old_portfolio() -> Non
         session.close()
 
 
+def test_published_research_runs_exclude_unpublished_and_order_by_completion() -> None:
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    session = Session(engine, expire_on_commit=False)
+    now = datetime(2026, 7, 17, 10, tzinfo=UTC)
+    _add_result_set(session, "older-success", date(2026, 7, 16), now, "SUCCEEDED", 70)
+    _add_result_set(
+        session, "latest-fused", date(2026, 7, 17), now + timedelta(minutes=2), "FUSED", 80
+    )
+    _add_result_set(
+        session, "latest-failed", date(2026, 7, 17), now + timedelta(minutes=3), "FAILED", 90
+    )
+    session.commit()
+
+    _override_authenticated_admin(session)
+    try:
+        client = TestClient(app)
+        rows = client.get(
+            "/api/v1/research/runs", params={"limit": 5, "published": True}
+        ).json()
+        assert [row["run_id"] for row in rows] == ["latest-fused", "older-success"]
+        dated = client.get(
+            "/api/v1/research/runs",
+            params={"limit": 5, "published": True, "trading_date": "2026-07-17"},
+        ).json()
+        assert [row["run_id"] for row in dated] == ["latest-fused"]
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+
 def test_failed_backtest_retry_is_single_queue_transition(monkeypatch) -> None:
     engine = create_engine(
         "sqlite+pysqlite://",

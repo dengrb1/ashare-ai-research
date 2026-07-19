@@ -6,6 +6,7 @@ import { Empty, ErrorNotice, formatNumber, formatTime, Loading, Panel, StatusPil
 import { usePageRefresh } from '../context/RefreshContext'
 import { getKlineRangePlan, KLINE_PERIODS, KLINE_RANGES, trimBarsToRange } from '../marketKlines'
 import type { Candidate, KlineBar, KlineRange, MarketDataStatus, Quote, Report, Run, Score, TradePlan } from '../types'
+import { resolvePublishedResearchRun } from '../researchRuns'
 
 function displayReportHtml(content: string) {
   return content
@@ -34,7 +35,8 @@ const PLAN_ACTIVE = new Set(['PENDING', 'QUEUED', 'RUNNING', 'PROCESSING'])
 export function ReportsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [date, setDate] = useState(searchParams.get('date') || today())
-  const runId = searchParams.get('run_id') || undefined
+  const requestedDate = searchParams.get('date') || undefined
+  const requestedRunId = searchParams.get('run_id') || undefined
   const [report, setReport] = useState<Report | null>(null)
   const [content, setContent] = useState('')
   const [run, setRun] = useState<Run | null>(null)
@@ -57,12 +59,18 @@ export function ReportsPage() {
   const load = useCallback(async () => {
     setLoading(true); setError(''); setContent('')
     try {
-      const row = await api.report(date, runId)
+      const selected = await resolvePublishedResearchRun(requestedDate, requestedRunId)
+      if (!selected?.trading_date) {
+        setReport(null); setRun(null); setCandidates([]); setTradePlans([])
+        return
+      }
+      setDate(selected.trading_date)
+      setRun(selected)
+      const row = await api.report(selected.trading_date, selected.run_id)
       setReport(row)
-      const [runsResult, candidatesResult, plansResult] = await Promise.allSettled([
-        api.researchRuns(50, date), api.candidates(date, row.run_id), api.reportTradePlans(row.report_id),
+      const [candidatesResult, plansResult] = await Promise.allSettled([
+        api.candidates(selected.trading_date, row.run_id), api.reportTradePlans(row.report_id),
       ])
-      setRun(runsResult.status === 'fulfilled' ? runsResult.value.find((item) => item.run_id === row.run_id) || null : null)
       const formal = candidatesResult.status === 'fulfilled'
         ? candidatesResult.value.filter((item) => (item.event_risk_multiplier ?? 1) > 0).sort((left, right) => left.rank - right.rank) : []
       setCandidates(formal)
@@ -77,7 +85,7 @@ export function ReportsPage() {
       setReport(null); setRun(null); setCandidates([]); setTradePlans([])
       setError(reason instanceof Error ? reason.message : '报告加载失败')
     } finally { setLoading(false) }
-  }, [date, runId])
+  }, [requestedDate, requestedRunId])
 
   usePageRefresh(load)
   useEffect(() => { void load() }, [load])

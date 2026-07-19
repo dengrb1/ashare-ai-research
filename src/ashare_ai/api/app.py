@@ -1170,13 +1170,20 @@ def research_runs(
     limit: int = Query(default=5, ge=1, le=50),
     trading_date: date | None = None,
     mine: bool = False,
+    published: bool = False,
 ) -> list[ResearchRunResponse]:
     statement = select(JobRun).where(JobRun.run_type == "DAILY")
     if mine or context.user.role != "ADMIN":
         statement = statement.where(JobRun.user_id == context.user.user_id)
     if trading_date is not None:
         statement = statement.where(JobRun.trading_date == trading_date)
-    rows = db.scalars(statement.order_by(JobRun.started_at.desc()).limit(limit)).all()
+    if published:
+        statement = statement.where(JobRun.status.in_(("SUCCEEDED", "FUSED"))).order_by(
+            JobRun.completed_at.desc(), JobRun.started_at.desc(), JobRun.run_id.desc()
+        )
+    else:
+        statement = statement.order_by(JobRun.started_at.desc(), JobRun.run_id.desc())
+    rows = db.scalars(statement.limit(limit)).all()
     return [_research_run_response(db, row) for row in rows]
 
 

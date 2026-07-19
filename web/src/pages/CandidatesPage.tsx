@@ -3,9 +3,11 @@ import { api } from '../api'
 import type { Candidate, Run } from '../types'
 import { Empty, ErrorNotice, formatNumber, Loading, Panel, StatusPill, today } from '../components/Ui'
 import { usePageRefresh } from '../context/RefreshContext'
+import { resolvePublishedResearchRun } from '../researchRuns'
 
 export function CandidatesPage() {
   const [date, setDate] = useState(today())
+  const [requestedDate, setRequestedDate] = useState<string | undefined>()
   const [rows, setRows] = useState<Candidate[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -13,14 +15,17 @@ export function CandidatesPage() {
   const load = useCallback(async () => {
     setError('')
     try {
-      const [candidates, recent] = await Promise.all([api.candidates(date), api.researchRuns(1, date)])
-      setRows(candidates); setRun(recent[0] || null)
+      const selected = await resolvePublishedResearchRun(requestedDate)
+      setRun(selected)
+      if (!selected?.trading_date) { setRows([]); return }
+      setDate(selected.trading_date)
+      setRows(await api.candidates(selected.trading_date, selected.run_id))
     } catch (reason) { setRows([]); setRun(null); setError(reason instanceof Error ? reason.message : '候选池加载失败') }
     finally { setLoading(false) }
-  }, [date])
+  }, [requestedDate])
   usePageRefresh(load)
   useEffect(() => { setLoading(true); void load() }, [load])
-  return <Panel title="研究候选池" eyebrow="DETERMINISTIC RANKING" action={<div className="filter-actions">{run && <StatusPill status={run.status} />}<label className="date-filter">交易日<input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label></div>}>
+  return <Panel title="研究候选池" eyebrow="DETERMINISTIC RANKING" action={<div className="filter-actions">{run && <StatusPill status={run.status} />}<label className="date-filter">交易日<input type="date" value={date} onChange={(event) => { setDate(event.target.value); setRequestedDate(event.target.value) }} /></label></div>}>
     {run?.status.toUpperCase() === 'FUSED' && <div className="warning-box"><strong>观察模式 · {run.reason_code || 'UNSPECIFIED'}</strong><p>{run.reason_message || '正式组合条件未满足'}；候选表仅包含通过数据门禁的股票，另有 {run.excluded_symbol_count || 0} 只保留为研究观察对象。</p></div>}
     <div className="table-note"><span>最终分由版本化公式生成</span><span>分红加分与事件风险乘数已纳入</span><span>不构成买卖建议</span></div>
     <ErrorNotice message={error} />

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api'
+import { resolvePublishedResearchRun } from '../researchRuns'
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
@@ -41,6 +42,23 @@ describe('API security and market adapters', () => {
     expect(String(vi.mocked(fetch).mock.calls[1][0])).toContain('/scores/2026-07-17/600000.SH/lineage?run_id=run-1')
     expect(String(vi.mocked(fetch).mock.calls[2][0])).toContain('/research/runs/run-1/cancel')
     expect(vi.mocked(fetch).mock.calls[2][1]?.method).toBe('POST')
+  })
+
+  it('lets an explicit published run override a mismatched date', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse({
+        run_id: 'fused-run', run_type: 'DAILY', trading_date: '2026-07-16', status: 'FUSED',
+      }))
+      .mockResolvedValueOnce(jsonResponse([{
+        run_id: 'fused-run', trading_date: '2026-07-16', status: 'FUSED', reason_code: 'DATA_GATE',
+      }]))
+
+    const selected = await resolvePublishedResearchRun('2026-07-17', 'fused-run')
+
+    expect(selected).toMatchObject({ run_id: 'fused-run', trading_date: '2026-07-16', status: 'FUSED' })
+    expect(String(vi.mocked(fetch).mock.calls[0][0])).toContain('published=true')
+    expect(String(vi.mocked(fetch).mock.calls[1][0])).toContain('/runs/fused-run')
   })
 
   it('normalizes backend quote names and nested status metadata', async () => {

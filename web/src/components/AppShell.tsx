@@ -19,6 +19,8 @@ const NAV = [
   { group: '任务与系统' },
   { to: '/backtest', label: '回测工作台', icon: '⟲' },
   { to: '/runs', label: '运行与审计', icon: '≡' },
+  { group: '管理' },
+  { to: '/about', label: '关于本系统', icon: 'ⓘ' },
 ]
 
 const TITLES: Record<string, [string, string]> = {
@@ -32,6 +34,7 @@ const TITLES: Record<string, [string, string]> = {
   '/reports': ['研究报告', '研究结论与可追溯证据摘要'],
   '/backtest': ['回测工作台', '固定快照上的事件驱动回测'],
   '/runs': ['运行与审计', '任务状态、失败原因和审计事件'],
+  '/about': ['关于本系统', '系统定位、研究链路与使用边界'],
   '/admin': ['用户管理', '账户、角色与访问控制'],
   '/admin/models': ['模型设置', '加密凭据、模型分工、连通性与版本状态'],
 }
@@ -83,7 +86,7 @@ export function AppShell() {
           <NavLink key={item.to} to={item.to!} end={item.end} onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}>
             <span>{item.icon}</span>{item.label}
           </NavLink>)}
-        {isAdmin && <><div className="nav-group">管理</div><NavLink to="/admin" end onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}><span>⚙</span>用户管理</NavLink><NavLink to="/admin/models" onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}><span>◉</span>模型设置</NavLink></>}
+        {isAdmin && <><NavLink to="/admin" end onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}><span>⚙</span>用户管理</NavLink><NavLink to="/admin/models" onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}><span>◉</span>模型设置</NavLink></>}
       </nav>
       <div className="sidebar-foot">
         <div className={`feed-state ${delayed ? 'delayed' : ''}`}><i />{delayed ? '行情非实时' : `${source} 行情正常`}</div>

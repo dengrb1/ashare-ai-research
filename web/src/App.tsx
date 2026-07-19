@@ -15,6 +15,7 @@ import { BacktestPage } from './pages/BacktestPage'
 import { AdminPage } from './pages/AdminPage'
 import { FinancialSearchPage } from './pages/FinancialSearchPage'
 import { ModelSettingsPage } from './pages/ModelSettingsPage'
+import { AboutPage } from './pages/AboutPage'
 import { ThemeProvider } from './context/ThemeContext'
 import { RefreshProvider } from './context/RefreshContext'
 
@@ -41,6 +42,7 @@ function AppRoutes() {
         <Route path="reports" element={<ReportsPage />} />
         <Route path="runs" element={<RunsPage />} />
         <Route path="backtest" element={<BacktestPage />} />
+        <Route path="about" element={<AboutPage />} />
         <Route path="admin" element={<AdminPage />} />
         <Route path="admin/models" element={<ModelSettingsPage />} />
       </Route>

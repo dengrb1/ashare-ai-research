@@ -63,13 +63,13 @@ export function ResearchPage() {
   const loadRuns = useCallback(async () => {
     setError('')
     try {
-      const [recent, all] = await Promise.allSettled([api.researchRuns(5, date), api.researchRuns(50)])
+      const [recent, all] = await Promise.allSettled([api.researchRuns(5), api.researchRuns(50)])
       if (recent.status === 'fulfilled') setRuns(recent.value)
       if (all.status === 'fulfilled') setActivity(all.value.filter((run) => ACTIVE.has(run.status.toUpperCase())))
       if (recent.status === 'rejected' && all.status === 'rejected') throw recent.reason
     } catch (reason) { setError(reason instanceof Error ? reason.message : '研究记录加载失败') }
     finally { setLoading(false) }
-  }, [date])
+  }, [])
 
   usePageRefresh(loadRuns)
   useEffect(() => { setLoading(true); void loadRuns() }, [loadRuns])
@@ -165,8 +165,8 @@ export function ResearchPage() {
         return <article className="research-run-card" key={`active-${run.run_id}`}><div className="research-run-head"><div><strong>{run.trading_date || run.requested_date || '待确定交易日'}</strong><code>{run.run_id}</code></div><StatusPill status={run.status} /></div><div className="run-scope-summary"><span>{run.trigger_source === 'AUTO' ? '自动日研' : '手动研究'}</span><span>{run.phase || '等待流水线更新'}</span><span>进度 {run.progress ?? 0}%</span><span>开始 {formatTime(run.started_at || run.created_at)}</span></div>{status === 'CANCEL_REQUESTED' ? <div className="warning-box"><strong>正在停止</strong><p>当前阶段完成后将安全停止。</p></div> : <button className="secondary" disabled={cancelling === run.run_id} onClick={() => void cancel(run)}>{cancelling === run.run_id ? '正在请求停止…' : '停止任务'}</button>}</article>
       })}</div> : <div className="run-await"><span>✓</span><strong>当前没有活动任务</strong><p>这里会汇总当前用户跨交易日的运行中研究。</p></div>}
     </Panel>
-    <Panel title="最近 5 次运行" eyebrow="LIVE PROGRESS" action={runs[0] && <StatusPill status={runs[0].status} />}>
-      {loading && !runs.length ? <Loading /> : runs.length ? <div className="research-run-list">
+    <Panel title="最近 5 次运行" eyebrow="LIVE PROGRESS" className="full-span recent-run-panel" action={runs[0] && <StatusPill status={runs[0].status} />}>
+      {loading && !runs.length ? <Loading /> : runs.length ? <div className="research-run-list recent-run-grid">
         {runs.map((run) => {
           const normalized = run.status.toUpperCase()
           const isActive = ACTIVE.has(normalized)
@@ -182,7 +182,7 @@ export function ResearchPage() {
             {run.report_id && ['SUCCEEDED', 'FUSED'].includes(normalized) && <Link className="report-link" to={reportLink}>打开本次报告 →</Link>}
           </article>
         })}
-      </div> : <div className="run-await"><span>✦</span><strong>该交易日暂无研究任务</strong><p>启动后会在此展示最近 5 次记录。</p></div>}
+      </div> : <div className="run-await"><span>✦</span><strong>暂无研究任务</strong><p>启动后会在此展示跨交易日最近 5 次记录。</p></div>}
     </Panel>
     <Panel title="处理边界" eyebrow="DATA CONTRACT" className="full-span">
       <div className="contract-flow"><div><span>01</span><strong>available_at</strong><p>拒绝决策时点后的信息</p></div><i>→</i><div><span>02</span><strong>股票范围与预算</strong><p>随 Manifest 冻结并参与哈希</p></div><i>→</i><div><span>03</span><strong>Agent 结构化输出</strong><p>证据和子分严格校验</p></div><i>→</i><div><span>04</span><strong>确定性评分</strong><p>版本公式生成最终结果</p></div></div>

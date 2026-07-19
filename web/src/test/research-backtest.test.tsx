@@ -79,7 +79,7 @@ describe('research observation mode and precise reports', () => {
     vi.stubGlobal('fetch', mockFetch)
     const user = userEvent.setup()
     render(researchWrapper(<ResearchPage />))
-    await screen.findByText('该交易日暂无研究任务')
+    await screen.findByText('暂无研究任务')
     await user.selectOptions(screen.getByLabelText('研究范围'), 'CUSTOM')
     await user.type(screen.getByPlaceholderText(/600519 或/), '600519 000858')
     await user.type(screen.getByLabelText('最高可接受股价（元）'), '500')
@@ -107,8 +107,8 @@ describe('research observation mode and precise reports', () => {
     })
     vi.stubGlobal('fetch', mockFetch)
     render(researchWrapper(<ResearchPage />))
-    expect(await screen.findByText('old-run')).toBeInTheDocument()
-    expect(screen.getByText('自动日研')).toBeInTheDocument()
+    expect((await screen.findAllByText('old-run')).length).toBeGreaterThan(0)
+    expect(screen.getAllByText('自动日研').length).toBeGreaterThan(0)
     await userEvent.click(screen.getByRole('button', { name: '停止任务' }))
     expect(confirm).toHaveBeenCalled()
     expect((await screen.findAllByText('正在停止')).length).toBeGreaterThan(0)
@@ -233,6 +233,9 @@ describe('research observation mode and precise reports', () => {
 
   it('renders a FUSED portfolio state without a generic not-found error', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes('/research/runs?')) return jsonResponse([{
+        run_id: 'fused-run', trading_date: '2026-07-17', status: 'FUSED',
+      }])
       if (String(input).includes('/portfolios/')) return jsonResponse({
         run_id: 'fused-run', trading_date: '2026-07-17', status: 'FUSED', observation_only: true,
         message: '风控熔断，当前仅发布观察报告', positions: [], rejection_reasons: [], cash_weight: 1,
@@ -241,6 +244,8 @@ describe('research observation mode and precise reports', () => {
     }))
     render(wrapper(<PortfolioPage />))
     expect(await screen.findByText('风控熔断，当前仅发布观察报告')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('2026-07-17')).toBeInTheDocument()
+    expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).includes('run_id=fused-run'))).toBe(true)
     expect(screen.queryByText(/404/)).not.toBeInTheDocument()
   })
 })

@@ -172,6 +172,39 @@ label { display: grid; gap: 7px; color: #84999f; font-size: 10px; }
 .pipeline { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0; position: relative; }.pipeline-step { position: relative; min-height: 112px; padding: 14px 13px; border: 1px solid var(--line); border-right: 0; }.pipeline-step:nth-child(5) { border-right: 1px solid var(--line); }.pipeline-step > span { display: grid; place-items: center; width: 22px; height: 22px; color: var(--accent); background: var(--accent-soft); border-radius: 50%; font: 8px 'IBM Plex Mono'; }.pipeline-step strong { display: block; margin-top: 12px; font-size: 9px; }.pipeline-step small { display: block; margin-top: 5px; color: #5c7278; font-size: 8px; line-height: 1.5; }.run-summary { grid-column: 1 / -1; display: grid; grid-template-columns: 100px 1fr auto; align-items: center; gap: 10px; padding: 11px 13px; color: #71858b; background: rgba(0,0,0,.12); font-size: 9px; }.run-summary strong { color: #93a8ad; font: 9px 'IBM Plex Mono'; overflow: hidden; text-overflow: ellipsis; }.run-summary small { color: #566c72; }
 .guardrail-list { display: grid; gap: 1px; background: var(--line); }.guardrail-list > div { display: flex; align-items: center; gap: 14px; padding: 12px; background: #0c1921; }.guardrail-list > div > span { color: #416c69; font: 12px 'IBM Plex Mono'; }.guardrail-list strong { display: block; font-size: 10px; }.guardrail-list p { margin: 3px 0 0; color: #63787e; font-size: 8px; }
 
+.about-hero { min-height: 220px; display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(210px, .34fr); align-items: center; gap: 24px; padding: 34px; background: radial-gradient(circle at 82% 15%, var(--accent-soft), transparent 28%), linear-gradient(120deg, var(--surface), var(--surface-2)); border: 1px solid var(--accent-line); border-radius: 8px; box-shadow: var(--shadow); }
+.about-mark { display: grid; place-items: center; width: 76px; height: 76px; color: var(--on-accent); background: var(--accent); border-radius: 6px 28px 6px 28px; box-shadow: 0 15px 38px var(--accent-soft); font-size: 40px; font-weight: 700; }
+.about-hero h2 { margin: 8px 0 10px; color: var(--text-strong); font-size: clamp(22px, 2.4vw, 34px); letter-spacing: .04em; }
+.about-hero p { max-width: 760px; margin: 0; color: var(--muted); line-height: 1.8; }
+.about-actions { display: flex; gap: 10px; margin-top: 22px; }
+.about-actions a { min-height: 40px; text-decoration: none; }
+.about-actions .secondary { display: inline-flex; align-items: center; }
+.about-hero aside { padding: 22px; border-left: 1px solid var(--line); }
+.about-hero aside span, .about-hero aside small, .about-hero aside strong { display: block; }
+.about-hero aside span { color: var(--muted); font-size: 10px; }
+.about-hero aside strong { margin: 9px 0 6px; color: var(--accent); font: 16px 'IBM Plex Mono'; }
+.about-hero aside small { color: var(--gold); }
+.about-pipeline { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.about-pipeline article { min-height: 176px; padding: 18px; border: 1px solid var(--line); border-right: 0; background: var(--surface-2); }
+.about-pipeline article:last-child { border-right: 1px solid var(--line); }
+.about-pipeline article > span { display: grid; place-items: center; width: 30px; height: 30px; color: var(--accent); background: var(--accent-soft); border-radius: 50%; font: 10px 'IBM Plex Mono'; }
+.about-pipeline strong { display: block; margin-top: 18px; color: var(--text-strong); }
+.about-pipeline p { margin: 7px 0 0; color: var(--muted); font-size: 11px; line-height: 1.7; }
+.about-grid { display: grid; grid-template-columns: 1.2fr 1fr; gap: 18px; }
+.about-principles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.about-principles article { display: flex; gap: 12px; padding: 15px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; }
+.about-principles i { display: grid; flex: 0 0 24px; height: 24px; place-items: center; color: var(--accent); background: var(--accent-soft); border-radius: 50%; font-style: normal; }
+.about-principles strong { color: var(--text-strong); font-size: 12px; }
+.about-principles p { margin: 5px 0 0; color: var(--muted); font-size: 10px; line-height: 1.65; }
+.about-stack { display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line); }
+.about-stack > div { display: grid; grid-template-columns: 105px 1fr; align-items: center; gap: 14px; padding: 14px; background: var(--surface-2); }
+.about-stack span { color: var(--muted); font-size: 10px; }
+.about-stack strong { color: var(--text); font: 10px 'IBM Plex Mono'; line-height: 1.6; }
+.about-footnote { margin: 14px 0 0; color: var(--muted); font-size: 10px; line-height: 1.7; }
+.about-boundary { display: flex; align-items: flex-start; gap: 14px; padding: 18px 20px; color: var(--text); background: color-mix(in srgb, var(--gold) 8%, var(--surface)); border: 1px solid color-mix(in srgb, var(--gold) 28%, var(--line)); border-radius: 8px; }
+.about-boundary > span { display: grid; flex: 0 0 28px; height: 28px; place-items: center; color: var(--gold); border: 1px solid var(--gold); border-radius: 50%; font: 600 12px 'IBM Plex Mono'; }
+.about-boundary p { margin: 5px 0 0; color: var(--muted); font-size: 11px; line-height: 1.7; }
+
 .market-layout { display: grid; grid-template-columns: 245px 1fr; gap: 17px; }.market-main { display: flex; flex-direction: column; gap: 17px; }.watch-panel { padding: 15px 12px; }.symbol-search { display: flex; gap: 6px; margin-bottom: 9px; }.symbol-search input { height: 34px; font-size: 10px; }.symbol-search button { color: var(--accent); background: var(--accent-soft); border: 0; border-radius: 3px; font-size: 9px; }
 .watch-list { display: flex; flex-direction: column; gap: 2px; }.watch-list > button { display: flex; justify-content: space-between; align-items: center; padding: 11px 9px; color: var(--text); background: transparent; border: 1px solid transparent; border-radius: 3px; text-align: left; }.watch-list > button:hover, .watch-list > button.active { background: rgba(76,211,181,.055); border-color: rgba(76,211,181,.13); }.watch-list strong, .watch-list small { display: block; }.watch-list strong { font-size: 10px; }.watch-list small { margin-top: 3px; color: #587078; font: 8px 'IBM Plex Mono'; }.watch-list button > div:last-child { text-align: right; }
 .instrument-head { display: flex; align-items: center; gap: 28px; }.instrument-head > div:first-child { min-width: 160px; }.instrument-head h2 { margin-top: 5px; font-size: 17px; }.instrument-price { flex: 1; display: flex; align-items: baseline; gap: 14px; }.instrument-price strong { font: 28px 'IBM Plex Mono'; }.instrument-price span { font: 11px 'IBM Plex Mono'; }.quote-stats { display: grid; grid-template-columns: repeat(6, 1fr); margin-top: 17px; padding-top: 13px; border-top: 1px solid var(--line); }.quote-stats div { padding-left: 15px; border-left: 1px solid var(--line); }.quote-stats div:first-child { padding-left: 0; border: 0; }.quote-stats span, .quote-stats strong { display: block; }.quote-stats span { color: #60767d; font-size: 8px; }.quote-stats strong { margin-top: 4px; font: 10px 'IBM Plex Mono'; }
@@ -387,7 +420,9 @@ td small { font-size: 11px; }
   .market-clock { display: none; }
   .content { padding: 18px; }
   .market-layout, .dashboard-grid, .research-layout, .split-grid, .report-layout,
-  .runs-layout, .backtest-layout, .admin-layout, .financial-search-layout { grid-template-columns: 1fr; }
+  .runs-layout, .backtest-layout, .admin-layout, .financial-search-layout, .about-grid { grid-template-columns: 1fr; }
+  .about-pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .about-pipeline article, .about-pipeline article:last-child { border: 1px solid var(--line); }
   .watch-panel { max-height: 380px; }
   .summary-grid, .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .login-page { grid-template-columns: 1fr; }
@@ -444,6 +479,7 @@ td small { font-size: 11px; }
 .progress-track i.warning { background: var(--gold); }
 .filter-actions, .task-actions { display: flex; align-items: center; gap: 9px; }
 .research-run-list { display: flex; flex-direction: column; gap: 12px; }
+.recent-run-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); align-items: start; }
 .research-run-card { padding: 14px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 9px; }
 .research-run-head, .research-run-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .research-run-head > div { min-width: 0; }
@@ -481,7 +517,11 @@ td small { font-size: 11px; }
   .topbar { min-height: 72px; height: auto; padding: 12px 18px; }
   .content { padding: 18px; }
   .market-layout, .dashboard-grid, .research-layout, .split-grid, .report-layout,
-  .runs-layout, .backtest-layout, .admin-layout, .financial-search-layout { grid-template-columns: 1fr; }
+  .runs-layout, .backtest-layout, .admin-layout, .financial-search-layout, .about-grid { grid-template-columns: 1fr; }
+  .about-hero { grid-template-columns: auto minmax(0, 1fr); }
+  .about-hero aside { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--line); }
+  .about-pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .about-pipeline article, .about-pipeline article:last-child { border: 1px solid var(--line); }
   .summary-grid, .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
@@ -509,12 +549,22 @@ td small { font-size: 11px; }
   .content { padding: 14px 12px 26px; }
   .panel { padding: 15px; }
   .panel-header, .instrument-head, .research-run-head, .research-run-meta, .filter-actions, .task-actions { align-items: flex-start; flex-direction: column; }
+  .research-run-head { flex-direction: row; }
+  .research-run-meta { flex-direction: row; flex-wrap: wrap; }
+  .research-run-card { padding: 12px; }
   .panel-action, .filter-actions, .task-actions, .date-filter { width: 100%; }
   .date-filter input { width: 100%; }
   .market-layout, .dashboard-grid, .research-layout, .split-grid, .report-layout,
   .runs-layout, .backtest-layout, .admin-layout, .financial-search-layout,
   .summary-grid, .metric-grid, .task-meta, .detail-grid, .metrics-board,
-  .backtest-form, .asset-editor, .asset-total-form, .research-budget-grid { grid-template-columns: 1fr; }
+  .backtest-form, .asset-editor, .asset-total-form, .research-budget-grid,
+  .about-grid, .about-pipeline, .about-principles, .about-hero { grid-template-columns: 1fr; }
+  .about-hero { padding: 24px 20px; }
+  .about-mark { width: 58px; height: 58px; font-size: 30px; }
+  .about-hero aside { grid-column: auto; padding: 18px 0 0; border-left: 0; border-top: 1px solid var(--line); }
+  .about-actions { flex-direction: column; }
+  .about-actions a { width: 100%; justify-content: center; }
+  .about-pipeline article, .about-pipeline article:last-child { min-height: auto; border: 1px solid var(--line); }
   .backtest-form .wide, .asset-editor .row-actions { grid-column: auto; }
   .contract-flow { flex-direction: column; align-items: stretch; }
   .contract-flow > i { transform: rotate(90deg); align-self: center; }
