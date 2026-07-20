@@ -97,19 +97,23 @@ def dispatch_exit_advice(
         )
         runtime = ModelConfigurationService().resolve(session)
         model_reference = runtime.manifest_reference() if runtime is not None else None
-    pairs: list[tuple[UserAssetState, dict[str, Any], Decimal]] = []
+    pairs: list[tuple[UserAssetState, dict[str, Any], str, Decimal]] = []
     for state in states:
         for position in state.positions:
+            raw_price_trigger = position.get("exit_trigger_price")
+            if raw_price_trigger:
+                pairs.append((state, position, "PRICE", Decimal(str(raw_price_trigger))))
+                continue
             raw_trigger = position.get("profit_trigger_amount") or state.default_profit_trigger
             if not raw_trigger:
                 continue
-            pairs.append((state, position, Decimal(str(raw_trigger))))
-    symbols = sorted({str(position.get("symbol")) for _, position, _ in pairs})
+            pairs.append((state, position, "PROFIT_AMOUNT", Decimal(str(raw_trigger))))
+    symbols = sorted({str(position.get("symbol")) for _, position, _, _ in pairs})
     if not symbols:
         return {"state": "READY", "queued": []}
     quotes = {item["symbol"]: item for item in get_market_data_service().quotes(symbols)}
     queued: list[str] = []
-    for state, position, trigger in pairs:
+    for state, position, trigger_type, trigger in pairs:
         symbol = str(position.get("symbol"))
         quote = quotes.get(symbol)
         if quote is None or not quote.get("price"):
@@ -118,8 +122,16 @@ def dispatch_exit_advice(
         cost = Decimal(str(position.get("cost", 0)))
         quantity = int(position.get("quantity", 0))
         profit = ((price - cost) * quantity).quantize(Decimal("0.01"))
-        if profit <= trigger:
-            continue
+        trigger_price: Decimal | None = None
+        if trigger_type == "PRICE":
+            trigger_price = trigger
+            if price <= trigger_price:
+                continue
+            equivalent_amount = ((trigger_price - cost) * quantity).quantize(Decimal("0.01"))
+        else:
+            if profit <= trigger:
+                continue
+            equivalent_amount = trigger
         decision_at = _quote_time(quote, current)
         context = _latest_research_context(state.user_id, symbol, decision_at)
         context["model_configuration"] = model_reference
@@ -132,7 +144,9 @@ def dispatch_exit_advice(
                 "decision_at": decision_at,
                 "price": str(price),
                 "profit": str(profit),
-                "trigger": str(trigger),
+                "trigger_type": trigger_type,
+                "trigger_price": str(trigger_price) if trigger_price is not None else None,
+                "trigger_amount": str(equivalent_amount),
                 "position": position_snapshot,
                 "research": context,
                 "prompt_version": PROMPT_VERSION,
@@ -168,7 +182,9 @@ def dispatch_exit_advice(
                 available_at=decision_at,
                 current_price=price,
                 unrealized_profit=profit,
-                trigger_amount=trigger,
+                trigger_amount=equivalent_amount,
+                trigger_type=trigger_type,
+                trigger_price=trigger_price,
                 position_snapshot=position_snapshot,
                 research_context=context,
                 prompt_version=PROMPT_VERSION,

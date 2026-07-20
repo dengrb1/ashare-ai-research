@@ -16,10 +16,24 @@ from ashare_ai.agents.protocols import GenerationMetadata, StructuredGeneration
 
 _CODE_FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", flags=re.DOTALL | re.IGNORECASE)
 _RETRYABLE_STATUS_CODES = frozenset({408, 409, 429, 500, 502, 503, 504})
+_STREAM_RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
 
 
 class OpenAICompatibleError(RuntimeError):
     """Raised when a compatible Responses API cannot produce a valid response."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "MODEL_RESPONSE_ERROR",
+        status_code: int | None = None,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
+        self.retryable = retryable
 
 
 class OpenAICompatibleStructuredLLMClient:
@@ -73,7 +87,7 @@ class OpenAICompatibleStructuredLLMClient:
         self,
         *,
         schema: type[BaseModel],
-        messages: tuple[Mapping[str, str], ...],
+        messages: tuple[Mapping[str, Any], ...],
         idempotency_key: str,
     ) -> StructuredGeneration:
         if not messages:
@@ -153,7 +167,7 @@ class OpenAICompatibleStructuredLLMClient:
     async def stream_text(
         self,
         *,
-        messages: tuple[Mapping[str, str], ...],
+        messages: tuple[Mapping[str, Any], ...],
         idempotency_key: str,
     ) -> AsyncIterator[dict[str, Any]]:
         """Yield normalized Responses API text deltas and a final usage event."""
@@ -167,50 +181,102 @@ class OpenAICompatibleStructuredLLMClient:
         }
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(timeout=self._timeout)
+        attempts = 0
+        emitted_text = False
         try:
-            async with client.stream(
-                "POST",
-                f"{self._base_url}/responses",
-                json=request_body,
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Idempotency-Key": idempotency_key,
-                    "Accept": "text/event-stream",
-                },
-                timeout=self._timeout,
-            ) as response:
-                if response.is_error:
-                    raise OpenAICompatibleError(_http_error_message(response))
-                async for line in response.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    raw = line[5:].strip()
-                    if not raw or raw == "[DONE]":
-                        continue
-                    try:
-                        event = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
-                    event_type = str(event.get("type") or "")
-                    if event_type == "response.output_text.delta":
-                        delta = event.get("delta")
-                        if isinstance(delta, str) and delta:
-                            yield {"type": "delta", "delta": delta}
-                    elif event_type == "response.completed":
-                        completed = event.get("response")
-                        usage = completed.get("usage", {}) if isinstance(completed, dict) else {}
-                        yield {
-                            "type": "completed",
-                            "model": (
-                                str(completed.get("model") or self._model)
-                                if isinstance(completed, dict)
-                                else self._model
-                            ),
-                            "input_tokens": _non_negative_int(usage.get("input_tokens", 0)),
-                            "output_tokens": _non_negative_int(usage.get("output_tokens", 0)),
-                        }
-                    elif event_type in {"response.failed", "error"}:
-                        raise OpenAICompatibleError("Responses API streaming generation failed")
+            while True:
+                try:
+                    completed_received = False
+                    async with client.stream(
+                        "POST",
+                        f"{self._base_url}/responses",
+                        json=request_body,
+                        headers={
+                            "Authorization": f"Bearer {self._api_key}",
+                            "Idempotency-Key": idempotency_key,
+                            "Accept": "text/event-stream",
+                        },
+                        timeout=self._timeout,
+                    ) as response:
+                        if response.status_code in _STREAM_RETRYABLE_STATUS_CODES:
+                            raise _RetryableResponseError(response)
+                        if response.is_error:
+                            raise OpenAICompatibleError(
+                                _http_error_message(response),
+                                code=_status_error_code(response.status_code),
+                                status_code=response.status_code,
+                            )
+                        async for line in response.aiter_lines():
+                            if not line.startswith("data:"):
+                                continue
+                            raw = line[5:].strip()
+                            if not raw or raw == "[DONE]":
+                                continue
+                            try:
+                                event = json.loads(raw)
+                            except json.JSONDecodeError:
+                                continue
+                            event_type = str(event.get("type") or "")
+                            if event_type == "response.output_text.delta":
+                                delta = event.get("delta")
+                                if isinstance(delta, str) and delta:
+                                    emitted_text = True
+                                    yield {"type": "delta", "delta": delta}
+                            elif event_type == "response.completed":
+                                completed_received = True
+                                completed = event.get("response")
+                                usage = (
+                                    completed.get("usage", {})
+                                    if isinstance(completed, dict)
+                                    else {}
+                                )
+                                yield {
+                                    "type": "completed",
+                                    "model": (
+                                        str(completed.get("model") or self._model)
+                                        if isinstance(completed, dict)
+                                        else self._model
+                                    ),
+                                    "input_tokens": _non_negative_int(
+                                        usage.get("input_tokens", 0)
+                                    ),
+                                    "output_tokens": _non_negative_int(
+                                        usage.get("output_tokens", 0)
+                                    ),
+                                }
+                            elif event_type in {"response.failed", "error"}:
+                                raise OpenAICompatibleError(
+                                    "Responses API streaming generation failed",
+                                    code="MODEL_RESPONSE_ERROR",
+                                )
+                    if not completed_received:
+                        raise OpenAICompatibleError(
+                            "Responses API stream ended before response.completed",
+                            code="MODEL_STREAM_INCOMPLETE",
+                            retryable=not emitted_text,
+                        )
+                    return
+                except _RetryableResponseError as exc:
+                    if emitted_text or attempts >= self._max_retries:
+                        raise OpenAICompatibleError(
+                            _http_error_message(exc.response),
+                            code=_status_error_code(exc.response.status_code),
+                            status_code=exc.response.status_code,
+                            retryable=not emitted_text,
+                        ) from exc
+                except httpx.TransportError as exc:
+                    if emitted_text or attempts >= self._max_retries:
+                        raise OpenAICompatibleError(
+                            "Responses API transport failure",
+                            code="MODEL_GATEWAY_UNAVAILABLE",
+                            retryable=not emitted_text,
+                        ) from exc
+                except OpenAICompatibleError as exc:
+                    if emitted_text or not exc.retryable or attempts >= self._max_retries:
+                        raise
+                attempts += 1
+                if self._retry_backoff:
+                    await asyncio.sleep(self._retry_backoff * (2 ** (attempts - 1)))
         finally:
             if owns_client:
                 await client.aclose()
@@ -221,17 +287,58 @@ class _RetryableResponseError(Exception):
         self.response = response
 
 
-def _messages_to_input(messages: Sequence[Mapping[str, str]]) -> list[dict[str, Any]]:
+def _messages_to_input(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     input_messages: list[dict[str, Any]] = []
     for index, message in enumerate(messages):
         role = message.get("role")
         content = message.get("content")
         if not isinstance(role, str) or not role:
             raise ValueError(f"messages[{index}].role must be a non-empty string")
-        if not isinstance(content, str):
-            raise ValueError(f"messages[{index}].content must be a string")
-        input_messages.append({"role": role, "content": [{"type": "input_text", "text": content}]})
+        if isinstance(content, str):
+            part_type = "output_text" if role == "assistant" else "input_text"
+            parts: list[dict[str, Any]] = [{"type": part_type, "text": content}]
+        elif isinstance(content, Sequence) and not isinstance(content, (bytes, bytearray)):
+            parts = []
+            for part_index, raw_part in enumerate(content):
+                if not isinstance(raw_part, Mapping):
+                    raise ValueError(
+                        f"messages[{index}].content[{part_index}] must be an object"
+                    )
+                part = dict(raw_part)
+                raw_part_type = part.get("type")
+                allowed = {"output_text"} if role == "assistant" else {"input_text", "input_image"}
+                if raw_part_type not in allowed:
+                    raise ValueError(
+                        f"messages[{index}].content[{part_index}] has invalid type"
+                    )
+                if raw_part_type in {"input_text", "output_text"} and not isinstance(
+                    part.get("text"), str
+                ):
+                    raise ValueError(
+                        f"messages[{index}].content[{part_index}].text must be a string"
+                    )
+                if raw_part_type == "input_image" and not (
+                    isinstance(part.get("image_url"), str)
+                    or isinstance(part.get("file_id"), str)
+                ):
+                    raise ValueError(
+                        f"messages[{index}].content[{part_index}] requires image_url or file_id"
+                    )
+                parts.append(part)
+        else:
+            raise ValueError(f"messages[{index}].content must be text or a list of parts")
+        input_messages.append({"role": role, "content": parts})
     return input_messages
+
+
+def _status_error_code(status_code: int) -> str:
+    if status_code == 429:
+        return "MODEL_RATE_LIMITED"
+    if status_code == 408:
+        return "MODEL_TIMEOUT"
+    if status_code >= 500:
+        return "MODEL_GATEWAY_UNAVAILABLE"
+    return "MODEL_RESPONSE_ERROR"
 
 
 def _schema_name(schema: type[BaseModel]) -> str:

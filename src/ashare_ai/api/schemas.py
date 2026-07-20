@@ -138,6 +138,9 @@ class PaperPosition(BaseModel):
     profit_trigger_amount: Decimal | None = Field(
         default=None, gt=0, le=Decimal("100000000000")
     )
+    exit_trigger_price: Decimal | None = Field(
+        default=None, gt=0, le=Decimal("10000000")
+    )
 
     @field_validator("symbol", mode="before")
     @classmethod
@@ -216,6 +219,8 @@ class ExitAdviceResponse(_SanitizedErrorResponse):
     current_price: Decimal
     unrealized_profit: Decimal
     trigger_amount: Decimal
+    trigger_type: Literal["PRICE", "PROFIT_AMOUNT"] = "PROFIT_AMOUNT"
+    trigger_price: Decimal | None = None
     position_snapshot: dict[str, Any]
     research_context: dict[str, Any]
     result: dict[str, Any] | None
@@ -233,12 +238,34 @@ class AIChatThreadRequest(BaseModel):
     title: str = Field(default="新对话", min_length=1, max_length=128)
 
 
+class AIChatThreadPatchRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=128)
+    pinned: bool | None = None
+    archived: bool | None = None
+    group_label: str | None = Field(default=None, max_length=128)
+
+
+class AIChatBulkDeleteRequest(BaseModel):
+    thread_ids: list[str] = Field(min_length=1, max_length=100)
+
+
 class AIChatThreadResponse(OrmResponse):
     thread_id: str
     user_id: str
     title: str
+    group_mode: Literal["AUTO", "MANUAL"] = "AUTO"
+    group_type: Literal["GENERAL", "SINGLE", "MULTI"] = "GENERAL"
+    group_label: str | None = None
+    cumulative_mentions: list[dict[str, str]] = Field(default_factory=list)
+    pinned_at: datetime | None = None
+    archived_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class AIChatThreadIndexResponse(BaseModel):
+    items: list[AIChatThreadResponse]
+    next_cursor: str | None = None
 
 
 class AIChatMessageResponse(OrmResponse):
@@ -246,7 +273,16 @@ class AIChatMessageResponse(OrmResponse):
     thread_id: str
     role: Literal["user", "assistant"]
     content: str
+    status: Literal["PENDING", "STREAMING", "COMPLETED", "FAILED", "CANCELLED"] = (
+        "COMPLETED"
+    )
+    trading_date: date
+    decision_at: datetime
+    available_at: datetime
+    parent_message_id: str | None = None
     mentioned_symbols: list[str]
+    mention_refs: list[dict[str, str]] = Field(default_factory=list)
+    attachment_ids: list[str] = Field(default_factory=list)
     model_name: str | None
     reasoning_effort: str | None
     sources: list[dict[str, Any]]
@@ -255,7 +291,24 @@ class AIChatMessageResponse(OrmResponse):
     cache_hit: bool
     input_tokens: int
     output_tokens: int
+    error_code: str | None = None
+    request_id: str | None = None
     created_at: datetime
+
+
+class AIChatMentionRef(BaseModel):
+    symbol: str = Field(pattern=r"^\d{6}\.(SH|SZ|BJ)$")
+    name: str = Field(min_length=1, max_length=64)
+
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def normalize_symbol(cls, value: object) -> object:
+        return value.strip().upper() if isinstance(value, str) else value
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def normalize_name(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
 
 
 class AIChatSendRequest(BaseModel):
@@ -263,6 +316,46 @@ class AIChatSendRequest(BaseModel):
     model: str = Field(min_length=1, max_length=128)
     reasoning_effort: Literal["low", "medium", "high", "xhigh"] = "medium"
     web_search: bool = True
+    attachment_ids: list[str] = Field(default_factory=list, max_length=4)
+    mention_refs: list[AIChatMentionRef] = Field(default_factory=list, max_length=5)
+    decision_at: datetime | None = None
+
+
+class AIChatAttachmentResponse(OrmResponse):
+    attachment_id: str
+    thread_id: str | None
+    mime_type: str
+    byte_size: int
+    width: int
+    height: int
+    uploaded_at: datetime
+    expires_at: datetime
+    deleted_at: datetime | None
+    deletion_reason: str | None
+
+
+class PersonalArchiveExportRequest(BaseModel):
+    passphrase: str = Field(min_length=8, max_length=128)
+
+
+class PersonalArchiveApplyRequest(BaseModel):
+    merge_options: dict[str, Any] = Field(default_factory=dict)
+
+
+class PersonalArchiveJobResponse(OrmResponse):
+    archive_id: str
+    kind: Literal["EXPORT", "IMPORT_PREVIEW", "IMPORT_APPLY"]
+    status: Literal["PENDING", "PROCESSING", "SUCCEEDED", "FAILED", "CANCELLED"]
+    phase: str
+    progress: int = Field(ge=0, le=100)
+    source_archive_id: str | None
+    result: dict[str, Any] | None
+    error_code: str | None
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    expires_at: datetime
+    deleted_at: datetime | None
 
 
 class AIModelOptionsResponse(BaseModel):

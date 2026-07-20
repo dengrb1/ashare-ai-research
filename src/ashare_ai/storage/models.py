@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
     JSON,
@@ -574,6 +575,10 @@ class ExitAdviceRow(Base):
     current_price: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
     unrealized_profit: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
     trigger_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
+    trigger_type: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="PROFIT_AMOUNT"
+    )
+    trigger_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
     position_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     research_context: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     result: Mapped[dict[str, Any] | None] = mapped_column(JSON)
@@ -620,20 +625,43 @@ class AIResponseCacheRow(Base):
 
 class AIChatThread(Base):
     __tablename__ = "ai_chat_threads"
-    __table_args__ = (Index("ix_ai_chat_thread_user_updated", "user_id", "updated_at"),)
+    __table_args__ = (
+        Index("ix_ai_chat_thread_user_updated", "user_id", "updated_at"),
+        Index(
+            "ix_ai_chat_thread_management",
+            "user_id",
+            "archived_at",
+            "pinned_at",
+            "updated_at",
+            "thread_id",
+        ),
+    )
 
     thread_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     user_id: Mapped[str] = mapped_column(
         ForeignKey("user_accounts.user_id", ondelete="CASCADE"), nullable=False, index=True
     )
     title: Mapped[str] = mapped_column(String(128), nullable=False)
+    group_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="AUTO")
+    group_type: Mapped[str] = mapped_column(String(16), nullable=False, default="GENERAL")
+    group_label: Mapped[str | None] = mapped_column(String(128))
+    cumulative_mentions: Mapped[list[dict[str, str]]] = mapped_column(
+        JSON, nullable=False, default=list
+    )
+    pinned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class AIChatMessage(Base):
     __tablename__ = "ai_chat_messages"
-    __table_args__ = (Index("ix_ai_chat_message_thread_created", "thread_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_ai_chat_message_thread_created", "thread_id", "created_at"),
+        UniqueConstraint(
+            "thread_id", "idempotency_key_sha256", name="uq_ai_chat_message_idempotency"
+        ),
+    )
 
     message_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     thread_id: Mapped[str] = mapped_column(
@@ -641,7 +669,26 @@ class AIChatMessage(Base):
     )
     role: Mapped[str] = mapped_column(String(16), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="COMPLETED")
+    trading_date: Mapped[date] = mapped_column(
+        Date,
+        nullable=False,
+        default=lambda: datetime.now(ZoneInfo("Asia/Shanghai")).date(),
+    )
+    decision_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+    parent_message_id: Mapped[str | None] = mapped_column(
+        ForeignKey("ai_chat_messages.message_id", ondelete="SET NULL")
+    )
+    idempotency_key_sha256: Mapped[str | None] = mapped_column(String(64))
+    request_sha256: Mapped[str | None] = mapped_column(String(64))
     mentioned_symbols: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    mention_refs: Mapped[list[dict[str, str]]] = mapped_column(JSON, nullable=False, default=list)
+    attachment_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     model_name: Mapped[str | None] = mapped_column(String(128))
     reasoning_effort: Mapped[str | None] = mapped_column(String(16))
     sources: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
@@ -650,7 +697,74 @@ class AIChatMessage(Base):
     cache_hit: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_code: Mapped[str | None] = mapped_column(String(48))
+    request_id: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AIChatAttachment(Base):
+    """User-isolated encrypted chat image with a fixed seven-day lifetime."""
+
+    __tablename__ = "ai_chat_attachments"
+    __table_args__ = (
+        Index("ix_ai_chat_attachment_expiry", "expires_at", "deleted_at"),
+        Index("ix_ai_chat_attachment_user", "user_id", "uploaded_at"),
+    )
+
+    attachment_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.user_id", ondelete="CASCADE"), nullable=False
+    )
+    thread_id: Mapped[str | None] = mapped_column(
+        ForeignKey("ai_chat_threads.thread_id", ondelete="CASCADE")
+    )
+    mime_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    width: Mapped[int] = mapped_column(Integer, nullable=False)
+    height: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    encrypted_object_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    thumbnail_object_uri: Mapped[str | None] = mapped_column(Text)
+    model_object_uri: Mapped[str | None] = mapped_column(Text)
+    encryption_key_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deletion_reason: Mapped[str | None] = mapped_column(String(32))
+
+
+class PersonalArchiveJob(Base):
+    """Durable user-owned export/import job without plaintext passphrases."""
+
+    __tablename__ = "personal_archive_jobs"
+    __table_args__ = (
+        Index("ix_personal_archive_user_created", "user_id", "created_at"),
+        Index("ix_personal_archive_expiry", "expires_at", "deleted_at"),
+    )
+
+    archive_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.user_id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    phase: Mapped[str] = mapped_column(String(32), nullable=False)
+    progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    encrypted_secret: Mapped[str | None] = mapped_column(Text)
+    source_object_uri: Mapped[str | None] = mapped_column(Text)
+    output_object_uri: Mapped[str | None] = mapped_column(Text)
+    output_sha256: Mapped[str | None] = mapped_column(String(64))
+    source_archive_id: Mapped[str | None] = mapped_column(
+        ForeignKey("personal_archive_jobs.archive_id", ondelete="SET NULL")
+    )
+    merge_options: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    error_code: Mapped[str | None] = mapped_column(String(48))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AuditEvent(Base):

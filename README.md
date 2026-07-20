@@ -223,8 +223,17 @@ docker compose -p ashare-ai -f compose.yaml -f compose.ghcr.yaml up -d
 - `GET /api/v1/exit-advice/{advice_id}`
 - `GET /api/v1/ai/models`
 - `GET|POST /api/v1/ai/chat/threads`
+- `GET /api/v1/ai/chat/thread-index`
+- `PATCH|DELETE /api/v1/ai/chat/threads/{thread_id}`
+- `POST /api/v1/ai/chat/threads:bulk-delete`
 - `GET /api/v1/ai/chat/threads/{thread_id}/messages`
 - `POST /api/v1/ai/chat/threads/{thread_id}/messages:stream`
+- `POST /api/v1/ai/chat/attachments`
+- `GET /api/v1/ai/chat/attachments/{attachment_id}/content`
+- `POST|GET|DELETE /api/v1/me/data-exports[/{export_id}]`
+- `GET /api/v1/me/data-exports/{export_id}/download`
+- `POST|GET /api/v1/me/data-imports[/{import_id}]`
+- `POST /api/v1/me/data-imports/{import_id}/apply`
 - `GET|POST /api/v1/admin/users`
 - `PATCH /api/v1/admin/users/{user_id}`
 - `GET /api/v1/market/quotes?symbols=600000.SH,000001.SZ`
@@ -349,6 +358,8 @@ Demo 数据必须同时显式设置 `CANONICAL_BUNDLE_MODE=demo` 和 `ALLOW_DEMO
 模型可分别设置。启用新版本前必须通过严格 JSON Schema 连通性探测，失败时旧版本继续
 生效。每次日研会把配置 ID、版本和哈希固定到 Manifest，排队或运行中的任务不会跟随
 后续热切换。未启用模型配置时仍可使用确定性的内置 Agent 完成合规验收。
+
+AI 股票问答支持用股票名称 `@`提及、置顶/分组/归档/搜索/批量删除、幂等 SSE 重放和 PNG/JPEG/WebP/非动画 GIF。图片按用户隔离加密，自上传成功起固定保留 7 天，到期瞬间停止读取并由 Worker 物理清理。当前用户可在“个人档案”页导出加密完整档案，或上传后先预览、再分类合并；任何图片和账户凭据均不进入档案。格式详见 [`docs/PERSONAL_ARCHIVE.md`](docs/PERSONAL_ARCHIVE.md)。
 AKShare 每个证券列表、股票历史或基准历史逻辑请求默认执行两轮受限尝试，每轮依次访问东方财富和新浪；空响应、连接中断、超时和 JSON 解码失败均会触发备用源或下一轮。可通过 `AKSHARE_FETCH_MAX_ATTEMPTS=2` 和 `AKSHARE_FETCH_BACKOFF_SECONDS=1` 调整轮数与轮间退避。单个非必需股票失败会脱敏记录并跳过，但有效标的仍不得少于 15；证券列表或基准在全部尝试后失败时任务安全终止，不会使用前一日缓存或不完整数据冒充当日快照。
 新闻风险按来源可信度分层：巨潮等官方来源可产生 HIGH/CRITICAL，免费媒体重大负面最多为
 MEDIUM，不能单独硬阻断；跨源新闻按标题、日期和内容哈希去重。评分只使用

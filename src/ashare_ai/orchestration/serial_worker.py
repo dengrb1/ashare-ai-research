@@ -8,10 +8,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from ashare_ai.agents.attachments import AttachmentService
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.time import SHANGHAI
 from ashare_ai.orchestration.redis_queue import RedisLeasedQueue
 from ashare_ai.orchestration.runner import seconds_until_next_tick
+from ashare_ai.storage.database import SessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +27,11 @@ class QueueSpec:
 
 QUEUE_SPECS = (
     QueueSpec("exit-review", "ashare:exit-advice:pending", "ashare:exit-advice:processing"),
+    QueueSpec(
+        "personal-archive",
+        "ashare:personal-archive:pending",
+        "ashare:personal-archive:processing",
+    ),
     QueueSpec("research", "ashare:research:pending", "ashare:research:processing"),
     QueueSpec("trade-plan", "ashare:trade-plan:pending", "ashare:trade-plan:processing"),
     QueueSpec("backtest", "ashare:backtest:pending", "ashare:backtest:processing"),
@@ -62,9 +69,21 @@ def run_loop(*, max_iterations: int | None = None) -> None:
     client = redis.Redis.from_url(get_settings().redis_url, decode_responses=True)
     queues = build_queues(client)
     next_schedule_check = 0.0
+    next_attachment_cleanup = 0.0
     iterations = 0
     while max_iterations is None or iterations < max_iterations:
         now_monotonic = time.monotonic()
+        if now_monotonic >= next_attachment_cleanup:
+            with SessionLocal() as session:
+                deleted = AttachmentService(session).cleanup_expired()
+            from ashare_ai.orchestration.personal_archive_jobs import cleanup_expired_archives
+
+            expired_archives = cleanup_expired_archives()
+            if deleted:
+                logger.info("purged %s expired chat attachments", deleted)
+            if expired_archives:
+                logger.info("purged %s expired personal archives", expired_archives)
+            next_attachment_cleanup = now_monotonic + 300
         if now_monotonic >= next_schedule_check:
             return_code = execute_isolated("schedule", "tick")
             if return_code:

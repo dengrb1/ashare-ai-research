@@ -25,12 +25,14 @@ def test_cli_migrate_bootstraps_empty_database_at_alembic_head(tmp_path, monkeyp
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar()
-            assert revision == "0012_api_idempotency_keys"
+            assert revision == "0014_chat_message_pit"
             assert {
                 "exit_advice",
                 "ai_response_cache",
                 "ai_chat_threads",
                 "ai_chat_messages",
+                "ai_chat_attachments",
+                "personal_archive_jobs",
             } <= tables
         finally:
             engine.dispose()

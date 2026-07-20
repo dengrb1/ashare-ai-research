@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { api } from '../api'
+import { api, streamAIChat } from '../api'
 import { resolvePublishedResearchRun } from '../researchRuns'
 
 function jsonResponse(body: unknown, status = 200) {
@@ -147,5 +147,63 @@ describe('API security and market adapters', () => {
     expect(init?.method).toBe('PUT')
     expect(new Headers(init?.headers).get('X-CSRF-Token')).toBe('csrf-value')
     expect(String(init?.body)).toContain('600000.SH')
+  })
+
+  it('uploads chat images without JSON encoding and applies imports idempotently', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse({ archive_id: 'apply-1', kind: 'IMPORT_APPLY', status: 'PENDING', phase: 'QUEUED', progress: 0, created_at: '2026-07-20T00:00:00Z', expires_at: '2026-07-21T00:00:00Z' }, 202))
+    const image = new File(['png'], 'chart.png', { type: 'image/png' })
+
+    await api.uploadAIChatAttachments([image], 'thread-1')
+    await api.applyPersonalImport('preview-1', { total_assets: 'CURRENT' }, 'stable-apply-key')
+
+    const upload = vi.mocked(fetch).mock.calls[0]
+    expect(upload[1]?.body).toBeInstanceOf(FormData)
+    expect(new Headers(upload[1]?.headers).get('Content-Type')).toBeNull()
+    expect(new Headers(upload[1]?.headers).get('X-CSRF-Token')).toBe('csrf-value')
+    const apply = vi.mocked(fetch).mock.calls[1]
+    expect(new Headers(apply[1]?.headers).get('Idempotency-Key')).toBe('stable-apply-key')
+    expect(String(apply[1]?.body)).toContain('total_assets')
+  })
+
+  it('retries chat before the first delta with the same idempotency key', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response('', { status: 503 }))
+      .mockResolvedValueOnce(new Response(
+        'data: {"type":"delta","delta":"ok"}\n\ndata: {"type":"done","status":"COMPLETED"}\n\n',
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+      ))
+    const events: Array<Record<string, unknown>> = []
+
+    await streamAIChat(
+      'thread-1',
+      { content: 'hello', model: 'gpt-test', reasoning_effort: 'medium', web_search: false },
+      (event) => events.push(event),
+      undefined,
+      'stable-chat-key',
+    )
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(fetch).mock.calls.map((call) => new Headers(call[1]?.headers).get('Idempotency-Key'))).toEqual([
+      'stable-chat-key', 'stable-chat-key',
+    ])
+    expect(events.at(-1)?.type).toBe('done')
+  })
+
+  it('rejects a chat stream that ends after partial text without done', async () => {
+    vi.mocked(fetch).mockResolvedValue(new Response(
+      'data: {"type":"delta","delta":"partial"}\n\n',
+      { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+    ))
+
+    await expect(streamAIChat(
+      'thread-1',
+      { content: 'hello', model: 'gpt-test', reasoning_effort: 'medium', web_search: false },
+      () => undefined,
+      undefined,
+      'partial-chat-key',
+    )).rejects.toMatchObject({ code: 'CHAT_STREAM_INCOMPLETE' })
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1)
   })
 })
