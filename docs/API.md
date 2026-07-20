@@ -4,7 +4,7 @@
 基础路径：`/api/v1`  
 契约来源：`src/ashare_ai/api/app.py`、`src/ashare_ai/api/schemas.py` 及 `src/ashare_ai/search/service.py`
 
-本文档描述当前代码实际注册的公开 HTTP API。当前 OpenAPI 中有 48 个操作；另外保留了 5 个不在 OpenAPI 展示的兼容别名。接口只用于收盘后研究、评分、报告、回测和模拟组合，不执行真实下单。
+本文档描述当前代码实际注册的公开 HTTP API。当前 OpenAPI 中有 55 个操作；另外保留了 5 个不在 OpenAPI 展示的兼容别名。接口只用于研究、评分、报告、回测和模拟组合，不执行真实下单。
 
 ## 1. 基本约定
 
@@ -113,6 +113,12 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 认证 | GET | `/api/v1/auth/me` | 登录 |
 | App 初始化 | GET | `/api/v1/app/bootstrap` | 登录 |
 | 用户资产 | GET/PUT | `/api/v1/assets` | 登录/写入 |
+| 卖出建议 | GET | `/api/v1/exit-advice` | 登录 |
+| 卖出建议 | GET | `/api/v1/exit-advice/{advice_id}` | 登录 |
+| AI 对话 | GET | `/api/v1/ai/models` | 登录 |
+| AI 对话 | GET/POST | `/api/v1/ai/chat/threads` | 登录/写入 |
+| AI 对话 | GET | `/api/v1/ai/chat/threads/{thread_id}/messages` | 登录 |
+| AI 对话 | POST | `/api/v1/ai/chat/threads/{thread_id}/messages:stream` | 写入、SSE |
 | 用户管理 | GET/POST | `/api/v1/admin/users` | 管理员 |
 | 用户管理 | PATCH | `/api/v1/admin/users/{user_id}` | 管理员 |
 | 用户管理 | POST | `/api/v1/admin/users/{user_id}/password` | 管理员 |
@@ -212,6 +218,8 @@ Web 登录。请求体为 `LoginRequest`：
 | `quantity` | integer | 1–1,000,000,000 |
 | `cost` | number | 大于 0，最多 10,000,000 |
 | `target_weight` | number/null | 0–1；兼容旧客户端，当前持仓权重由市值和总资产派生 |
+| `acquired_on` | date/null | 买入日期；缺失时 AI 可研究但模拟卖出数量被 T+1 门禁阻断 |
+| `profit_trigger_amount` | decimal/null | 个股人民币浮盈触发金额，优先于全局值 |
 
 `AssetStateRequest`：
 
@@ -220,6 +228,8 @@ Web 登录。请求体为 `LoginRequest`：
 | `watchlist` | string[] | 最多 100 个，不重复 |
 | `positions` | PaperPosition[] | 最多 15 个，代码不重复 |
 | `total_assets` | number/null | 省略时保留原值；传 `null` 可清空，传值必须大于 0且不超过 1,000,000,000,000 |
+| `exit_monitor_enabled` | boolean | 是否启用交易时段每 5 分钟盈利监控 |
+| `default_profit_trigger` | decimal/null | 全局人民币浮盈触发金额；启用监控时应提供 |
 
 `AssetStateResponse` 在此基础上增加 `updated_at`；`GET /assets` 返回当前用户数据，`PUT /assets` 整体替换当前用户自选股、模拟持仓和可选总资产。
 
@@ -246,7 +256,17 @@ Web 登录。请求体为 `LoginRequest`：
 
 `portfolio_target_count` 从版本化策略配置读取，不应由客户端写入或覆盖。
 
-### 5.2 研究、运行和回测
+### 5.2 卖出建议与 AI 对话
+
+盈利监控按 `(最新价 - 成本价) × 持股数` 计算，严格大于个股或全局触发金额才提交研究。同一用户、股票和交易日内，仅当价格相对上次建议变化至少 3%、持仓变化或正式评分变化时重新调用 AI；完全相同的模型、提示版本和上下文输入复用用户隔离的持久缓存。
+
+`ExitAdviceResponse.result` 包含 `action=HOLD|REDUCE|SELL`、`summary`、`confidence`、`sell_ladder[]`、`stop_loss_price`、`risks`、`sellable_quantity`、`execution_blockers` 和 `paper_trade_only=true`。每档包含 `target_price`、`quantity`、`estimated_gross_proceeds`、`reason` 与 `status`。缺少买入日期、T+1 未满足、证券主数据或带生效日期交易规则不可用时，档位状态为阻断，不得据此修改模拟持仓。
+
+AI 对话线程和消息均按当前用户保存。发送请求为 `AIChatSendRequest`：`content`、`model`、`reasoning_effort=low|medium|high|xhigh`、`web_search`。`model` 只能选择当前管理员配置中的搜索模型或研究模型。消息中的 `@六位代码[.交易所]`，以及已保存持仓名称，会附加当前用户可见的持仓、最新行情、近 30 根日 K 和最近正式评分；`web_search=true` 时通过配置的 SearXNG 获取最多 5 条来源摘要。
+
+流式接口使用 `text/event-stream`，事件依次为 `meta`、多个 `delta`、`done`，失败时为 `error`。Nginx 缓冲通过 `X-Accel-Buffering: no` 禁用；客户端必须处理断线且不得把 Cookie、Bearer token 或完整敏感持仓写入日志。
+
+### 5.3 研究、运行和回测
 
 `RunResponse`：
 
@@ -647,4 +667,3 @@ curl -sS "$BASE_URL/api/v1/search/financial?q=%E8%B4%B5%E5%B7%9E%E8%8C%85%E5%8F%
 - OpenAPI JSON：`GET /openapi.json`。
 
 生产环境会关闭这些公共入口；客户端契约应以本文件和版本化代码为准。
-

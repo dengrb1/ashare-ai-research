@@ -45,6 +45,8 @@ describe('market range and chunk planning', () => {
     })
     const latest = getKlineChunkWindow('1m', plan)!
     const earlier = getKlineChunkWindow('1m', plan, latest.start)!
+    expect(latest.key).toBe('latest')
+    expect(earlier.key).not.toBe('latest')
     expect(Date.parse(earlier.end)).toBe(Date.parse(latest.start))
     expect(Date.parse(earlier.start)).toBeGreaterThanOrEqual(plan.startMs)
     expect(getKlineChunkWindow('day', plan)?.start).toBe(new Date(plan.startMs).toISOString())

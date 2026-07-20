@@ -13,8 +13,10 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.responses import StreamingResponse
 
 from ashare_ai import __version__
+from ashare_ai.agents.chat import allow_chat_request, stream_chat_response
 from ashare_ai.agents.model_settings import (
     ModelConfigurationService,
     ModelSettingsDraft,
@@ -42,6 +44,11 @@ from ashare_ai.api.schemas import (
     MAX_RESEARCH_SYMBOLS,
     MAX_TRADE_PLAN_SYMBOLS,
     MAX_WATCHLIST_SYMBOLS,
+    AIChatMessageResponse,
+    AIChatSendRequest,
+    AIChatThreadRequest,
+    AIChatThreadResponse,
+    AIModelOptionsResponse,
     AppBootstrapResponse,
     AppCapabilitiesResponse,
     AssetStateRequest,
@@ -50,6 +57,7 @@ from ashare_ai.api.schemas import (
     BacktestRequest,
     BacktestResponse,
     CandidateResponse,
+    ExitAdviceResponse,
     HealthResponse,
     KlineResponse,
     LoginRequest,
@@ -113,9 +121,12 @@ from ashare_ai.search.service import (
 )
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import (
+    AIChatMessage,
+    AIChatThread,
     AuditEvent,
     BacktestRun,
     CandidateRow,
+    ExitAdviceRow,
     JobRun,
     PortfolioRow,
     ReportRow,
@@ -472,6 +483,9 @@ def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
                 "trade_plan_generation": True,
                 "research_cancellation": True,
                 "paper_portfolio_only": True,
+                "profit_exit_monitor": True,
+                "persistent_ai_chat": True,
+                "searxng_web_research": True,
             },
             endpoints={
                 "assets": "/api/v1/assets",
@@ -480,6 +494,8 @@ def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
                 "report_symbols": "/api/v1/reports/{report_id}/symbols",
                 "report_trade_plans": "/api/v1/reports/{report_id}/trade-plans",
                 "trade_plan": "/api/v1/trade-plans/{plan_id}",
+                "exit_advice": "/api/v1/exit-advice",
+                "ai_chat_threads": "/api/v1/ai/chat/threads",
             },
         ),
     )
@@ -489,13 +505,182 @@ def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
 def update_asset_state(
     payload: AssetStateRequest, db: DbSession, context: Writer
 ) -> AssetStateResponse:
-    state = UserAssetService(db).save(
+    service = UserAssetService(db)
+    previous = service.get(context.user.user_id)
+    state = service.save(
         context.user.user_id,
         payload.watchlist,
         [position.model_dump(mode="json", exclude_none=True) for position in payload.positions],
         payload.total_assets if "total_assets" in payload.model_fields_set else UNSET_TOTAL_ASSETS,
+        (
+            bool(payload.exit_monitor_enabled)
+            if "exit_monitor_enabled" in payload.model_fields_set
+            else bool(previous.get("exit_monitor_enabled", False))
+        ),
+        (
+            float(payload.default_profit_trigger)
+            if "default_profit_trigger" in payload.model_fields_set
+            and payload.default_profit_trigger is not None
+            else (
+                None
+                if "default_profit_trigger" in payload.model_fields_set
+                else previous.get("default_profit_trigger")
+            )
+        ),
     )
     return AssetStateResponse.model_validate(state)
+
+
+@app.get("/api/v1/exit-advice", response_model=list[ExitAdviceResponse])
+def exit_advice_list(
+    db: DbSession,
+    context: Current,
+    limit: int = Query(default=20, ge=1, le=100),
+    before: datetime | None = None,
+) -> list[ExitAdviceResponse]:
+    statement = select(ExitAdviceRow).where(ExitAdviceRow.user_id == context.user.user_id)
+    if before is not None:
+        statement = statement.where(ExitAdviceRow.created_at < before)
+    rows = db.scalars(statement.order_by(ExitAdviceRow.created_at.desc()).limit(limit)).all()
+    return [ExitAdviceResponse.model_validate(row) for row in rows]
+
+
+@app.get("/api/v1/exit-advice/{advice_id}", response_model=ExitAdviceResponse)
+def exit_advice_detail(advice_id: str, db: DbSession, context: Current) -> ExitAdviceResponse:
+    row = db.scalar(
+        select(ExitAdviceRow).where(
+            ExitAdviceRow.advice_id == advice_id,
+            ExitAdviceRow.user_id == context.user.user_id,
+        )
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="exit advice not found")
+    return ExitAdviceResponse.model_validate(row)
+
+
+@app.get("/api/v1/ai/models", response_model=AIModelOptionsResponse)
+def ai_model_options(db: DbSession, _: Current) -> AIModelOptionsResponse:
+    runtime = ModelConfigurationService().resolve(db)
+    models = (
+        []
+        if runtime is None
+        else list(dict.fromkeys((runtime.search_model, runtime.research_model)))
+    )
+    return AIModelOptionsResponse(
+        models=models,
+        reasoning_efforts=["low", "medium", "high", "xhigh"],
+        web_search_available=bool(get_settings().searxng_base_url),
+    )
+
+
+@app.get("/api/v1/ai/chat/threads", response_model=list[AIChatThreadResponse])
+def ai_chat_threads(
+    db: DbSession,
+    context: Current,
+    limit: int = Query(default=30, ge=1, le=100),
+    before: datetime | None = None,
+) -> list[AIChatThreadResponse]:
+    statement = select(AIChatThread).where(AIChatThread.user_id == context.user.user_id)
+    if before is not None:
+        statement = statement.where(AIChatThread.updated_at < before)
+    rows = db.scalars(statement.order_by(AIChatThread.updated_at.desc()).limit(limit)).all()
+    return [AIChatThreadResponse.model_validate(row) for row in rows]
+
+
+@app.post(
+    "/api/v1/ai/chat/threads",
+    response_model=AIChatThreadResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_ai_chat_thread(
+    payload: AIChatThreadRequest, db: DbSession, context: Writer
+) -> AIChatThreadResponse:
+    now = datetime.now(UTC)
+    row = AIChatThread(
+        user_id=context.user.user_id,
+        title=payload.title.strip(),
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return AIChatThreadResponse.model_validate(row)
+
+
+@app.get(
+    "/api/v1/ai/chat/threads/{thread_id}/messages",
+    response_model=list[AIChatMessageResponse],
+)
+def ai_chat_messages(
+    thread_id: str,
+    db: DbSession,
+    context: Current,
+    limit: int = Query(default=100, ge=1, le=200),
+    before: datetime | None = None,
+) -> list[AIChatMessageResponse]:
+    owned = db.scalar(
+        select(AIChatThread.thread_id).where(
+            AIChatThread.thread_id == thread_id,
+            AIChatThread.user_id == context.user.user_id,
+        )
+    )
+    if owned is None:
+        raise HTTPException(status_code=404, detail="AI chat thread not found")
+    statement = select(AIChatMessage).where(AIChatMessage.thread_id == thread_id)
+    if before is not None:
+        statement = statement.where(AIChatMessage.created_at < before)
+    rows = list(
+        db.scalars(statement.order_by(AIChatMessage.created_at.desc()).limit(limit)).all()
+    )[::-1]
+    return [AIChatMessageResponse.model_validate(row) for row in rows]
+
+
+@app.post("/api/v1/ai/chat/threads/{thread_id}/messages:stream")
+def stream_ai_chat_message(
+    thread_id: str,
+    payload: AIChatSendRequest,
+    db: DbSession,
+    context: Writer,
+) -> StreamingResponse:
+    owned = db.scalar(
+        select(AIChatThread.thread_id).where(
+            AIChatThread.thread_id == thread_id,
+            AIChatThread.user_id == context.user.user_id,
+        )
+    )
+    if owned is None:
+        raise HTTPException(status_code=404, detail="AI chat thread not found")
+    if not allow_chat_request(context.user.user_id):
+        raise HTTPException(
+            status_code=429,
+            detail="AI chat rate limit exceeded",
+            headers={"Retry-After": "60"},
+        )
+
+    async def events() -> AsyncIterator[str]:
+        try:
+            async for event in stream_chat_response(
+                user_id=context.user.user_id,
+                thread_id=thread_id,
+                content=payload.content,
+                model=payload.model,
+                reasoning_effort=payload.reasoning_effort,
+                web_search=payload.web_search,
+            ):
+                yield f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except ValueError as exc:
+            event = {"type": "error", "message": str(exc)}
+            yield f"event: error\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception:
+            event = {"type": "error", "message": "AI 对话生成失败"}
+            yield f"event: error\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
 
 
 def _list_users(db: Session, context: AuthContext) -> list[UserResponse]:

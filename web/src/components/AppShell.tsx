@@ -13,6 +13,8 @@ const NAV = [
   { to: '/assets', label: '自选与持仓', icon: '◇' },
   { group: '研究中心' },
   { to: '/research', label: '每日研究', icon: '✦' },
+  { to: '/exit-advice', label: '卖出建议', icon: '⇲' },
+  { to: '/ai-chat', label: 'AI 股票问答', icon: '◌' },
   { to: '/candidates', label: '候选池', icon: '◎' },
   { to: '/portfolio', label: '模拟组合', icon: '▥' },
   { to: '/reports', label: '研究报告', icon: '▤' },
@@ -29,6 +31,8 @@ const TITLES: Record<string, [string, string]> = {
   '/search': ['金融数据搜索', 'AI 解析意图 · 确定性数据源返回金融事实'],
   '/assets': ['自选与持仓', '关注列表与个人持仓记录'],
   '/research': ['每日研究', '基于冻结快照的可复现异步研究'],
+  '/exit-advice': ['卖出建议', '盘中盈利触发 · AI 分档退出研究 · 模拟交易门禁'],
+  '/ai-chat': ['AI 股票问答', '@股票读取系统数据 · SearXNG 联网 · 流式持久对话'],
   '/candidates': ['候选池', '确定性公式评分与风险过滤结果'],
   '/portfolio': ['模拟组合', '组合权重、行业约束与调仓建议'],
   '/reports': ['研究报告', '研究结论与可追溯证据摘要'],
@@ -52,6 +56,7 @@ export function AppShell() {
   const isAdmin = user?.role?.toLowerCase() === 'admin'
   const { available, busy, refresh } = useRefreshControl()
   const [menuOpen, setMenuOpen] = useState(false)
+  const [clock, setClock] = useState(() => new Date())
   const menuButton = useRef<HTMLButtonElement>(null)
   const navigation = useRef<HTMLElement>(null)
 
@@ -77,6 +82,16 @@ export function AppShell() {
 
   useEffect(() => { setMenuOpen(false) }, [location.pathname])
 
+  useEffect(() => {
+    const timer = window.setInterval(() => setClock(new Date()), 30_000)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  const shanghaiClock = clock.toLocaleString('zh-CN', {
+    timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', weekday: 'short',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  })
+
   return <div className="app-shell">
     <button className={`nav-overlay ${menuOpen ? 'visible' : ''}`} aria-label="关闭导航菜单" tabIndex={menuOpen ? 0 : -1} onClick={() => closeMenu()} />
     <aside className={`sidebar ${menuOpen ? 'open' : ''}`} aria-label="主导航">
@@ -100,7 +115,7 @@ export function AppShell() {
         <div className="top-actions">
           <button className="refresh-button" onClick={() => void refresh()} disabled={!available || busy} title="刷新当前页面">{busy ? '刷新中' : '↻ 刷新'}</button>
           <ThemeToggle compact />
-          <div className="market-clock"><span>沪深交易时段</span><strong>{new Date().toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit', weekday: 'short' })}</strong></div>
+          <div className="market-clock"><span>上海时间</span><strong>{shanghaiClock}</strong></div>
           <div className="user-menu"><span>{user?.username.slice(0, 1).toUpperCase()}</span><div><strong>{user?.username}</strong><small>{isAdmin ? '管理员' : '研究员'}</small></div><button onClick={() => void logout()} title="退出登录">退出</button></div>
         </div>
       </header>

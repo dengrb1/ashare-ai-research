@@ -123,6 +123,10 @@ class PaperPosition(BaseModel):
     # Kept for saved records and older API clients.  Manual holdings now derive
     # their current weight from market value and the account total instead.
     target_weight: float | None = Field(default=None, ge=0, le=1)
+    acquired_on: date | None = None
+    profit_trigger_amount: Decimal | None = Field(
+        default=None, gt=0, le=Decimal("100000000000")
+    )
 
     @field_validator("symbol", mode="before")
     @classmethod
@@ -139,6 +143,10 @@ class AssetStateRequest(BaseModel):
     watchlist: list[str] = Field(max_length=MAX_WATCHLIST_SYMBOLS)
     positions: list[PaperPosition] = Field(max_length=15)
     total_assets: float | None = Field(default=None, gt=0, le=1_000_000_000_000)
+    exit_monitor_enabled: bool | None = None
+    default_profit_trigger: Decimal | None = Field(
+        default=None, gt=0, le=Decimal("100000000000")
+    )
 
     @field_validator("watchlist", mode="before")
     @classmethod
@@ -172,7 +180,77 @@ class AssetStateResponse(BaseModel):
     watchlist: list[str]
     positions: list[PaperPosition]
     total_assets: float | None = None
+    exit_monitor_enabled: bool = False
+    default_profit_trigger: Decimal | None = None
     updated_at: datetime | None = None
+
+
+class ExitAdviceResponse(OrmResponse):
+    advice_id: str
+    user_id: str
+    symbol: str
+    status: str
+    action: str | None
+    decision_at: datetime
+    available_at: datetime
+    current_price: Decimal
+    unrealized_profit: Decimal
+    trigger_amount: Decimal
+    position_snapshot: dict[str, Any]
+    research_context: dict[str, Any]
+    result: dict[str, Any] | None
+    model_name: str | None
+    reasoning_effort: str | None
+    prompt_version: str
+    input_hash: str
+    response_sha256: str | None
+    cache_hit: bool
+    error_message: str | None
+    created_at: datetime
+    completed_at: datetime | None
+
+
+class AIChatThreadRequest(BaseModel):
+    title: str = Field(default="新对话", min_length=1, max_length=128)
+
+
+class AIChatThreadResponse(OrmResponse):
+    thread_id: str
+    user_id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class AIChatMessageResponse(OrmResponse):
+    message_id: str
+    thread_id: str
+    role: Literal["user", "assistant"]
+    content: str
+    mentioned_symbols: list[str]
+    model_name: str | None
+    reasoning_effort: str | None
+    sources: list[dict[str, Any]]
+    context_sha256: str | None
+    response_sha256: str | None
+    cache_hit: bool
+    input_tokens: int
+    output_tokens: int
+    created_at: datetime
+
+
+class AIChatSendRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=8000)
+    model: str = Field(min_length=1, max_length=128)
+    reasoning_effort: Literal["low", "medium", "high", "xhigh"] = "medium"
+    web_search: bool = True
+
+
+class AIModelOptionsResponse(BaseModel):
+    models: list[str]
+    reasoning_efforts: list[Literal["low", "medium", "high", "xhigh"]]
+    web_search_available: bool
+    cache_enabled: bool = True
 
 
 class AppCapabilitiesResponse(BaseModel):

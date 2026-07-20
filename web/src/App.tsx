@@ -16,6 +16,8 @@ import { AdminPage } from './pages/AdminPage'
 import { FinancialSearchPage } from './pages/FinancialSearchPage'
 import { ModelSettingsPage } from './pages/ModelSettingsPage'
 import { AboutPage } from './pages/AboutPage'
+import { ExitAdvicePage } from './pages/ExitAdvicePage'
+import { AIChatPage } from './pages/AIChatPage'
 import { ThemeProvider } from './context/ThemeContext'
 import { RefreshProvider } from './context/RefreshContext'
 
@@ -37,6 +39,8 @@ function AppRoutes() {
         <Route path="search" element={<FinancialSearchPage />} />
         <Route path="assets" element={<AssetsPage />} />
         <Route path="research" element={<ResearchPage />} />
+        <Route path="exit-advice" element={<ExitAdvicePage />} />
+        <Route path="ai-chat" element={<AIChatPage />} />
         <Route path="candidates" element={<CandidatesPage />} />
         <Route path="portfolio" element={<PortfolioPage />} />
         <Route path="reports" element={<ReportsPage />} />

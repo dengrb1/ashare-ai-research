@@ -7,6 +7,8 @@ import { getKlineChunkWindow, getKlineRangePlan, klineCoverage, KLINE_PERIODS, K
 import type { KlineRange } from '../types'
 
 const CHUNK_LIMIT = 1200
+const DAILY_REFRESH_MS = 5 * 60 * 1000
+const INTRADAY_REFRESH_MS = 30 * 1000
 
 export function MarketPage() {
   const { watchlist, quotes, addWatch, removeWatch, source, delayed, updatedAt, refresh, getKline, loadKline } = useMarket()
@@ -20,10 +22,11 @@ export function MarketPage() {
   const [noMoreEarlier, setNoMoreEarlier] = useState(false)
   const [coverageMessage, setCoverageMessage] = useState('')
   const [error, setError] = useState('')
+  const [rangeClock, setRangeClock] = useState(() => Date.now())
   useQuoteSubscription([symbol])
   const quote = quotes[symbol]
   const isWatched = watchlist.includes(symbol)
-  const plan = useMemo(() => getKlineRangePlan(range), [range])
+  const plan = useMemo(() => getKlineRangePlan(range, new Date(rangeClock)), [range, rangeClock])
   const bars = useMemo(() => trimBarsToRange(entry?.bars || [], plan), [entry?.bars, plan])
   const coverage = useMemo(() => klineCoverage(plan, entry?.requestedStart, bars), [bars, entry?.requestedStart, plan])
   const initialChunk = useMemo(() => getKlineChunkWindow(period, plan), [period, plan])
@@ -51,6 +54,24 @@ export function MarketPage() {
     }
   }, [initialChunk, loadWindow, refresh])
   usePageRefresh(forceRefresh)
+
+  useEffect(() => {
+    const refreshClock = () => setRangeClock(Date.now())
+    const interval = window.setInterval(
+      refreshClock,
+      period === 'day' ? DAILY_REFRESH_MS : INTRADAY_REFRESH_MS,
+    )
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') refreshClock()
+    }
+    window.addEventListener('focus', refreshClock)
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+    return () => {
+      window.clearInterval(interval)
+      window.removeEventListener('focus', refreshClock)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+    }
+  }, [period])
 
   useEffect(() => {
     let active = true
@@ -176,7 +197,7 @@ export function MarketPage() {
           <div><span>采样周期</span><div className="period-tabs">{KLINE_PERIODS.map((item) => <button key={item.value} className={period === item.value ? 'active' : ''} onClick={() => setPeriod(item.value)}>{item.label}</button>)}</div></div>
           <div><span>查看区间</span><div className="period-tabs range-tabs">{KLINE_RANGES.map((item) => <button key={item.value} className={range === item.value ? 'active' : ''} onClick={() => setRange(item.value)}>{item.label}</button>)}</div></div>
         </div>
-        <div className="data-meta"><span><i className={(entry?.status?.delayed ?? delayed) ? 'warn' : ''} />{entry?.status?.source || source}{(entry?.status?.delayed ?? delayed) ? ' · 非实时缓存' : ' · 实时'}</span><span>后复权</span><span>采集 {entry?.status?.collected_at || updatedAt ? new Date(entry?.status?.collected_at || updatedAt!).toLocaleTimeString('zh-CN', { hour12: false }) : '—'}</span></div>
+        <div className="data-meta"><span><i className={(entry?.status?.delayed ?? delayed) ? 'warn' : ''} />{entry?.status?.source || source}{(entry?.status?.delayed ?? delayed) ? ' · 非实时缓存' : ' · 实时'}</span><span>后复权</span><span>采集 {entry?.status?.collected_at || updatedAt ? new Date(entry?.status?.collected_at || updatedAt!).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '—'}</span></div>
         <div className="coverage-status">
           <div><span>目标区间</span><strong>{plan.label}{plan.tradingDays ? `（${plan.tradingDays} 个有数据交易日）` : `（${targetDates}）`}</strong></div>
           <div><span>已加载区间</span><strong>{loadedRangeLabel(bars, period)}</strong></div>

@@ -7,9 +7,9 @@ from typing import Any
 
 def load_handler(kind: str) -> Callable[[str], Any]:
     if kind == "schedule":
-        from ashare_ai.orchestration.research_schedule import dispatch_auto_research
+        from ashare_ai.orchestration.runner import dispatch_scheduled_tasks
 
-        return lambda _job_id: dispatch_auto_research()
+        return lambda _job_id: dispatch_scheduled_tasks()
     if kind == "research":
         from ashare_ai.orchestration.research_jobs import run_research_job
 
@@ -22,12 +22,18 @@ def load_handler(kind: str) -> Callable[[str], Any]:
         from ashare_ai.orchestration.backtest_jobs import run_backtest_job
 
         return run_backtest_job
+    if kind == "exit-review":
+        from ashare_ai.orchestration.exit_advice_jobs import run_exit_advice_job
+
+        return run_exit_advice_job
     raise ValueError(f"unsupported job kind: {kind}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Execute one leased background job")
-    parser.add_argument("kind", choices=("schedule", "research", "trade-plan", "backtest"))
+    parser.add_argument(
+        "kind", choices=("schedule", "research", "trade-plan", "backtest", "exit-review")
+    )
     parser.add_argument("job_id")
     arguments = parser.parse_args()
     load_handler(arguments.kind)(arguments.job_id)

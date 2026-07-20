@@ -79,9 +79,12 @@ def test_native_bearer_refresh_rotation_revoke_expiry_and_disable() -> None:
             "formal_watchlist_reports": True,
             "report_symbol_eligibility": True,
             "trade_plan_generation": True,
-            "research_cancellation": True,
-            "paper_portfolio_only": True,
-        }
+                "research_cancellation": True,
+                "paper_portfolio_only": True,
+                "profit_exit_monitor": True,
+                "persistent_ai_chat": True,
+                "searxng_web_research": True,
+            }
         assert bootstrap_body["capabilities"]["endpoints"]["report_symbols"] == (
             "/api/v1/reports/{report_id}/symbols"
         )

@@ -59,6 +59,7 @@ def test_local_and_docker_environment_templates_are_separated() -> None:
     assert "OBJECT_STORE_ENDPOINT=\n" in local
     assert "${POSTGRES_PASSWORD}@postgres:5432/ashare" in docker
     assert "redis://:${REDIS_PASSWORD}@redis:6379/0" in docker
+    assert "APP_ENV=" not in docker
     assert "OBJECT_STORE_ENDPOINT=\n" in docker
     assert "AGENT_BACKEND=" not in docker
     assert "LLM_BASE_URL=" not in docker

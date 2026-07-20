@@ -145,11 +145,11 @@ export function ResearchPage() {
   const maxPrice = positiveNumber(maxStockPrice)
   const targetCount = settings?.portfolio_target_count || 15
   return <div className="research-layout">
-    <Panel title="自动每日研究" eyebrow="PER-USER SCHEDULE">
-      <div className="snapshot-callout"><span>{settings?.auto_enabled ? '●' : '○'}</span><div><strong>{settings?.auto_enabled ? '已开启' : '默认关闭'}</strong><p>开启后仅在上海交易日 15:05 起检查收盘数据；未就绪时每 5 分钟重试，最长 2 小时。自动任务固定使用全市场、总资金 100 万元、单股 8 万元。</p></div></div>
+    <Panel title="自动每日研究" eyebrow="PER-USER SCHEDULE" className="full-span auto-research-panel">
+      <div className="auto-research-summary"><span>{settings?.auto_enabled ? '●' : '○'}</span><div><strong>{settings?.auto_enabled ? '已开启' : '默认关闭'} · 15:00 收盘，15:05 开始检查</strong><p>仅在上海交易日运行；数据未就绪时每 5 分钟重试，最长 2 小时。固定使用全市场、总资金 100 万元、单股 8 万元。</p></div></div>
       <button className={settings?.auto_enabled ? 'secondary' : 'primary'} disabled={!settings || settingsSaving} onClick={() => void toggleAutoResearch()}>{settingsSaving ? '正在保存…' : settings?.auto_enabled ? '关闭自动日研' : '开启自动日研'}</button>
     </Panel>
-    <Panel title="发起每日研究" eyebrow="NEW RESEARCH RUN">
+    <Panel title="发起每日研究" eyebrow="NEW RESEARCH RUN" className="full-span">
       <div className="run-form research-run-form">
         <label>交易日<input type="date" value={date} max={today()} onChange={(event) => setDate(event.target.value)} /></label>
         <label>研究范围<select value={scope} onChange={(event) => setScope(event.target.value as ResearchScope)}><option value="MARKET">动态市场股票池</option><option value="WATCHLIST">我的自选与持仓</option><option value="CUSTOM">手工指定股票</option></select></label>
@@ -180,7 +180,7 @@ export function ResearchPage() {
         <button className="primary large" onClick={() => void submit()} disabled={submitting}>{submitting ? '正在提交…' : '启动每日研究'}<span>→</span></button>
         {submittedRun && <div className="success-box" role="status"><strong>{submittedRun.reused ? '已复用进行中的研究任务' : '研究任务已提交'}</strong><p>运行 ID：{submittedRun.run_id} · 实际交易日：{submittedRun.trading_date || date} · 状态：{submittedRun.status}</p></div>}
         <ErrorNotice message={error} />
-        <p className="form-hint">当日 AKShare 研究默认在 15:05 收盘后开放；完全相同的研究范围与预算会复用已有进行中任务。</p>
+        <p className="form-hint">沪深 A 股正常交易日 15:00 收盘；系统等待收盘数据完整后，于 15:05 开放当日研究。完全相同的研究范围与预算会复用已有进行中任务。</p>
       </div>
     </Panel>
     <Panel title="跨日期活动任务" eyebrow="MY ACTIVE RUNS" className="full-span">

@@ -68,6 +68,18 @@ function SegmentedKlineProbe() {
   </>
 }
 
+function RevalidatingSegmentProbe() {
+  const { loadKline } = useMarket()
+  const [result, setResult] = React.useState('')
+  const load = async () => {
+    const entry = await loadKline('600519.SH', '1m', {
+      range: '1d', start: '2026-07-20T01:30:00Z', end: '2026-07-20T07:30:00Z', chunk: 'latest', limit: 1200,
+    })
+    setResult(String(entry.bars.at(-1)?.close || ''))
+  }
+  return <><button onClick={() => void load()}>加载最新分段</button><span data-testid="revalidated-close">{result}</span></>
+}
+
 describe('theme system', () => {
   beforeEach(() => {
     localStorage.clear()
@@ -242,5 +254,37 @@ describe('market prefetch and client cache', () => {
     const klineUrls = mockFetch.mock.calls.filter(([url]) => String(url).includes('/market/klines/')).map(([url]) => String(url))
     expect(klineUrls).toHaveLength(3)
     expect(klineUrls[2]).toContain('refresh=true')
+  })
+
+  it('revalidates an expired latest range chunk instead of serving it forever', async () => {
+    const baseNow = Date.now()
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(baseNow)
+    let klineCalls = 0
+    const mockFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/assets')) return jsonResponse({ watchlist: [], positions: [] })
+      if (url.includes('/market/klines/')) {
+        klineCalls += 1
+        return jsonResponse({
+          symbol: '600519.SH', period: '1m', adjustment: 'hfq',
+          bars: [{ timestamp: '2026-07-20T07:00:00Z', open: 10, high: 10, low: 10, close: klineCalls, volume: 1 }],
+          status: { source: 'fixture', collected_at: '2026-07-20T07:30:00Z', cached_at: '2026-07-20T07:30:00Z', delayed: false },
+        })
+      }
+      throw new Error(`unexpected request ${url}`)
+    })
+    vi.stubGlobal('fetch', mockFetch)
+    render(<MarketProvider><RevalidatingSegmentProbe /></MarketProvider>)
+
+    await userEvent.click(screen.getByRole('button', { name: '加载最新分段' }))
+    expect(await screen.findByTestId('revalidated-close')).toHaveTextContent('1')
+    await userEvent.click(screen.getByRole('button', { name: '加载最新分段' }))
+    expect(klineCalls).toBe(1)
+
+    clock.mockReturnValue(baseNow + 31_000)
+    await userEvent.click(screen.getByRole('button', { name: '加载最新分段' }))
+    expect(await screen.findByTestId('revalidated-close')).toHaveTextContent('2')
+    expect(klineCalls).toBe(2)
+    clock.mockRestore()
   })
 })

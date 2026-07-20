@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import suppress
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from functools import lru_cache
 from importlib import import_module
 from typing import Any, ClassVar, Protocol, cast
@@ -70,6 +71,100 @@ def _timestamp(value: Any) -> datetime:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=SHANGHAI)
     return parsed
+
+
+def _intraday_series_is_stale(
+    bars: list[dict[str, Any]], period: str, requested_end: datetime | None, now: datetime
+) -> bool:
+    if not bars:
+        return False
+    current = now.astimezone(SHANGHAI)
+    end = _timestamp(requested_end).astimezone(SHANGHAI) if requested_end else current
+    clock = current.time().replace(tzinfo=None)
+    market_open = datetime.min.time().replace(hour=9, minute=30)
+    morning_close = datetime.min.time().replace(hour=11, minute=30)
+    afternoon_open = datetime.min.time().replace(hour=13)
+    market_close = datetime.min.time().replace(hour=15)
+    if end.date() != current.date() or current.weekday() >= 5:
+        return False
+    latest = max(_timestamp(item["timestamp"]) for item in bars).astimezone(SHANGHAI)
+    if period == "daily":
+        daily_ready = datetime.min.time().replace(hour=15, minute=5)
+        return clock >= daily_ready and latest.date() < current.date()
+    if clock < market_open:
+        return False
+    grace = timedelta(minutes=max(5, int(period) * 2))
+    if clock <= morning_close:
+        expected = current
+    elif clock < afternoon_open:
+        expected = current.replace(hour=11, minute=30, second=0, microsecond=0)
+    elif clock <= market_close:
+        expected = current
+    else:
+        expected = current.replace(hour=15, minute=0, second=0, microsecond=0)
+    return latest.date() < current.date() or latest < expected - grace
+
+
+def _merge_adjusted_intraday(
+    hfq_bars: list[dict[str, Any]], raw_bars: list[dict[str, Any]], limit: int
+) -> list[dict[str, Any]] | None:
+    hfq_by_time = {str(item.get("timestamp")): item for item in hfq_bars}
+    overlap = next(
+        (
+            (hfq_by_time[str(item.get("timestamp"))], item)
+            for item in reversed(raw_bars)
+            if str(item.get("timestamp")) in hfq_by_time and float(item.get("close") or 0) > 0
+        ),
+        None,
+    )
+    if overlap is None:
+        return None
+    factor = Decimal(str(overlap[0]["close"])) / Decimal(str(overlap[1]["close"]))
+    merged = {str(item["timestamp"]): dict(item) for item in hfq_bars}
+    for raw in raw_bars:
+        adjusted = dict(raw)
+        for field in ("open", "high", "low", "close"):
+            adjusted[field] = float(
+                (Decimal(str(raw[field])) * factor).quantize(Decimal("0.000001"))
+            )
+        merged[str(adjusted["timestamp"])] = adjusted
+    return sorted(merged.values(), key=lambda item: str(item["timestamp"]))[-limit:]
+
+
+def _append_adjusted_daily_quote(
+    hfq_bars: list[dict[str, Any]], quote: dict[str, Any], now: datetime, limit: int
+) -> list[dict[str, Any]] | None:
+    trading_at = quote.get("_trading_at")
+    if not hfq_bars or trading_at is None:
+        return None
+    quote_time = _timestamp(trading_at).astimezone(SHANGHAI)
+    current = now.astimezone(SHANGHAI)
+    if quote_time.date() != current.date():
+        return None
+    previous_close = _number(quote.get("previous_close"))
+    if previous_close is None or previous_close <= 0:
+        return None
+    prior = max(hfq_bars, key=lambda item: _timestamp(item["timestamp"]))
+    factor = Decimal(str(prior["close"])) / Decimal(str(previous_close))
+    adjusted: dict[str, Any] = {
+        "timestamp": current.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),
+        "volume": _number(quote.get("volume")) or 0.0,
+        "amount": _number(quote.get("amount")),
+        "turnover_rate": None,
+    }
+    for target, source in (
+        ("open", "open"),
+        ("high", "high"),
+        ("low", "low"),
+        ("close", "price"),
+    ):
+        raw = _number(quote.get(source))
+        if raw is None:
+            return None
+        adjusted[target] = float((Decimal(str(raw)) * factor).quantize(Decimal("0.000001")))
+    merged = {str(item["timestamp"]): dict(item) for item in hfq_bars}
+    merged[str(adjusted["timestamp"])] = adjusted
+    return sorted(merged.values(), key=lambda item: str(item["timestamp"]))[-limit:]
 
 
 class AKShareMarketProvider:
@@ -228,6 +323,9 @@ class SinaMarketProvider:
                     "previous_close": previous_close,
                     "volume": _number(fields[8]),
                     "amount": _number(fields[9]),
+                    "_trading_at": (
+                        f"{fields[30]}T{fields[31]}+08:00" if len(fields) > 31 else None
+                    ),
                 }
             )
         return rows
@@ -767,6 +865,8 @@ class MarketDataService:
                         return cast(dict[str, Any], shared["value"])
                     time.sleep(0.05)
             errors: list[str] = []
+            stale_primary_bars: list[dict[str, Any]] | None = None
+            stale_candidate: tuple[MarketProvider, list[dict[str, Any]]] | None = None
             try:
                 for provider in (self.primary, *self.fallbacks):
                     try:
@@ -776,6 +876,23 @@ class MarketDataService:
                         )
                         if not bars:
                             raise RuntimeError("provider returned no bars")
+                        source = provider.source
+                        status_message = None
+                        if _intraday_series_is_stale(bars, provider_period, end, collected):
+                            if stale_candidate is None or _timestamp(
+                                bars[-1]["timestamp"]
+                            ) > _timestamp(stale_candidate[1][-1]["timestamp"]):
+                                stale_candidate = (provider, bars)
+                            if provider is self.primary:
+                                stale_primary_bars = bars
+                            raise RuntimeError("provider returned a stale K-line series")
+                        if stale_primary_bars is not None and provider_period != "daily":
+                            merged = _merge_adjusted_intraday(stale_primary_bars, bars, limit)
+                            if merged is None:
+                                raise RuntimeError("fallback cannot be aligned to the hfq series")
+                            bars = merged
+                            source = f"{self.primary.source}+{provider.source}"
+                            status_message = "主数据源分钟线滞后，已用实时备用源对齐补齐"
                         cached_at = self.clock()
                         value = {
                             "symbol": normalized,
@@ -785,13 +902,14 @@ class MarketDataService:
                             "adjustment": "hfq",
                             "bars": bars,
                             "status": self._status(
-                                provider.source,
+                                source,
                                 collected.isoformat(),
                                 cached_at.isoformat(),
                                 delayed=(
                                     provider is not self.primary
                                     and getattr(provider, "delayed", True)
                                 ),
+                                message=status_message,
                             ),
                         }
                         cache_seconds = (
@@ -810,6 +928,72 @@ class MarketDataService:
                         return value
                     except Exception as exc:
                         errors.append(f"{provider.source}: {exc}")
+                if provider_period == "daily" and stale_candidate is not None:
+                    quote_provider = next(
+                        (
+                            provider
+                            for provider in self.fallbacks
+                            if isinstance(provider, SinaMarketProvider)
+                        ),
+                        None,
+                    )
+                    if quote_provider is not None:
+                        try:
+                            quote_rows = self._call(quote_provider.quotes, [normalized])
+                            merged = _append_adjusted_daily_quote(
+                                stale_candidate[1], quote_rows[0], self.clock(), limit
+                            )
+                            if merged is not None:
+                                cached_at = self.clock()
+                                value = {
+                                    "symbol": normalized,
+                                    "period": "day",
+                                    "adjustment": "hfq",
+                                    "bars": merged,
+                                    "status": self._status(
+                                        f"{stale_candidate[0].source}+{quote_provider.source}",
+                                        cached_at.isoformat(),
+                                        cached_at.isoformat(),
+                                        delayed=False,
+                                        message="历史后复权日线滞后，已用当日收盘行情对齐补齐",
+                                    ),
+                                }
+                                self._set(
+                                    key,
+                                    {
+                                        "cached_at": cached_at.isoformat(),
+                                        "cache_seconds": self.settings.market_kline_cache_seconds,
+                                        "value": value,
+                                    },
+                                )
+                                return value
+                        except Exception as exc:
+                            errors.append(f"daily close alignment: {exc}")
+                stale_bars = stale_primary_bars or (
+                    stale_candidate[1] if stale_candidate is not None else None
+                )
+                stale_source = (
+                    self.primary.source
+                    if stale_primary_bars is not None
+                    else stale_candidate[0].source
+                    if stale_candidate is not None
+                    else self.primary.source
+                )
+                if stale_bars is not None:
+                    fallback_at = self.clock()
+                    return {
+                        "symbol": normalized,
+                        "period": "day" if provider_period == "daily" else f"{provider_period}m",
+                        "adjustment": "hfq",
+                        "bars": stale_bars,
+                        "status": self._status(
+                            stale_source,
+                            fallback_at.isoformat(),
+                            fallback_at.isoformat(),
+                            delayed=True,
+                            message="K 线最新数据停留在上一交易日，实时备用源不可用",
+                        ),
+                    }
                 if cached is not None and self._usable_stale(cached, now):
                     value = dict(cached["value"])
                     value["status"] = {

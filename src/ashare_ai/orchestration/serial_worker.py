@@ -24,6 +24,7 @@ class QueueSpec:
 
 
 QUEUE_SPECS = (
+    QueueSpec("exit-review", "ashare:exit-advice:pending", "ashare:exit-advice:processing"),
     QueueSpec("research", "ashare:research:pending", "ashare:research:processing"),
     QueueSpec("trade-plan", "ashare:trade-plan:pending", "ashare:trade-plan:processing"),
     QueueSpec("backtest", "ashare:backtest:pending", "ashare:backtest:processing"),

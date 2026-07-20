@@ -27,6 +27,8 @@ interface MarketValue {
   watchlist: string[]
   positions: PaperPosition[]
   totalAssets: number | null
+  exitMonitorEnabled: boolean
+  defaultProfitTrigger: number | null
   assetsLoading: boolean
   assetsSaving: boolean
   delayed: boolean
@@ -40,6 +42,7 @@ interface MarketValue {
   upsertPosition: (position: PaperPosition, previousSymbol?: string) => Promise<void>
   removePosition: (symbol: string) => Promise<void>
   saveTotalAssets: (totalAssets: number | null) => Promise<void>
+  saveExitSettings: (enabled: boolean, amount: number | null) => Promise<void>
   subscribe: (symbols: string[]) => () => void
   refresh: (force?: boolean) => Promise<void>
   prefetch: () => Promise<void>
@@ -80,6 +83,8 @@ export function MarketProvider({ children }: { children: ReactNode }) {
   const [watchlist, setWatchlist] = useState<string[]>([])
   const [positions, setPositions] = useState<PaperPosition[]>([])
   const [totalAssets, setTotalAssets] = useState<number | null>(null)
+  const [exitMonitorEnabled, setExitMonitorEnabled] = useState(false)
+  const [defaultProfitTrigger, setDefaultProfitTrigger] = useState<number | null>(null)
   const [assetsLoading, setAssetsLoading] = useState(true)
   const [assetsSaving, setAssetsSaving] = useState(false)
   const [quotes, setQuotes] = useState<Record<string, Quote>>({})
@@ -102,6 +107,8 @@ export function MarketProvider({ children }: { children: ReactNode }) {
       setWatchlist(state.watchlist || [])
       setPositions(state.positions || [])
       setTotalAssets(state.total_assets ?? null)
+      setExitMonitorEnabled(Boolean(state.exit_monitor_enabled))
+      setDefaultProfitTrigger(state.default_profit_trigger == null ? null : Number(state.default_profit_trigger))
     }).catch((error) => {
       if (!active) return
       setMeta((current) => ({ ...current, error: error instanceof Error ? error.message : '自选与持仓加载失败' }))
@@ -187,17 +194,19 @@ export function MarketProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const saveAssets = useCallback(async (nextWatchlist: string[], nextPositions: PaperPosition[], nextTotalAssets = totalAssets) => {
+  const saveAssets = useCallback(async (nextWatchlist: string[], nextPositions: PaperPosition[], nextTotalAssets = totalAssets, nextExitEnabled = exitMonitorEnabled, nextProfitTrigger = defaultProfitTrigger) => {
     try {
-      const saved = await api.saveAssets({ watchlist: nextWatchlist, positions: nextPositions, total_assets: nextTotalAssets })
+      const saved = await api.saveAssets({ watchlist: nextWatchlist, positions: nextPositions, total_assets: nextTotalAssets, exit_monitor_enabled: nextExitEnabled, default_profit_trigger: nextProfitTrigger })
       setWatchlist(saved.watchlist)
       setPositions(saved.positions)
       setTotalAssets(saved.total_assets ?? null)
+      setExitMonitorEnabled(Boolean(saved.exit_monitor_enabled))
+      setDefaultProfitTrigger(saved.default_profit_trigger == null ? null : Number(saved.default_profit_trigger))
     } catch (error) {
       setMeta((current) => ({ ...current, error: error instanceof Error ? error.message : '自选与持仓保存失败' }))
       throw error
     }
-  }, [totalAssets])
+  }, [defaultProfitTrigger, exitMonitorEnabled, totalAssets])
 
   const beginAssetMutation = useCallback(() => {
     if (assetMutation.current) throw new Error('自选与持仓正在保存，请稍候')
@@ -261,6 +270,14 @@ export function MarketProvider({ children }: { children: ReactNode }) {
     try { await saveAssets(watchlist, positions, nextTotalAssets) } catch (error) { setTotalAssets(totalAssets); throw error } finally { endAssetMutation() }
   }, [beginAssetMutation, endAssetMutation, positions, saveAssets, totalAssets, watchlist])
 
+  const saveExitSettings = useCallback(async (enabled: boolean, amount: number | null) => {
+    beginAssetMutation(); const previousEnabled = exitMonitorEnabled; const previousAmount = defaultProfitTrigger
+    setExitMonitorEnabled(enabled); setDefaultProfitTrigger(amount)
+    try { await saveAssets(watchlist, positions, totalAssets, enabled, amount) }
+    catch (error) { setExitMonitorEnabled(previousEnabled); setDefaultProfitTrigger(previousAmount); throw error }
+    finally { endAssetMutation() }
+  }, [beginAssetMutation, defaultProfitTrigger, endAssetMutation, exitMonitorEnabled, positions, saveAssets, totalAssets, watchlist])
+
   const getKline = useCallback((symbol: string, period: string, request: number | { range: KlineRange } = 160) => {
     const entry = typeof request === 'number'
       ? klineCache.current.get(klineKey(symbol, period, request))
@@ -300,7 +317,9 @@ export function MarketProvider({ children }: { children: ReactNode }) {
         klineSeriesCache.current.set(seriesKey, entry)
         return entry
       }
-      if (!request.refresh && cachedChunk) return mergeChunk(cachedChunk)
+      const cachedChunkIsFresh = cachedChunk
+        && Date.now() - cachedChunk.fetchedAt < cacheLifetime(period)
+      if (!request.refresh && cachedChunkIsFresh) return mergeChunk(cachedChunk)
       const existing = klineInflight.current.get(chunkKey)
       if (existing) return existing
       const work = api.kline(normalized, period, limit, request).then((payload) => {
@@ -372,7 +391,7 @@ export function MarketProvider({ children }: { children: ReactNode }) {
     return work
   }, [])
 
-  const value = useMemo(() => ({ quotes, watchlist, positions, totalAssets, assetsLoading, assetsSaving, ...meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, subscribe, refresh, prefetch, getKline, loadKline }), [quotes, watchlist, positions, totalAssets, assetsLoading, assetsSaving, meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, subscribe, refresh, prefetch, getKline, loadKline])
+  const value = useMemo(() => ({ quotes, watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, assetsLoading, assetsSaving, ...meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings, subscribe, refresh, prefetch, getKline, loadKline }), [quotes, watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, assetsLoading, assetsSaving, meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings, subscribe, refresh, prefetch, getKline, loadKline])
   return <MarketContext.Provider value={value}>{children}</MarketContext.Provider>
 }
 

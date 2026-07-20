@@ -1,4 +1,4 @@
-import type { AssetState, AuditEvent, Candidate, DataEnvelope, FinancialSearchResult, FinancialSearchStatus, KlineBar, KlineQueryOptions, MarketPrefetchResponse, ModelSettings, ModelSettingsDraft, Portfolio, Quote, Report, ReportSymbol, ResearchSettings, ResearchSubmission, Run, Score, Snapshot, TokenPair, TradePlan, User } from './types'
+import type { AIChatMessage, AIChatThread, AssetState, AuditEvent, Candidate, DataEnvelope, ExitAdvice, FinancialSearchResult, FinancialSearchStatus, KlineBar, KlineQueryOptions, MarketPrefetchResponse, ModelSettings, ModelSettingsDraft, Portfolio, Quote, Report, ReportSymbol, ResearchSettings, ResearchSubmission, Run, Score, Snapshot, TokenPair, TradePlan, User } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api/v1').replace(/\/$/, '')
 
@@ -65,6 +65,11 @@ export const api = {
   me: () => request<User>('/auth/me'),
   assets: () => request<AssetState>('/assets'),
   saveAssets: (payload: AssetState) => request<AssetState>('/assets', { method: 'PUT', body: JSON.stringify(payload) }),
+  exitAdvice: (limit = 30) => request<ExitAdvice[]>(`/exit-advice${params({ limit })}`),
+  aiModels: () => request<{ models: string[]; reasoning_efforts: string[]; web_search_available: boolean; cache_enabled: boolean }>('/ai/models'),
+  aiChatThreads: () => request<AIChatThread[]>('/ai/chat/threads'),
+  createAIChatThread: (title = '新对话') => request<AIChatThread>('/ai/chat/threads', { method: 'POST', body: JSON.stringify({ title }) }),
+  aiChatMessages: (threadId: string) => request<AIChatMessage[]>(`/ai/chat/threads/${encodeURIComponent(threadId)}/messages`),
 
   quotes: async (symbols: string[], refresh = false) => {
     const rows = await request<Array<Quote & { change_percent?: number; previous_close?: number }>>(`/market/quotes${params({ symbols: symbols.join(','), refresh: refresh ? 'true' : undefined })}`)
@@ -152,6 +157,38 @@ export const api = {
   testModelSettings: (payload: ModelSettingsDraft) => request<{ reachable: boolean; message: string; model: string; checked_at: string }>('/admin/model-settings/test', { method: 'POST', body: JSON.stringify(payload) }),
   saveModelSettings: (payload: ModelSettingsDraft) => request<ModelSettings>('/admin/model-settings', { method: 'PUT', body: JSON.stringify(payload) }),
   listModels: (payload: ModelSettingsDraft) => request<{ models: string[] }>('/admin/model-settings/models', { method: 'POST', body: JSON.stringify(payload) }),
+}
+
+export async function streamAIChat(
+  threadId: string,
+  payload: { content: string; model: string; reasoning_effort: string; web_search: boolean },
+  onEvent: (event: Record<string, unknown>) => void,
+  signal?: AbortSignal,
+) {
+  const headers = new Headers({ 'Content-Type': 'application/json' })
+  const token = csrfToken()
+  if (token) { headers.set('X-CSRF-Token', token); headers.set('X-CSRFToken', token) }
+  const response = await fetch(`${API_BASE}/ai/chat/threads/${encodeURIComponent(threadId)}/messages:stream`, {
+    method: 'POST', headers, body: JSON.stringify(payload), credentials: 'include', signal,
+  })
+  if (!response.ok || !response.body) throw new ApiError(response.status, `AI 对话请求失败 (${response.status})`)
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { value, done } = await reader.read()
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done })
+    const blocks = buffer.split('\n\n')
+    buffer = blocks.pop() || ''
+    for (const block of blocks) {
+      const data = block.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('\n')
+      if (!data) continue
+      const event = JSON.parse(data) as Record<string, unknown>
+      onEvent(event)
+      if (event.type === 'error') throw new Error(String(event.message || 'AI 对话生成失败'))
+    }
+    if (done) break
+  }
 }
 
 export function unwrapList<T>(payload: T[] | { items?: T[]; data?: T[] }) {

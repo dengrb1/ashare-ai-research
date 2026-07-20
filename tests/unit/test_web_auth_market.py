@@ -15,7 +15,11 @@ from ashare_ai.api.app import app
 from ashare_ai.api.auth import hash_password
 from ashare_ai.api.dependencies import get_db
 from ashare_ai.core.config import Settings
-from ashare_ai.market.service import MarketDataService
+from ashare_ai.market.service import (
+    MarketDataService,
+    SinaMarketProvider,
+    _intraday_series_is_stale,
+)
 from ashare_ai.storage.models import (
     BacktestRun,
     Base,
@@ -23,6 +27,77 @@ from ashare_ai.storage.models import (
     SnapshotManifestRow,
     UserAccount,
 )
+
+
+def test_kline_staleness_is_checked_after_close_and_respects_lunch_break() -> None:
+    previous_close = [
+        {
+            "timestamp": "2026-07-17T15:00:00+08:00",
+            "open": 10,
+            "high": 10,
+            "low": 10,
+            "close": 10,
+            "volume": 1,
+        }
+    ]
+    monday_after_close = datetime(2026, 7, 20, 7, 28, tzinfo=UTC)
+    assert _intraday_series_is_stale(previous_close, "5", None, monday_after_close)
+    assert _intraday_series_is_stale(previous_close, "daily", None, monday_after_close)
+
+    lunch_bar = [{**previous_close[0], "timestamp": "2026-07-20T11:30:00+08:00"}]
+    monday_lunch = datetime(2026, 7, 20, 4, 30, tzinfo=UTC)
+    assert not _intraday_series_is_stale(lunch_bar, "5", None, monday_lunch)
+
+
+def test_lagging_hfq_daily_series_is_completed_from_current_sina_close() -> None:
+    class LaggingSina(SinaMarketProvider):
+        source = "lagging"
+
+        def klines(self, symbol, period, start, end, limit):
+            del symbol, period, start, end, limit
+            return [
+                {
+                    "timestamp": "2026-07-17T00:00:00+08:00",
+                    "open": 18,
+                    "high": 21,
+                    "low": 17,
+                    "close": 20,
+                    "volume": 100,
+                    "amount": 2000,
+                }
+            ]
+
+        def quotes(self, symbols):
+            del symbols
+            return [
+                {
+                    "symbol": "600519.SH",
+                    "price": 12,
+                    "open": 11,
+                    "high": 13,
+                    "low": 10,
+                    "previous_close": 10,
+                    "volume": 200,
+                    "amount": 2400,
+                    "_trading_at": "2026-07-20T15:00:00+08:00",
+                }
+            ]
+
+    current = datetime(2026, 7, 20, 7, 28, tzinfo=UTC)
+    service = MarketDataService(
+        primary=FailingProvider(),
+        fallback=LaggingSina(),
+        settings=Settings(market_timeout_seconds=1),
+        clock=lambda: current,
+        redis_client=None,
+    )
+
+    result = service.klines("600519.SH", "day", limit=30)
+
+    assert result["bars"][-1]["timestamp"] == "2026-07-20T00:00:00+08:00"
+    assert result["bars"][-1]["close"] == 24
+    assert result["status"]["source"] == "lagging+lagging"
+    assert result["status"]["delayed"] is False
 
 
 class QuoteProvider:
@@ -600,7 +675,10 @@ def test_default_free_fallback_recovers_quotes_and_klines(monkeypatch) -> None:
         market_timeout_seconds=1,
     )
     service = MarketDataService(
-        primary=FailingProvider(), settings=settings, redis_client=None
+        primary=FailingProvider(),
+        settings=settings,
+        clock=lambda: datetime(2026, 7, 16, 1, 35, tzinfo=UTC),
+        redis_client=None,
     )
 
     quote = service.quotes(["600519.SH"])[0]
@@ -655,11 +733,13 @@ def test_kline_refresh_is_single_flight_across_service_instances() -> None:
     first_service = MarketDataService(
         primary=provider,
         settings=settings,
+        clock=lambda: datetime(2026, 7, 15, 1, tzinfo=UTC),
         redis_client=shared,
     )
     second_service = MarketDataService(
         primary=provider,
         settings=settings,
+        clock=lambda: datetime(2026, 7, 15, 1, tzinfo=UTC),
         redis_client=shared,
     )
     with ThreadPoolExecutor(max_workers=2) as pool:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from time import perf_counter
 from typing import Any
 
@@ -146,6 +146,71 @@ class OpenAICompatibleStructuredLLMClient:
                 attempts += 1
                 if self._retry_backoff:
                     await asyncio.sleep(self._retry_backoff * (2 ** (attempts - 1)))
+        finally:
+            if owns_client:
+                await client.aclose()
+
+    async def stream_text(
+        self,
+        *,
+        messages: tuple[Mapping[str, str], ...],
+        idempotency_key: str,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Yield normalized Responses API text deltas and a final usage event."""
+        if not messages or not idempotency_key:
+            raise ValueError("messages and idempotency_key are required")
+        request_body = {
+            "model": self._model,
+            "input": _messages_to_input(messages),
+            "reasoning": {"effort": self._reasoning_effort},
+            "stream": True,
+        }
+        owns_client = self._client is None
+        client = self._client or httpx.AsyncClient(timeout=self._timeout)
+        try:
+            async with client.stream(
+                "POST",
+                f"{self._base_url}/responses",
+                json=request_body,
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Idempotency-Key": idempotency_key,
+                    "Accept": "text/event-stream",
+                },
+                timeout=self._timeout,
+            ) as response:
+                if response.is_error:
+                    raise OpenAICompatibleError(_http_error_message(response))
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    raw = line[5:].strip()
+                    if not raw or raw == "[DONE]":
+                        continue
+                    try:
+                        event = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    event_type = str(event.get("type") or "")
+                    if event_type == "response.output_text.delta":
+                        delta = event.get("delta")
+                        if isinstance(delta, str) and delta:
+                            yield {"type": "delta", "delta": delta}
+                    elif event_type == "response.completed":
+                        completed = event.get("response")
+                        usage = completed.get("usage", {}) if isinstance(completed, dict) else {}
+                        yield {
+                            "type": "completed",
+                            "model": (
+                                str(completed.get("model") or self._model)
+                                if isinstance(completed, dict)
+                                else self._model
+                            ),
+                            "input_tokens": _non_negative_int(usage.get("input_tokens", 0)),
+                            "output_tokens": _non_negative_int(usage.get("output_tokens", 0)),
+                        }
+                    elif event_type in {"response.failed", "error"}:
+                        raise OpenAICompatibleError("Responses API streaming generation failed")
         finally:
             if owns_client:
                 await client.aclose()

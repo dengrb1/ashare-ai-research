@@ -34,6 +34,10 @@ services:
     image: ${ASHARE_APP_IMAGE:-ghcr.io/dengrb1/ashare-ai-research:latest}
     build: null
 
+  exit-advice-worker:
+    image: ${ASHARE_APP_IMAGE:-ghcr.io/dengrb1/ashare-ai-research:latest}
+    build: null
+
   postgres:
     image: ${ASHARE_POSTGRES_IMAGE:-ghcr.io/dengrb1/ashare-ai-research-postgres:latest}
     build: null

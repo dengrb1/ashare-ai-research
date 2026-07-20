@@ -111,10 +111,16 @@ npm run dev
 
 访问 `http://localhost:5173` 登录。主题支持“跟随系统 / 浅色 / 深色”三态并按此顺序循环；没有保存偏好时默认跟随系统，系统配色变化会实时生效。选择保存在 `localStorage`，已有的 `ashare-theme=light/dark` 会继续作为显式覆盖；页面首屏脚本会在 React 启动前同步实际渲染主题和浏览器 `theme-color`，避免主题闪烁。
 
-登录后前端会把“自选股 + 我的持仓”合并去重，在后台调用行情预取接口。报价仍按 15 秒刷新，后复权日 K 预热和缓存周期为 5 分钟；1/5/15/30/60 分钟线只在首次选择时按需加载并使用短期客户端缓存。实时行情缓存始终与研究、评分、报告和回测的不可变快照隔离。
+登录后前端会把“自选股 + 我的持仓”合并去重，在后台调用行情预取接口。报价按 15 秒刷新，后复权日 K 预热和缓存周期为 5 分钟；1/5/15/30/60 分钟线按需分段加载，最新分段最长缓存 30 秒并在页面停留、重新聚焦时自动检查。收盘后最后一根分钟线正常停在当日 15:00；后端会拒绝把上一交易日的数据标记为实时。实时行情缓存始终与研究、评分、报告和回测的不可变快照隔离。
 自选、我的持仓和账户总资金按登录用户保存到 PostgreSQL，可在“我的持仓”页新增、编辑或删除。账户总资金包括持仓市值和可用现金；当前仓位按最新行情（不可用时按成本价估算）乘以持仓数量后除以账户总资金自动计算。Cookie 只承载认证会话，清除 Cookie 后重新登录同一账户仍会恢复资产数据；部署前仅存在浏览器内存中的自定义数据无法追溯，新表上线后从默认值开始并在首次修改后永久保存。这些手工数据只用于页面记账与行情预取，不会覆盖研究生成的版本化组合，也不会触发真实下单。
 
+持仓页可启用盘中盈利退出监控，设置全局人民币浮盈触发金额并允许个股覆盖。交易日 09:30–11:30、13:00–15:00 每 5 分钟检查；严格超过触发线时排队执行 AI 退出研究。AI 可建议继续持有、减仓或卖出，并生成目标价/数量分档；服务端再按持仓上限、买入日期 T+1 和带生效日期的交易规则复核。结果只生成待确认的模拟卖出方案，不自动修改持仓。同日价格相对上次变化不足 3%、研究与持仓未变时不重复调用；完全相同输入会命中 PostgreSQL AI 缓存并显示缓存状态。
+
+研究中心提供持久化 AI 股票问答。用户可用 `@600690.SH` 或已保存持仓名称附加系统内最新行情、近 30 根日 K、个人持仓和最近正式评分；可选已配置的搜索/研究模型与 `low|medium|high|xhigh` 思考强度。响应通过 SSE 流式返回并按用户保存。联网由同一 Compose 私有网络中的 SearXNG 提供，生产默认地址为 `http://searxng:8080`；只向搜索服务发送查询词，模型不会获得数据库、凭据或任意内网访问能力。
+
 ### 完整 Docker 栈
+
+> 服务器首次安装、HTTPS 反向代理、GHCR 镜像部署、独立 SearXNG、升级、备份和故障排查请见 [Docker 服务器部署教程](docs/DOCKER_DEPLOY.md)。
 
 Compose 先读取未跟踪的 `.env` 以保留管理员、模型 API 和配置加密密钥，再读取独立的
 `.env.docker` 覆盖数据库、Redis、对象存储等容器地址。外部 HTTPS 模型网关无需容器侧
@@ -125,19 +131,19 @@ Copy-Item .env.local.example .env
 Copy-Item .env.docker.example .env.docker
 # 在 .env 中填写 ADMIN_PASSWORD、LLM_API_KEY，并生成 Fernet 格式的
 # MODEL_SETTINGS_ENCRYPTION_KEYS（真实凭据均不得提交）
-docker compose up --build
+docker compose -p ashare-ai-src -f compose.yaml up -d --build
 ```
 
-默认 Compose 面向 1.5GB 小型主机：包含 Nginx WebGUI、API、单一串行 `job-worker`、
-PostgreSQL 和 Redis，并为服务设置内存/PID/日志上限。`job-worker` 同时承担收盘后调度，按
-Research、Trade Plan、Backtest 三类 Redis 租约队列逐个取任务；每个重任务在隔离子进程中
-执行，结束后释放 Pandas/PyArrow 等科学计算堆，避免三类 Worker 并发触发 OOM。WebGUI 由
+默认 Compose 面向小型主机，建议至少 2GB 内存：包含 Nginx WebGUI、API、单一串行 `job-worker`、
+PostgreSQL、Redis 和仅在 Compose 私有网络内可访问的 SearXNG，并为服务设置内存/PID/日志上限。`job-worker` 同时承担收盘后调度，按
+Research、Trade Plan、Exit Advice、Backtest 四类 Redis 租约队列逐个取任务；每个重任务在隔离子进程中
+执行，结束后释放 Pandas/PyArrow 等科学计算堆，避免多个 Worker 并发触发 OOM。WebGUI 由
 Nginx 提供静态文件并把 `/api` 反向代理到 FastAPI；本地浏览器访问 `http://localhost`。
 PostgreSQL、Redis 和 API 默认仅绑定 `127.0.0.1`，Redis 强制密码认证。
 
 内置流水线使用 `object-data` 内容寻址卷。仓库不再捆绑安全更新滞后的 MinIO/MC 镜像；确需
-S3 兼容时，通过 `OBJECT_STORE_ENDPOINT` 接入受维护的外部 S3 服务。需要三类独立并行
-Worker 时使用 `docker compose --profile parallel-workers up -d --scale job-worker=0`；
+S3 兼容时，通过 `OBJECT_STORE_ENDPOINT` 接入受维护的外部 S3 服务。需要独立并行
+Worker 时使用 `docker compose -p ashare-ai-src -f compose.yaml --profile parallel-workers up -d --scale job-worker=0`；
 1.5GB 主机不要启用该扩展配置。
 
 公网部署先复制 `.env.production.example` 为未跟踪的 `.env`，逐项填写强随机数据库、Redis、
@@ -149,9 +155,9 @@ HTTPS 和该白名单。Nginx 端口继续绑定 `127.0.0.1`，由同机 Caddy/N
 启动后使用以下命令验收服务和配置：
 
 ```powershell
-docker compose ps
-docker compose exec api ashare-ai doctor
-docker compose logs job-worker --tail 100
+docker compose -p ashare-ai-src -f compose.yaml ps
+docker compose -p ashare-ai-src -f compose.yaml exec api ashare-ai doctor
+docker compose -p ashare-ai-src -f compose.yaml logs job-worker --tail 100
 ```
 
 生产调度默认使用仓库内置的 `ApplicationPipeline + BuiltinDailyBackend`：开发环境会生成确定性全 A 风格 demo bundle，完整跑通股票池、三类特征、严格 Agent Schema、综合评分、预测分位、事件风控、15 股组合和日报；生产环境必须通过 `ASHARE_CANONICAL_BUNDLE` 提供强类型 canonical JSON，否则 fail closed。也可替换 `ASHARE_STAGE_BACKEND_FACTORY` 接入获授权的数据源与模型实现，而不修改编排图。
@@ -186,7 +192,7 @@ npm run build
 
 ### 直接使用 GHCR 镜像
 
-仓库提供 [compose.ghcr.yaml](<F:/code/AI炒股/compose.ghcr.yaml>)，会移除本地 `build` 配置，改为直接
+仓库提供 [compose.ghcr.yaml](compose.ghcr.yaml)，会移除本地 `build` 配置，改为直接
 拉取 GHCR 的 Web、应用和 PostgreSQL 镜像。先将 GHCR 对应的三个 Package 设置为 **Public**（否则需要
 先执行 `docker login ghcr.io`），然后：
 
@@ -212,6 +218,12 @@ docker compose -p ashare-ai -f compose.yaml -f compose.ghcr.yaml up -d
 - `GET /api/v1/auth/me`
 - `GET /api/v1/app/bootstrap`
 - `GET|PUT /api/v1/assets`
+- `GET /api/v1/exit-advice`
+- `GET /api/v1/exit-advice/{advice_id}`
+- `GET /api/v1/ai/models`
+- `GET|POST /api/v1/ai/chat/threads`
+- `GET /api/v1/ai/chat/threads/{thread_id}/messages`
+- `POST /api/v1/ai/chat/threads/{thread_id}/messages:stream`
 - `GET|POST /api/v1/admin/users`
 - `PATCH /api/v1/admin/users/{user_id}`
 - `GET /api/v1/market/quotes?symbols=600000.SH,000001.SZ`

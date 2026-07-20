@@ -122,6 +122,40 @@ async def test_generate_structured_retries_transient_failure_with_same_idempoten
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_stream_text_normalizes_response_deltas_and_usage() -> None:
+    payload = (
+        'data: {"type":"response.output_text.delta","delta":"你"}\n\n'
+        'data: {"type":"response.output_text.delta","delta":"好"}\n\n'
+        'data: {"type":"response.completed","response":{"model":"gpt-test",'
+        '"usage":{"input_tokens":3,"output_tokens":2}}}\n\n'
+        "data: [DONE]\n\n"
+    )
+    route = respx.post("http://llm.local/v1/responses").mock(
+        return_value=httpx.Response(
+            200, text=payload, headers={"content-type": "text/event-stream"}
+        )
+    )
+    client = OpenAICompatibleStructuredLLMClient(
+        base_url="http://llm.local", api_key="secret", model="configured-model"
+    )
+
+    events = [
+        event
+        async for event in client.stream_text(
+            messages=({"role": "user", "content": "问候"},), idempotency_key="stream-key"
+        )
+    ]
+
+    assert route.calls.last.request.headers["Idempotency-Key"] == "stream-key"
+    assert events == [
+        {"type": "delta", "delta": "你"},
+        {"type": "delta", "delta": "好"},
+        {"type": "completed", "model": "gpt-test", "input_tokens": 3, "output_tokens": 2},
+    ]
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_generate_structured_normalizes_object_schemas_without_expanding_references() -> None:
     route = respx.post("http://llm.local/v1/responses").mock(
         return_value=httpx.Response(

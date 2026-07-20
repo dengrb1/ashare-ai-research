@@ -103,7 +103,9 @@ export function getKlineChunkWindow(period: string, plan: KlineRangePlan, before
   const endMs = Math.min(plan.endMs, anchor)
   const start = new Date(startMs).toISOString()
   const end = new Date(endMs).toISOString()
-  return { start, end, key: `${start}|${end}` }
+  // The newest segment is a moving window. Give it a stable cache identity so
+  // automatic refresh replaces it instead of accumulating one chunk per poll.
+  return { start, end, key: before ? `${start}|${end}` : 'latest' }
 }
 
 export function barTimestamp(bar: KlineBar) {

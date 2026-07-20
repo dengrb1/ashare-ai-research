@@ -46,13 +46,60 @@ export interface PaperPosition {
   cost: number
   /** Legacy manual target, kept so older saved records remain readable. */
   target_weight?: number | null
+  acquired_on?: string | null
+  profit_trigger_amount?: number | string | null
 }
 
 export interface AssetState {
   watchlist: string[]
   positions: PaperPosition[]
   total_assets?: number | null
+  exit_monitor_enabled?: boolean
+  default_profit_trigger?: number | string | null
   updated_at?: string | null
+}
+
+export interface ExitAdvice {
+  advice_id: string
+  symbol: string
+  status: string
+  action?: 'HOLD' | 'REDUCE' | 'SELL' | null
+  decision_at: string
+  available_at: string
+  current_price: number | string
+  unrealized_profit: number | string
+  trigger_amount: number | string
+  position_snapshot: Record<string, unknown>
+  research_context: Record<string, unknown>
+  result?: Record<string, unknown> | null
+  model_name?: string | null
+  reasoning_effort?: string | null
+  cache_hit: boolean
+  created_at: string
+  completed_at?: string | null
+  error_message?: string | null
+}
+
+export interface AIChatThread {
+  thread_id: string
+  title: string
+  created_at: string
+  updated_at: string
+}
+
+export interface AIChatMessage {
+  message_id: string
+  thread_id: string
+  role: 'user' | 'assistant'
+  content: string
+  mentioned_symbols: string[]
+  model_name?: string | null
+  reasoning_effort?: string | null
+  sources: Array<Record<string, unknown>>
+  cache_hit: boolean
+  input_tokens: number
+  output_tokens: number
+  created_at: string
 }
 
 export interface MarketDataStatus {

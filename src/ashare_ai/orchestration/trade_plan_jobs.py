@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -31,6 +31,7 @@ from ashare_ai.orchestration.redis_queue import RedisLeasedQueue
 from ashare_ai.portfolio.user_assets import UserAssetService
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import (
+    AIResponseCacheRow,
     CandidateRow,
     ScoreRow,
     SnapshotManifestRow,
@@ -278,6 +279,7 @@ def execute_trade_plan_job(
         explanation = _generate_ai_explanation(
             plan=result,
             scores=scores,
+            user_id=row.user_id,
             model_reference=row.model_configuration,
             session_factory=session_factory,
         )
@@ -349,6 +351,7 @@ def _generate_ai_explanation(
     *,
     plan: DeterministicTradePlan,
     scores: dict[str, ScoreRow],
+    user_id: str,
     model_reference: dict[str, Any] | None,
     session_factory: Callable[[], Session],
 ) -> dict[str, Any]:
@@ -395,22 +398,71 @@ def _generate_ai_explanation(
                 },
             )
             request_hash = stable_hash(
-                {"prompt_version": PROMPT_VERSION, "messages": messages}
+                {
+                    "prompt_version": PROMPT_VERSION,
+                    "model_configuration": model_reference,
+                    "model": runtime.research_model,
+                    "reasoning_effort": runtime.research_reasoning_effort,
+                    "messages": messages,
+                }
             )
-            generation = asyncio.run(
-                client.generate_structured(
-                    schema=TradePlanExplanation,
-                    messages=messages,
-                    idempotency_key=request_hash,
+            with session_factory() as cache_session:
+                cached = cache_session.scalar(
+                    select(AIResponseCacheRow).where(
+                        AIResponseCacheRow.user_id == user_id,
+                        AIResponseCacheRow.purpose == "TRADE_PLAN",
+                        AIResponseCacheRow.request_sha256 == request_hash,
+                        AIResponseCacheRow.expires_at > datetime.now(UTC),
+                    )
                 )
-            )
-            explanation = TradePlanExplanation.model_validate(generation.output)
+                if cached is not None:
+                    cached.hit_count += 1
+                    cached.last_hit_at = datetime.now(UTC)
+                    cache_session.commit()
+                    explanation = TradePlanExplanation.model_validate(cached.response)
+                    metadata = {
+                        "model": cached.model_name,
+                        "reasoning_effort": cached.reasoning_effort,
+                        "response_sha256": cached.response_sha256,
+                        "cache_hit": True,
+                    }
+                else:
+                    generation = asyncio.run(
+                        client.generate_structured(
+                            schema=TradePlanExplanation,
+                            messages=messages,
+                            idempotency_key=request_hash,
+                        )
+                    )
+                    explanation = TradePlanExplanation.model_validate(generation.output)
+                    response_sha = stable_hash(generation.output)
+                    cache_session.add(
+                        AIResponseCacheRow(
+                            user_id=user_id,
+                            purpose="TRADE_PLAN",
+                            request_sha256=request_hash,
+                            response_sha256=response_sha,
+                            model_name=generation.metadata.model_name,
+                            reasoning_effort=generation.metadata.reasoning_effort,
+                            prompt_version=PROMPT_VERSION,
+                            response=generation.output,
+                            input_tokens=generation.metadata.input_tokens,
+                            output_tokens=generation.metadata.output_tokens,
+                            created_at=datetime.now(UTC),
+                            expires_at=datetime.now(UTC) + timedelta(days=7),
+                        )
+                    )
+                    cache_session.commit()
+                    metadata = {
+                        "model": generation.metadata.model_name,
+                        "reasoning_effort": generation.metadata.reasoning_effort,
+                        "response_sha256": response_sha,
+                        "cache_hit": False,
+                    }
             items[symbol_plan.symbol] = {
                 **explanation.model_dump(mode="json"),
                 "request_sha256": request_hash,
-                "response_sha256": stable_hash(generation.output),
-                "model": generation.metadata.model_name,
-                "reasoning_effort": generation.metadata.reasoning_effort,
+                **metadata,
             }
         return {
             "status": "SUCCEEDED",

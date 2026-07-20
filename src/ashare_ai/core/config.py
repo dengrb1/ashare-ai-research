@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     financial_search_cache_seconds: int = Field(default=15, ge=0, le=300)
     financial_search_max_concurrency: int = Field(default=4, ge=1, le=32)
     financial_search_rate_limit_per_minute: int = Field(default=30, ge=1, le=600)
+    searxng_base_url: str = "http://127.0.0.1:8080"
+    searxng_timeout_seconds: float = Field(default=12.0, gt=0, le=60)
+    searxng_max_results: int = Field(default=5, ge=1, le=10)
+    ai_chat_rate_limit_per_minute: int = Field(default=10, ge=1, le=120)
     canonical_bundle_mode: Literal["akshare", "file", "demo"] = "akshare"
     allow_demo_data: bool = False
     akshare_bundle_size: int = Field(default=20, ge=15, le=100)

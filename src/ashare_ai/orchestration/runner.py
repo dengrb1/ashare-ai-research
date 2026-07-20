@@ -18,6 +18,15 @@ def dispatch_auto_research_once() -> dict[str, Any]:
     return dispatch_auto_research()
 
 
+def dispatch_scheduled_tasks() -> dict[str, Any]:
+    from ashare_ai.orchestration.exit_advice_jobs import dispatch_exit_advice
+
+    return {
+        "exit_advice": dispatch_exit_advice(),
+        "daily_research": dispatch_auto_research_once(),
+    }
+
+
 def seconds_until_next_tick(now: datetime, *, interval_minutes: int = 5) -> float:
     if now.tzinfo is None:
         raise ValueError("scheduler time must be timezone-aware")
@@ -32,7 +41,7 @@ def seconds_until_next_tick(now: datetime, *, interval_minutes: int = 5) -> floa
 
 def run_scheduler_loop(
     *,
-    dispatch: Callable[[], Any] = dispatch_auto_research_once,
+    dispatch: Callable[[], Any] = dispatch_scheduled_tasks,
     now_factory: Callable[[], datetime] = lambda: datetime.now(SHANGHAI),
     sleep: Callable[[float], None] = time.sleep,
     max_iterations: int | None = None,

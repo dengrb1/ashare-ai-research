@@ -1,0 +1,13 @@
+use_default_settings: true
+
+server:
+  # The service is private to the Compose network and exposes no browser session.
+  secret_key: "ashare-internal-search-no-public-session-v1"
+  limiter: false
+  image_proxy: false
+
+search:
+  safe_search: 1
+  formats:
+    - html
+    - json

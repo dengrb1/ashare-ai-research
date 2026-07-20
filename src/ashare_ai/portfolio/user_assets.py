@@ -48,12 +48,20 @@ class UserAssetService:
                 "watchlist": list(DEFAULT_WATCHLIST),
                 "positions": [dict(position) for position in DEFAULT_POSITIONS],
                 "total_assets": None,
+                "exit_monitor_enabled": False,
+                "default_profit_trigger": None,
                 "updated_at": None,
             }
         return {
             "watchlist": list(row.watchlist),
             "positions": [dict(position) for position in row.positions],
             "total_assets": float(row.total_assets) if row.total_assets is not None else None,
+            "exit_monitor_enabled": row.exit_monitor_enabled,
+            "default_profit_trigger": (
+                float(row.default_profit_trigger)
+                if row.default_profit_trigger is not None
+                else None
+            ),
             "updated_at": row.updated_at,
         }
 
@@ -63,6 +71,8 @@ class UserAssetService:
         watchlist: list[str],
         positions: list[dict[str, Any]],
         total_assets: float | None | _UnsetTotalAssets = UNSET_TOTAL_ASSETS,
+        exit_monitor_enabled: bool = False,
+        default_profit_trigger: float | None = None,
     ) -> dict[str, Any]:
         now = datetime.now(UTC)
         row = self.session.get(UserAssetState, user_id)
@@ -75,6 +85,12 @@ class UserAssetService:
             row.total_assets = (
                 Decimal(str(total_assets)) if total_assets is not None else None
             )
+        row.exit_monitor_enabled = exit_monitor_enabled
+        row.default_profit_trigger = (
+            Decimal(str(default_profit_trigger))
+            if default_profit_trigger is not None
+            else None
+        )
         row.updated_at = now
         self.session.commit()
         return self.get(user_id)
