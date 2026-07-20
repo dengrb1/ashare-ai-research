@@ -457,11 +457,11 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 提交 `ResearchRequest`，成功返回 `202 RunResponse`。响应中的 `run_id` 用于轮询：
 
 ```bash
-curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
+curl -sS "$BASE_URL/api/v1/runs/<RUN_ID>" \
   -H "Authorization: Bearer <ACCESS_TOKEN>"
 ```
 
-提交相同的用户、日期、范围、标的和预算且已有进行中任务时返回既有运行，状态码为 `200`。队列不可用返回 `503`；交易日无可用数据返回 `409`。
+提交相同的用户、日期、范围、标的和预算且已有进行中任务时返回既有运行，状态码为 `200`。队列不可用返回 `503`；交易日无可用数据返回 `409`。实时 AKShare 模式只允许冻结当日已就绪数据，或在下一交易日开盘前/非交易日冻结最近已完成交易日；开盘后不会回退到上一交易日，以免实时快照混入未来信息。冻结文件模式仍可按文件覆盖日期运行历史研究。
 
 ### `GET /api/v1/research/runs`
 
@@ -494,7 +494,7 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 
 ### `GET /api/v1/runs/{run_id}`
 
-返回单个 `RunResponse`。无权限资源统一返回 `404`，不泄漏资源是否存在。
+返回单个 `RunResponse`。`started_at` 和 `completed_at` 均为带时区 ISO 8601 时间；终态任务的界面应优先显示 `completed_at`。无权限资源统一返回 `404`，不泄漏资源是否存在；`error_message` 仅返回脱敏后的操作性摘要，不包含 SQL、数据库约束、服务端路径、远端地址或凭据。
 
 ### `GET /api/v1/runs/{run_id}/audit`
 

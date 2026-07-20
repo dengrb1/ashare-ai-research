@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from uuid import uuid4
 
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -38,14 +39,40 @@ class NotReady:
         return False
 
 
-def test_manual_resolver_uses_previous_ready_session_before_close() -> None:
-    resolved = resolve_manual_research_date(
-        requested_date=date(2026, 7, 15),
-        now=datetime(2026, 7, 15, 10, tzinfo=SHANGHAI),
-        sessions=(date(2026, 7, 14), date(2026, 7, 15)),
-        data_ready=lambda value: value == date(2026, 7, 14),
-    )
-    assert resolved == date(2026, 7, 14)
+def test_manual_resolver_rejects_previous_session_after_market_open() -> None:
+    with pytest.raises(RuntimeError, match="unsafe during the trading session"):
+        resolve_manual_research_date(
+            requested_date=date(2026, 7, 15),
+            now=datetime(2026, 7, 15, 10, tzinfo=SHANGHAI),
+            sessions=(date(2026, 7, 14), date(2026, 7, 15)),
+            data_ready=lambda value: value == date(2026, 7, 14),
+        )
+
+
+def test_manual_resolver_allows_latest_session_before_open_and_on_weekend() -> None:
+    sessions = (date(2026, 7, 17), date(2026, 7, 20))
+    assert resolve_manual_research_date(
+        requested_date=date(2026, 7, 20),
+        now=datetime(2026, 7, 20, 8, 30, tzinfo=SHANGHAI),
+        sessions=sessions,
+        data_ready=lambda value: value == date(2026, 7, 17),
+    ) == date(2026, 7, 17)
+    assert resolve_manual_research_date(
+        requested_date=date(2026, 7, 19),
+        now=datetime(2026, 7, 19, 16, tzinfo=SHANGHAI),
+        sessions=(date(2026, 7, 17),),
+        data_ready=lambda value: value == date(2026, 7, 17),
+    ) == date(2026, 7, 17)
+
+
+def test_manual_resolver_does_not_fallback_when_post_close_data_is_not_ready() -> None:
+    with pytest.raises(RuntimeError, match="selected trading session is not ready"):
+        resolve_manual_research_date(
+            requested_date=date(2026, 7, 20),
+            now=datetime(2026, 7, 20, 15, 56, tzinfo=SHANGHAI),
+            sessions=(date(2026, 7, 17), date(2026, 7, 20)),
+            data_ready=lambda value: value == date(2026, 7, 17),
+        )
 
 
 def test_auto_dispatch_state_enforces_window_and_readiness() -> None:

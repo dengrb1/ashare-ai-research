@@ -8,7 +8,7 @@ from starlette.requests import Request
 from ashare_ai.agents.model_settings import ModelSettingsError, normalize_base_url
 from ashare_ai.api.auth import _auth_source
 from ashare_ai.core.config import Settings
-from ashare_ai.core.security import safe_error_message
+from ashare_ai.core.security import safe_error_message, safe_error_text
 from ashare_ai.storage.objects import LocalObjectStore
 
 
@@ -91,6 +91,13 @@ def test_error_messages_redact_credentials_endpoints_and_server_paths() -> None:
     assert "internal.example" not in message
     assert "private" not in message
     assert "[REDACTED]" in message
+
+    database_message = safe_error_text(
+        '(psycopg.errors.UniqueViolation) duplicate key value violates unique constraint '
+        '"uq_snapshot_versioned_hash" [SQL: INSERT INTO snapshot_manifests ...]'
+    )
+    assert database_message == "数据库操作失败，未写入不完整结果"
+    assert "snapshot_manifests" not in database_message
 
 
 def test_local_object_store_rejects_content_named_file_outside_its_root(tmp_path: Path) -> None:

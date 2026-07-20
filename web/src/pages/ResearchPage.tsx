@@ -4,6 +4,7 @@ import { api } from '../api'
 import { ErrorNotice, formatNumber, formatTime, Loading, Panel, StatusPill, today } from '../components/Ui'
 import { useMarket } from '../context/MarketContext'
 import { usePageRefresh } from '../context/RefreshContext'
+import { researchRunTimestamp } from '../researchRuns'
 import type { ResearchScope, ResearchSettings, Run } from '../types'
 
 const ACTIVE = new Set(['PENDING', 'QUEUED', 'RUNNING', 'PROCESSING', 'CANCEL_REQUESTED'])
@@ -194,12 +195,13 @@ export function ResearchPage() {
         {runs.map((run) => {
           const normalized = run.status.toUpperCase()
           const isActive = ACTIVE.has(normalized)
+          const displayTime = researchRunTimestamp(run)
           const reportLink = `/reports?date=${encodeURIComponent(run.trading_date || date)}&run_id=${encodeURIComponent(run.run_id)}`
           return <article className="research-run-card" key={run.run_id}>
             <div className="research-run-head"><div><strong>{run.trading_date || date}</strong><code>{run.run_id}</code></div><StatusPill status={run.status} /></div>
             <div className="run-scope-summary"><span>{run.trigger_source === 'AUTO' ? '自动日研' : '手动研究'}</span><span>{SCOPE_LABELS[run.research_scope || 'MARKET']}</span>{run.requested_date && run.requested_date !== run.trading_date ? <span>请求 {run.requested_date} → 实际 {run.trading_date}</span> : null}{run.target_symbols?.length ? <span>{run.target_symbols.length} 只指定股票</span> : null}{run.total_budget ? <span>预算 {formatNumber(Number(run.total_budget))} 元</span> : null}</div>
             <div className="progress-track" aria-label={`完成 ${run.progress ?? (isActive ? 5 : 100)}%`}><i className={normalized === 'FAILED' ? 'failed' : isActive ? 'animated' : normalized === 'FUSED' ? 'warning' : 'done'} style={{ width: `${run.progress ?? (isActive ? 5 : 100)}%` }} /></div>
-            <div className="research-run-meta"><span>{run.phase || (isActive ? '研究流水线运行中' : '已结束')}</span><span>{formatTime(run.started_at || run.created_at)}</span></div>
+            <div className="research-run-meta"><span>{run.phase || (isActive ? '研究流水线运行中' : '已结束')}</span><span>{displayTime.label} {formatTime(displayTime.value)}</span></div>
             {normalized === 'FAILED' && <div className="failure-box"><strong>运行失败</strong><p>{run.error_message || '未返回具体失败原因，请查看审计事件。'}</p></div>}
             {normalized === 'FUSED' && <div className="warning-box"><strong>观察模式 · {run.reason_code || 'UNSPECIFIED'}</strong><p>{run.reason_message || '正式组合条件未满足'}；正式可用 {run.formal_eligible_count ?? 0} 只，排除 {run.excluded_symbol_count || 0} 只。</p></div>}
             {normalized === 'SUCCEEDED' && <div className="success-box"><strong>正式个股研究已完成</strong><p>{run.portfolio_generated ? '评分、候选池、预算组合和日报已生成。' : run.portfolio_reason_message || '全部目标股票的正式报告已生成；本次未生成整体组合。'}</p></div>}

@@ -20,6 +20,7 @@ from ashare_ai.storage.models import JobRun, UserAccount, UserResearchPreference
 
 AUTO_TOTAL_BUDGET = Decimal("1000000")
 AUTO_PER_SYMBOL_BUDGET = Decimal("80000")
+MARKET_OPEN = time(9, 0)
 AUTO_START = time(15, 5)
 AUTO_RETRY_WINDOW = timedelta(hours=2)
 
@@ -71,14 +72,31 @@ def resolve_manual_research_date(
     data_ready: Callable[[date], bool],
 ) -> date:
     current = _aware_shanghai(now)
-    cutoff_date = min(requested_date, current.date())
-    candidates = [value for value in sessions if value <= cutoff_date]
-    for candidate in reversed(candidates):
-        if candidate == current.date() and current.time() < AUTO_START:
-            continue
-        if data_ready(candidate):
-            return candidate
-    raise RuntimeError("no completed trading session with ready data is available")
+    if requested_date > current.date():
+        raise RuntimeError("future research dates are unavailable")
+    ordered = tuple(sorted(set(sessions)))
+    current_is_session = current.date() in ordered
+
+    if current_is_session and MARKET_OPEN <= current.time() < AUTO_START:
+        raise RuntimeError("live canonical data is unsafe during the trading session")
+
+    if current_is_session and current.time() >= AUTO_START:
+        # Once today's market has opened, the live spot snapshot can no longer be
+        # used to reconstruct a prior session without look-ahead contamination.
+        if requested_date != current.date():
+            raise RuntimeError("historical live reconstruction is unavailable after market open")
+        candidate = current.date()
+    else:
+        completed = [value for value in ordered if value < current.date()]
+        if not completed:
+            raise RuntimeError("no completed trading session is available")
+        candidate = completed[-1]
+        if requested_date < candidate:
+            raise RuntimeError("only the latest uncontaminated session can use live data")
+
+    if not data_ready(candidate):
+        raise RuntimeError("the selected trading session is not ready")
+    return candidate
 
 
 def auto_dispatch_state(

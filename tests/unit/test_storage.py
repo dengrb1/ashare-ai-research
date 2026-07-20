@@ -10,9 +10,15 @@ from sqlalchemy.orm import Session
 
 from ashare_ai.core.contracts import SnapshotStatus
 from ashare_ai.storage.lake import ImmutableLake, _uri_to_path
-from ashare_ai.storage.models import Base, ObjectManifestRow, ObjectOccurrenceRow
+from ashare_ai.storage.models import (
+    Base,
+    ObjectManifestRow,
+    ObjectOccurrenceRow,
+    SnapshotManifestRow,
+)
 from ashare_ai.storage.object_service import StoredObjectService
 from ashare_ai.storage.objects import LocalObjectStore
+from ashare_ai.storage.repositories import SnapshotRepository
 
 TZ = ZoneInfo("Asia/Shanghai")
 
@@ -35,6 +41,31 @@ def test_lake_reads_only_committed_manifests(tmp_path) -> None:
     assert table.to_pylist() == [{"symbol": "600000.SH", "close": 10.0}]
     result = lake.query("SELECT symbol, close FROM snapshot", [committed])
     assert result == [{"symbol": "600000.SH", "close": 10.0}]
+
+
+def test_snapshot_registration_is_idempotent_after_commit(tmp_path) -> None:
+    engine = create_engine("sqlite+pysqlite://")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    manifest = ImmutableLake(tmp_path / "lake").write_snapshot(
+        dataset="canonical_news",
+        source="fixture",
+        schema_version="1",
+        adapter_version="1",
+        fetched_at=datetime(2026, 7, 14, 18, tzinfo=TZ),
+        rows=[{"run_id": "same-run", "headline": "immutable"}],
+    )
+    repository = SnapshotRepository(session)
+    first = repository.add(manifest)
+    repository.commit(first.snapshot_id)
+    session.commit()
+
+    second = repository.add(manifest)
+    repository.commit(second.snapshot_id)
+    session.commit()
+
+    assert second.snapshot_id == first.snapshot_id
+    assert session.query(SnapshotManifestRow).count() == 1
 
 
 def test_lake_keeps_cross_version_snapshots_byte_immutable(tmp_path) -> None:

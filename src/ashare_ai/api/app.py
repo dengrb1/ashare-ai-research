@@ -208,7 +208,7 @@ def _manual_research_date(requested_date: date, now: datetime) -> date:
         raise HTTPException(
             status_code=422, detail="research requested_date cannot be in the future"
         )
-    if requested_date < current.date() and requested_date.weekday() < 5:
+    if get_settings().canonical_bundle_mode in {"file", "demo"}:
         return requested_date
     try:
         sessions = FreeExchangeCalendar().sessions(

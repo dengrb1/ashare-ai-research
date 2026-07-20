@@ -948,6 +948,7 @@ def test_research_submission_prepares_frozen_manifest_and_deduplicates(monkeypat
     queued: list[str] = []
     monkeypatch.setattr("ashare_ai.api.app.load_pipeline", lambda: pipeline)
     monkeypatch.setattr("ashare_ai.api.app.enqueue_research", queued.append)
+    monkeypatch.setattr("ashare_ai.api.app._manual_research_date", lambda value, now: value)
 
     def override_db():
         yield session
@@ -1026,6 +1027,7 @@ def test_watchlist_research_accepts_a_selected_subset_and_rejects_outside_symbol
     queued: list[str] = []
     monkeypatch.setattr("ashare_ai.api.app.load_pipeline", lambda: pipeline)
     monkeypatch.setattr("ashare_ai.api.app.enqueue_research", queued.append)
+    monkeypatch.setattr("ashare_ai.api.app._manual_research_date", lambda value, now: value)
 
     def override_db():
         yield session

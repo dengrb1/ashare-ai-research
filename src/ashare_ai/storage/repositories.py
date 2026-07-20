@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import Select, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ashare_ai.core.contracts import SnapshotManifest, SnapshotStatus
@@ -24,9 +25,50 @@ class SnapshotRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
 
-    def add(self, manifest: SnapshotManifest) -> SnapshotManifestRow:
+    def _versioned_match(self, manifest: SnapshotManifest) -> SnapshotManifestRow | None:
+        return self.session.scalar(
+            select(SnapshotManifestRow).where(
+                SnapshotManifestRow.dataset == manifest.dataset,
+                SnapshotManifestRow.source == manifest.source,
+                SnapshotManifestRow.schema_version == manifest.schema_version,
+                SnapshotManifestRow.adapter_version == manifest.adapter_version,
+                SnapshotManifestRow.payload_sha256 == manifest.payload_sha256,
+            )
+        )
+
+    @staticmethod
+    def _validate_reuse(
+        row: SnapshotManifestRow,
+        manifest: SnapshotManifest,
+        *,
+        run_id: str | None,
+    ) -> SnapshotManifestRow:
+        if run_id is not None and row.run_id not in {None, run_id}:
+            raise ValueError("snapshot content is already registered by another run")
+        expected_file_hash = manifest.metadata.get("parquet_file_sha256")
+        existing_file_hash = row.details.get("parquet_file_sha256")
+        if (
+            row.row_count != manifest.row_count
+            or row.parquet_uri != manifest.parquet_uri
+            or existing_file_hash != expected_file_hash
+        ):
+            raise ValueError("snapshot content identity conflicts with its immutable manifest")
+        if row.status not in {SnapshotStatus.STAGING.value, SnapshotStatus.COMMITTED.value}:
+            raise ValueError(f"snapshot has an invalid status: {row.status}")
+        return row
+
+    def add(
+        self,
+        manifest: SnapshotManifest,
+        *,
+        run_id: str | None = None,
+    ) -> SnapshotManifestRow:
+        existing = self._versioned_match(manifest)
+        if existing is not None:
+            return self._validate_reuse(existing, manifest, run_id=run_id)
         row = SnapshotManifestRow(
             snapshot_id=str(manifest.snapshot_id),
+            run_id=run_id,
             dataset=manifest.dataset,
             source=manifest.source,
             schema_version=manifest.schema_version,
@@ -38,14 +80,26 @@ class SnapshotRepository:
             status=manifest.status.value,
             details=manifest.metadata,
         )
-        self.session.add(row)
-        self.session.flush()
-        return row
+        try:
+            with self.session.begin_nested():
+                self.session.add(row)
+                self.session.flush()
+            return row
+        except IntegrityError:
+            # A second leased worker may win the content-addressed insert between
+            # the lookup and flush.  The savepoint keeps the outer job transaction
+            # usable so the exact immutable manifest can be reused safely.
+            existing = self._versioned_match(manifest)
+            if existing is None:
+                raise
+            return self._validate_reuse(existing, manifest, run_id=run_id)
 
     def commit(self, snapshot_id: str) -> SnapshotManifestRow:
         row = self.session.get(SnapshotManifestRow, snapshot_id)
         if row is None:
             raise KeyError(snapshot_id)
+        if row.status == SnapshotStatus.COMMITTED.value:
+            return row
         if row.status != SnapshotStatus.STAGING.value:
             raise ValueError(f"snapshot is not STAGING: {row.status}")
         row.status = SnapshotStatus.COMMITTED.value

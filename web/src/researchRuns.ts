@@ -2,6 +2,14 @@ import { api } from './api'
 import type { Run } from './types'
 
 const PUBLISHED_STATUSES = new Set(['SUCCEEDED', 'FUSED'])
+const TERMINAL_STATUSES = new Set(['SUCCEEDED', 'FAILED', 'FUSED', 'CANCELLED'])
+
+export function researchRunTimestamp(run: Run): { label: '开始' | '完成'; value?: string } {
+  const terminal = TERMINAL_STATUSES.has(run.status.toUpperCase())
+  return terminal && run.completed_at
+    ? { label: '完成', value: run.completed_at }
+    : { label: '开始', value: run.started_at || run.created_at }
+}
 
 export async function resolvePublishedResearchRun(tradingDate?: string, runId?: string): Promise<Run | null> {
   if (runId) {

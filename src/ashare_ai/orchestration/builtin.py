@@ -511,8 +511,7 @@ class BuiltinDailyBackend:
                     ),
                 },
             )
-            row = repository.add(manifest)
-            row.run_id = run.run_id
+            row = repository.add(manifest, run_id=run.run_id)
             repository.commit(row.snapshot_id)
             snapshot_ids.append(row.snapshot_id)
         return snapshot_ids

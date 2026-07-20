@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from ashare_ai.core.security import safe_error_text
+
 MAX_WATCHLIST_SYMBOLS = 100
 MAX_RESEARCH_SYMBOLS = 100
 MAX_TRADE_PLAN_SYMBOLS = 15
@@ -17,6 +19,15 @@ def _supported_research_scopes() -> list[Literal["MARKET", "WATCHLIST", "CUSTOM"
 
 class OrmResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
+
+
+class _SanitizedErrorResponse(OrmResponse):
+    error_message: str | None
+
+    @field_validator("error_message")
+    @classmethod
+    def sanitize_error_message(cls, value: str | None) -> str | None:
+        return safe_error_text(value) if value else None
 
 
 class HealthResponse(BaseModel):
@@ -185,7 +196,7 @@ class AssetStateResponse(BaseModel):
     updated_at: datetime | None = None
 
 
-class ExitAdviceResponse(OrmResponse):
+class ExitAdviceResponse(_SanitizedErrorResponse):
     advice_id: str
     user_id: str
     symbol: str
@@ -205,7 +216,6 @@ class ExitAdviceResponse(OrmResponse):
     input_hash: str
     response_sha256: str | None
     cache_hit: bool
-    error_message: str | None
     created_at: datetime
     completed_at: datetime | None
 
@@ -341,7 +351,7 @@ class PortfolioResponse(OrmResponse):
     excluded_symbols: dict[str, list[str]] = Field(default_factory=dict)
 
 
-class RunResponse(OrmResponse):
+class RunResponse(_SanitizedErrorResponse):
     run_id: str
     run_type: str
     trading_date: date
@@ -351,7 +361,6 @@ class RunResponse(OrmResponse):
     output_hash: str | None
     started_at: datetime
     completed_at: datetime | None
-    error_message: str | None
 
 
 class ResearchRequest(BaseModel):
@@ -443,7 +452,7 @@ class TradePlanRequest(BaseModel):
         return value
 
 
-class TradePlanResponse(OrmResponse):
+class TradePlanResponse(_SanitizedErrorResponse):
     plan_id: str
     user_id: str
     report_id: str
@@ -468,7 +477,6 @@ class TradePlanResponse(OrmResponse):
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
-    error_message: str | None
 
 
 class RunListResponse(RunResponse):
@@ -516,7 +524,7 @@ class BacktestRequest(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
 
 
-class BacktestResponse(OrmResponse):
+class BacktestResponse(_SanitizedErrorResponse):
     backtest_id: str
     run_id: str | None
     status: str
