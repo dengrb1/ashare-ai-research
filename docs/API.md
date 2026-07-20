@@ -113,6 +113,7 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 认证 | GET | `/api/v1/auth/me` | 登录 |
 | App 初始化 | GET | `/api/v1/app/bootstrap` | 登录 |
 | 用户资产 | GET/PUT | `/api/v1/assets` | 登录/写入 |
+| 退出监控设置 | PUT | `/api/v1/assets/exit-monitor` | 写入 |
 | 卖出建议 | GET | `/api/v1/exit-advice` | 登录 |
 | 卖出建议 | GET | `/api/v1/exit-advice/{advice_id}` | 登录 |
 | AI 对话 | GET | `/api/v1/ai/models` | 登录 |
@@ -137,6 +138,7 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | Trade Plan | GET | `/api/v1/trade-plans/{plan_id}` | 登录 |
 | 快照 | GET | `/api/v1/snapshots` | 登录 |
 | 研究任务 | POST/GET | `/api/v1/research/runs` | 写入/登录 |
+| 研究任务 | GET | `/api/v1/research/runs/{run_id}` | 登录 |
 | 研究任务 | GET/PUT | `/api/v1/research/settings` | 登录/写入 |
 | 研究任务 | POST | `/api/v1/research/runs/{run_id}/cancel` | 写入 |
 | 通用运行 | GET | `/api/v1/runs` | 登录 |
@@ -233,6 +235,9 @@ Web 登录。请求体为 `LoginRequest`：
 
 `AssetStateResponse` 在此基础上增加 `updated_at`；`GET /assets` 返回当前用户数据，`PUT /assets` 整体替换当前用户自选股、模拟持仓和可选总资产。
 
+`PUT /api/v1/assets/exit-monitor` 只接受 `exit_monitor_enabled` 和
+`default_profit_trigger`，不会修改自选股、模拟持仓或总资产。手机客户端调整监控设置时应优先使用该窄接口，避免用旧缓存整体覆盖资产数据。
+
 `GET /api/v1/app/bootstrap` 返回：
 
 ```json
@@ -248,8 +253,8 @@ Web 登录。请求体为 `LoginRequest`：
     "max_research_symbols":100,
     "max_trade_plan_symbols":15,
     "portfolio_target_count":10,
-    "features": {"watchlist_research_selection":true,"formal_watchlist_reports":true,"report_symbol_eligibility":true,"trade_plan_generation":true,"research_cancellation":true,"paper_portfolio_only":true},
-    "endpoints": {"assets":"/api/v1/assets","research_runs":"/api/v1/research/runs","research_settings":"/api/v1/research/settings","report_symbols":"/api/v1/reports/{report_id}/symbols","report_trade_plans":"/api/v1/reports/{report_id}/trade-plans","trade_plan":"/api/v1/trade-plans/{plan_id}"}
+    "features": {"watchlist_research_selection":true,"formal_watchlist_reports":true,"report_symbol_eligibility":true,"trade_plan_generation":true,"research_cancellation":true,"idempotency_key":true,"paper_portfolio_only":true},
+    "endpoints": {"assets":"/api/v1/assets","exit_monitor_settings":"/api/v1/assets/exit-monitor","research_runs":"/api/v1/research/runs","research_run":"/api/v1/research/runs/{run_id}","research_settings":"/api/v1/research/settings","report_symbols":"/api/v1/reports/{report_id}/symbols","report_trade_plans":"/api/v1/reports/{report_id}/trade-plans","trade_plan":"/api/v1/trade-plans/{plan_id}"}
   }
 }
 ```
@@ -457,7 +462,7 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 提交 `ResearchRequest`，成功返回 `202 RunResponse`。响应中的 `run_id` 用于轮询：
 
 ```bash
-curl -sS "$BASE_URL/api/v1/runs/<RUN_ID>" \
+curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
   -H "Authorization: Bearer <ACCESS_TOKEN>"
 ```
 
@@ -475,6 +480,10 @@ curl -sS "$BASE_URL/api/v1/runs/<RUN_ID>" \
 | `published` | false | 为 true 时只返回 `SUCCEEDED` 或 `FUSED` |
 
 返回 `ResearchRunResponse[]`，排序为最新启动优先；`published=true` 时按完成时间优先。
+
+### `GET /api/v1/research/runs/{run_id}`
+
+返回单个 `ResearchRunResponse`，包含 `phase` 和 0–100 的 `progress`，供 Web 与手机客户端按 ID 轮询。普通用户只能读取自己的研究任务；不存在、非研究任务或无权限资源均返回 `404`。
 
 ### `PUT /api/v1/research/settings`
 
@@ -647,9 +656,9 @@ curl -sS "$BASE_URL/api/v1/search/financial?q=%E8%B4%B5%E5%B7%9E%E8%8C%85%E5%8F%
 
 ### 12.3 异步轮询
 
-提交研究、回测或 Trade Plan 后，先保存返回的 `run_id`、`backtest_id` 或 `plan_id`，再使用对应详情接口查询。不要依赖长连接或固定等待时间。常见研究状态包括 `PENDING`、`QUEUED`、`RUNNING`、`PROCESSING`、`SUCCEEDED`、`FAILED`、`FUSED`、`CANCEL_REQUESTED` 和 `CANCELLED`；具体 `phase` 和进度以响应为准。
+提交研究、回测或 Trade Plan 后，先保存返回的 `run_id`、`backtest_id` 或 `plan_id`，再使用对应详情接口查询。研究任务使用 `/research/runs/{run_id}`，不要用缺少 `phase/progress` 的通用 `/runs/{run_id}` 代替。不要依赖长连接或固定等待时间。常见研究状态包括 `PENDING`、`QUEUED`、`RUNNING`、`PROCESSING`、`SUCCEEDED`、`FAILED`、`FUSED`、`CANCEL_REQUESTED` 和 `CANCELLED`；具体 `phase` 和进度以响应为准。
 
-当前代码使用用户、路由相关输入和请求内容的服务端哈希执行重复提交去重；当前没有读取客户端 `Idempotency-Key` 请求头。移动端应安全重试同一请求体，并使用返回的资源 ID继续轮询，不应并行创建多个不同请求。
+研究、回测和报告 Trade Plan 提交支持 `Idempotency-Key` 请求头（1–128 字符）。服务端只持久化 Key 的 SHA-256，并按“用户 + 路由 + Key + 请求体哈希”去重：同 Key、同请求返回首次创建的资源和 `200`；同 Key、不同请求返回 `409`。首次接受仍返回 `202`。手机客户端应为每次用户意图生成随机 Key，在网络重试中原样复用，并保存返回的资源 ID继续轮询。
 
 ## 13. 兼容别名和开发工具
 

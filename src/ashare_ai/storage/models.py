@@ -97,6 +97,27 @@ class UserSession(Base):
     user: Mapped[UserAccount] = relationship()
 
 
+class ApiIdempotencyKey(Base):
+    """Hashed native-client key mapped to the first accepted async resource."""
+
+    __tablename__ = "api_idempotency_keys"
+    __table_args__ = (
+        UniqueConstraint("user_id", "route", "key_sha256", name="uq_api_idempotency_scope"),
+        Index("ix_api_idempotency_created", "created_at"),
+    )
+
+    idempotency_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.user_id", ondelete="CASCADE"), nullable=False
+    )
+    route: Mapped[str] = mapped_column(String(160), nullable=False)
+    key_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    resource_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class UserAssetState(Base):
     """User-owned editable watchlist and simulated position state."""
 

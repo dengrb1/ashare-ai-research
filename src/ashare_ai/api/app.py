@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, NoReturn
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -58,6 +58,7 @@ from ashare_ai.api.schemas import (
     BacktestResponse,
     CandidateResponse,
     ExitAdviceResponse,
+    ExitMonitorSettingsRequest,
     HealthResponse,
     KlineResponse,
     LoginRequest,
@@ -96,7 +97,6 @@ from ashare_ai.core.time import SHANGHAI
 from ashare_ai.market.service import get_market_data_service
 from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.orchestration.backtest_jobs import enqueue_backtest
-from ashare_ai.orchestration.builtin_backtest import read_backtest_bundle
 from ashare_ai.orchestration.daily import load_pipeline
 from ashare_ai.orchestration.research_jobs import enqueue_research
 from ashare_ai.orchestration.research_schedule import (
@@ -105,10 +105,10 @@ from ashare_ai.orchestration.research_schedule import (
     resolve_manual_research_date,
 )
 from ashare_ai.orchestration.research_settings import ResearchSettingsService
-from ashare_ai.orchestration.trade_plan_jobs import (
+from ashare_ai.orchestration.trade_plan_queue import (
     PROMPT_VERSION as TRADE_PLAN_PROMPT_VERSION,
 )
-from ashare_ai.orchestration.trade_plan_jobs import (
+from ashare_ai.orchestration.trade_plan_queue import (
     enqueue_trade_plan,
 )
 from ashare_ai.portfolio.user_assets import UNSET_TOTAL_ASSETS, UserAssetService
@@ -123,6 +123,7 @@ from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import (
     AIChatMessage,
     AIChatThread,
+    ApiIdempotencyKey,
     AuditEvent,
     BacktestRun,
     CandidateRow,
@@ -166,6 +167,69 @@ app.add_middleware(TrustedHostMiddleware, allowed_hosts=_api_settings.trusted_ho
 DbSession = Annotated[Session, Depends(get_db)]
 Current = Annotated[AuthContext, Depends(get_auth_context)]
 Writer = Annotated[AuthContext, Depends(get_write_context)]
+IdempotencyKey = Annotated[
+    str | None, Header(alias="Idempotency-Key", min_length=1, max_length=128)
+]
+
+
+def _idempotency_fingerprint(
+    user_id: str, route: str, key: str | None, payload: Any
+) -> tuple[str, str] | None:
+    if key is None:
+        return None
+    return (
+        stable_hash({"user_id": user_id, "route": route, "key": key}),
+        stable_hash(payload),
+    )
+
+
+def _find_idempotency(
+    db: Session,
+    *,
+    user_id: str,
+    route: str,
+    fingerprint: tuple[str, str] | None,
+) -> ApiIdempotencyKey | None:
+    if fingerprint is None:
+        return None
+    key_sha256, request_sha256 = fingerprint
+    row = db.scalar(
+        select(ApiIdempotencyKey).where(
+            ApiIdempotencyKey.user_id == user_id,
+            ApiIdempotencyKey.route == route,
+            ApiIdempotencyKey.key_sha256 == key_sha256,
+        )
+    )
+    if row is not None and row.request_sha256 != request_sha256:
+        raise HTTPException(
+            status_code=409, detail="Idempotency-Key was reused with another request"
+        )
+    return row
+
+
+def _remember_idempotency(
+    db: Session,
+    *,
+    user_id: str,
+    route: str,
+    fingerprint: tuple[str, str] | None,
+    resource_type: str,
+    resource_id: str,
+) -> None:
+    if fingerprint is None:
+        return
+    key_sha256, request_sha256 = fingerprint
+    db.add(
+        ApiIdempotencyKey(
+            user_id=user_id,
+            route=route,
+            key_sha256=key_sha256,
+            request_sha256=request_sha256,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            created_at=datetime.now(UTC),
+        )
+    )
 SearchService = Annotated[FinancialSearchService, Depends(get_financial_search_service)]
 
 
@@ -303,6 +367,14 @@ _RESEARCH_PHASES = {
     "build_portfolio": ("生成模拟组合", 94),
     "publish_report": ("发布研究报告", 98),
 }
+
+
+def read_backtest_bundle(snapshot_uris: dict[str, str], expected_hashes: dict[str, str]) -> Any:
+    """Load the Parquet validator only for retry requests, not for every API process."""
+
+    from ashare_ai.orchestration.builtin_backtest import read_backtest_bundle as load_bundle
+
+    return load_bundle(snapshot_uris, expected_hashes)
 
 
 def _research_run_response(db: Session, row: JobRun) -> ResearchRunResponse:
@@ -482,6 +554,7 @@ def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
                 "report_symbol_eligibility": True,
                 "trade_plan_generation": True,
                 "research_cancellation": True,
+                "idempotency_key": True,
                 "paper_portfolio_only": True,
                 "profit_exit_monitor": True,
                 "persistent_ai_chat": True,
@@ -489,7 +562,9 @@ def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
             },
             endpoints={
                 "assets": "/api/v1/assets",
+                "exit_monitor_settings": "/api/v1/assets/exit-monitor",
                 "research_runs": "/api/v1/research/runs",
+                "research_run": "/api/v1/research/runs/{run_id}",
                 "research_settings": "/api/v1/research/settings",
                 "report_symbols": "/api/v1/reports/{report_id}/symbols",
                 "report_trade_plans": "/api/v1/reports/{report_id}/trade-plans",
@@ -526,6 +601,29 @@ def update_asset_state(
                 if "default_profit_trigger" in payload.model_fields_set
                 else previous.get("default_profit_trigger")
             )
+        ),
+    )
+    return AssetStateResponse.model_validate(state)
+
+
+@app.put("/api/v1/assets/exit-monitor", response_model=AssetStateResponse)
+def update_exit_monitor_settings(
+    payload: ExitMonitorSettingsRequest, db: DbSession, context: Writer
+) -> AssetStateResponse:
+    """Update only exit-monitor fields so native clients cannot overwrite stale asset data."""
+
+    service = UserAssetService(db)
+    previous = service.get(context.user.user_id)
+    state = service.save(
+        context.user.user_id,
+        previous["watchlist"],
+        previous["positions"],
+        UNSET_TOTAL_ASSETS,
+        payload.exit_monitor_enabled,
+        (
+            float(payload.default_profit_trigger)
+            if payload.default_profit_trigger is not None
+            else None
         ),
     )
     return AssetStateResponse.model_validate(state)
@@ -1142,7 +1240,31 @@ def submit_trade_plan(
     response: Response,
     db: DbSession,
     context: Writer,
+    idempotency_key: IdempotencyKey = None,
 ) -> TradePlanResponse:
+    idempotency_route = f"/api/v1/reports/{report_id}/trade-plans"
+    fingerprint = _idempotency_fingerprint(
+        context.user.user_id,
+        idempotency_route,
+        idempotency_key,
+        payload.model_dump(mode="json"),
+    )
+    replay = _find_idempotency(
+        db,
+        user_id=context.user.user_id,
+        route=idempotency_route,
+        fingerprint=fingerprint,
+    )
+    if replay is not None:
+        existing_plan = db.get(TradePlanRow, replay.resource_id)
+        if (
+            replay.resource_type != "TRADE_PLAN"
+            or existing_plan is None
+            or existing_plan.user_id != context.user.user_id
+        ):
+            raise HTTPException(status_code=409, detail="idempotent resource is unavailable")
+        response.status_code = status.HTTP_200_OK
+        return TradePlanResponse.model_validate(existing_plan)
     report_row = db.get(ReportRow, report_id)
     if report_row is None:
         raise HTTPException(status_code=404, detail="report not found")
@@ -1276,11 +1398,30 @@ def submit_trade_plan(
             "input_hash": row.input_hash,
         },
     )
+    _remember_idempotency(
+        db,
+        user_id=context.user.user_id,
+        route=idempotency_route,
+        fingerprint=fingerprint,
+        resource_type="TRADE_PLAN",
+        resource_id=row.plan_id,
+    )
     try:
         db.commit()
         enqueue_trade_plan(row.plan_id)
     except IntegrityError as exc:
         db.rollback()
+        replay = _find_idempotency(
+            db,
+            user_id=context.user.user_id,
+            route=idempotency_route,
+            fingerprint=fingerprint,
+        )
+        if replay is not None:
+            winner_plan = db.get(TradePlanRow, replay.resource_id)
+            if winner_plan is not None and winner_plan.user_id == context.user.user_id:
+                response.status_code = status.HTTP_200_OK
+                return TradePlanResponse.model_validate(winner_plan)
         winner = db.scalar(
             select(TradePlanRow).where(TradePlanRow.active_trade_plan_key == active_key)
         )
@@ -1360,8 +1501,36 @@ def snapshots(
 
 @app.post("/api/v1/research/runs", response_model=RunResponse, status_code=202)
 def submit_research(
-    payload: ResearchRequest, response: Response, db: DbSession, context: Writer
+    payload: ResearchRequest,
+    response: Response,
+    db: DbSession,
+    context: Writer,
+    idempotency_key: IdempotencyKey = None,
 ) -> RunResponse:
+    idempotency_route = "/api/v1/research/runs"
+    fingerprint = _idempotency_fingerprint(
+        context.user.user_id,
+        idempotency_route,
+        idempotency_key,
+        payload.model_dump(mode="json"),
+    )
+    replay = _find_idempotency(
+        db,
+        user_id=context.user.user_id,
+        route=idempotency_route,
+        fingerprint=fingerprint,
+    )
+    if replay is not None:
+        existing_run = db.get(JobRun, replay.resource_id)
+        if (
+            replay.resource_type != "RESEARCH_RUN"
+            or existing_run is None
+            or existing_run.run_type != "DAILY"
+            or not _owns(existing_run, context)
+        ):
+            raise HTTPException(status_code=409, detail="idempotent resource is unavailable")
+        response.status_code = status.HTTP_200_OK
+        return RunResponse.model_validate(existing_run)
     requested_date = payload.trading_date
     actual_research_date = _manual_research_date(requested_date, datetime.now(SHANGHAI))
     if payload.scope == "WATCHLIST":
@@ -1488,10 +1657,29 @@ def submit_research(
             "input_hash": run.input_hash,
         },
     )
+    _remember_idempotency(
+        db,
+        user_id=context.user.user_id,
+        route=idempotency_route,
+        fingerprint=fingerprint,
+        resource_type="RESEARCH_RUN",
+        resource_id=run_id,
+    )
     try:
         db.commit()
     except IntegrityError as exc:
         db.rollback()
+        replay = _find_idempotency(
+            db,
+            user_id=context.user.user_id,
+            route=idempotency_route,
+            fingerprint=fingerprint,
+        )
+        if replay is not None:
+            winner_run = db.get(JobRun, replay.resource_id)
+            if winner_run is not None and _owns(winner_run, context):
+                response.status_code = status.HTTP_200_OK
+                return RunResponse.model_validate(winner_run)
         winner = db.scalar(select(JobRun).where(JobRun.active_research_key == active_key))
         orphan = db.get(JobRun, run_id)
         if orphan is not None and (winner is None or orphan.run_id != winner.run_id):
@@ -1572,6 +1760,16 @@ def research_runs(
         statement = statement.order_by(JobRun.started_at.desc(), JobRun.run_id.desc())
     rows = db.scalars(statement.limit(limit)).all()
     return [_research_run_response(db, row) for row in rows]
+
+
+@app.get("/api/v1/research/runs/{run_id}", response_model=ResearchRunResponse)
+def research_run(run_id: str, db: DbSession, context: Current) -> ResearchRunResponse:
+    """Return pollable research progress without exposing another user's run."""
+
+    row = db.get(JobRun, run_id)
+    if row is None or row.run_type != "DAILY" or not _owns(row, context):
+        raise HTTPException(status_code=404, detail="research run not found")
+    return _research_run_response(db, row)
 
 
 @app.post(
@@ -1669,8 +1867,35 @@ def run_audit(run_id: str, db: DbSession, context: Current) -> list[AuditEventRe
     "/api/v1/backtests", response_model=BacktestResponse, status_code=status.HTTP_202_ACCEPTED
 )
 def submit_backtest(
-    request: BacktestRequest, response: Response, db: DbSession, context: Writer
+    request: BacktestRequest,
+    response: Response,
+    db: DbSession,
+    context: Writer,
+    idempotency_key: IdempotencyKey = None,
 ) -> BacktestResponse:
+    idempotency_route = "/api/v1/backtests"
+    fingerprint = _idempotency_fingerprint(
+        context.user.user_id,
+        idempotency_route,
+        idempotency_key,
+        request.model_dump(mode="json"),
+    )
+    replay = _find_idempotency(
+        db,
+        user_id=context.user.user_id,
+        route=idempotency_route,
+        fingerprint=fingerprint,
+    )
+    if replay is not None:
+        existing_backtest = db.get(BacktestRun, replay.resource_id)
+        if (
+            replay.resource_type != "BACKTEST"
+            or existing_backtest is None
+            or existing_backtest.user_id != context.user.user_id
+        ):
+            raise HTTPException(status_code=409, detail="idempotent resource is unavailable")
+        response.status_code = status.HTTP_200_OK
+        return _backtest_response(db, existing_backtest)
     if request.start_date > request.end_date:
         raise HTTPException(status_code=422, detail="start_date must be <= end_date")
     if len(request.snapshot_ids) != 1:
@@ -1779,7 +2004,30 @@ def submit_backtest(
             "user_id": context.user.user_id,
         },
     )
-    db.commit()
+    _remember_idempotency(
+        db,
+        user_id=context.user.user_id,
+        route=idempotency_route,
+        fingerprint=fingerprint,
+        resource_type="BACKTEST",
+        resource_id=backtest.backtest_id,
+    )
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        replay = _find_idempotency(
+            db,
+            user_id=context.user.user_id,
+            route=idempotency_route,
+            fingerprint=fingerprint,
+        )
+        if replay is not None:
+            winner_backtest = db.get(BacktestRun, replay.resource_id)
+            if winner_backtest is not None and winner_backtest.user_id == context.user.user_id:
+                response.status_code = status.HTTP_200_OK
+                return _backtest_response(db, winner_backtest)
+        raise HTTPException(status_code=409, detail="backtest submission conflicted") from exc
     try:
         enqueue_backtest(backtest.backtest_id)
     except Exception as exc:

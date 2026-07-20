@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -12,7 +13,7 @@ from ashare_ai.api.app import app
 from ashare_ai.api.auth import hash_password
 from ashare_ai.api.dependencies import get_db
 from ashare_ai.core.config import Settings
-from ashare_ai.storage.models import Base, UserAccount, UserSession
+from ashare_ai.storage.models import Base, JobRun, UserAccount, UserSession
 
 
 def test_native_bearer_refresh_rotation_revoke_expiry_and_disable() -> None:
@@ -80,6 +81,7 @@ def test_native_bearer_refresh_rotation_revoke_expiry_and_disable() -> None:
             "report_symbol_eligibility": True,
             "trade_plan_generation": True,
                 "research_cancellation": True,
+                "idempotency_key": True,
                 "paper_portfolio_only": True,
                 "profit_exit_monitor": True,
                 "persistent_ai_chat": True,
@@ -88,6 +90,50 @@ def test_native_bearer_refresh_rotation_revoke_expiry_and_disable() -> None:
         assert bootstrap_body["capabilities"]["endpoints"]["report_symbols"] == (
             "/api/v1/reports/{report_id}/symbols"
         )
+        assert bootstrap_body["capabilities"]["endpoints"]["exit_monitor_settings"] == (
+            "/api/v1/assets/exit-monitor"
+        )
+        assert bootstrap_body["capabilities"]["endpoints"]["research_run"] == (
+            "/api/v1/research/runs/{run_id}"
+        )
+        original_assets = bootstrap_body["assets"]
+        monitor = client.put(
+            "/api/v1/assets/exit-monitor",
+            headers=headers,
+            json={"exit_monitor_enabled": True, "default_profit_trigger": "1200.50"},
+        )
+        assert monitor.status_code == 200
+        assert monitor.json()["exit_monitor_enabled"] is True
+        assert Decimal(monitor.json()["default_profit_trigger"]) == Decimal("1200.50")
+        assert monitor.json()["watchlist"] == original_assets["watchlist"]
+        assert monitor.json()["positions"] == original_assets["positions"]
+        assert client.put(
+            "/api/v1/assets/exit-monitor",
+            headers=headers,
+            json={"exit_monitor_enabled": True, "default_profit_trigger": -1},
+        ).status_code == 422
+
+        session.add(
+            JobRun(
+                run_id="native-research-run",
+                user_id=user.user_id,
+                run_type="DAILY",
+                trading_date=date(2026, 7, 20),
+                decision_at=now,
+                status="PENDING",
+                idempotency_key="native-research-key",
+                manifest={},
+                input_hash="a" * 64,
+                started_at=now,
+            )
+        )
+        session.commit()
+        progress = client.get(
+            "/api/v1/research/runs/native-research-run", headers=headers
+        )
+        assert progress.status_code == 200
+        assert progress.json()["phase"] == "等待 Worker"
+        assert progress.json()["progress"] == 0
         assert client.put(
             "/api/v1/assets",
             headers=headers,

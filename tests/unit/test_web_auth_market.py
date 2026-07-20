@@ -501,6 +501,10 @@ def test_user_scoped_latest_run_selection() -> None:
             json={"username": "alice", "password": "alice-password"},
         )
         assert client.get("/api/v1/runs/other-run").status_code == 404
+        assert client.get("/api/v1/research/runs/other-run").status_code == 404
+        owned_research = client.get("/api/v1/research/runs/alice-run")
+        assert owned_research.status_code == 200
+        assert owned_research.json()["progress"] == 100
         assert [item["run_id"] for item in client.get("/api/v1/runs").json()] == ["alice-run"]
     finally:
         app.dependency_overrides.clear()
@@ -971,7 +975,7 @@ def test_research_submission_prepares_frozen_manifest_and_deduplicates(monkeypat
                 "per_symbol_budget": 80_000,
                 "max_stock_price": 500,
             },
-            headers={"x-csrf-token": csrf},
+            headers={"x-csrf-token": csrf, "Idempotency-Key": "mobile-research-1"},
         )
         second = client.post(
             "/api/v1/research/runs",
@@ -983,10 +987,23 @@ def test_research_submission_prepares_frozen_manifest_and_deduplicates(monkeypat
                 "per_symbol_budget": 80_000,
                 "max_stock_price": 500,
             },
-            headers={"x-csrf-token": csrf},
+            headers={"x-csrf-token": csrf, "Idempotency-Key": "mobile-research-1"},
         )
         assert first.status_code == 202
         assert second.status_code == 200
+        conflicting = client.post(
+            "/api/v1/research/runs",
+            json={
+                "trading_date": "2026-07-14",
+                "scope": "CUSTOM",
+                "symbols": ["600519.SH", "000858.SZ"],
+                "total_budget": 900_000,
+                "per_symbol_budget": 80_000,
+                "max_stock_price": 500,
+            },
+            headers={"x-csrf-token": csrf, "Idempotency-Key": "mobile-research-1"},
+        )
+        assert conflicting.status_code == 409
         run = session.get(JobRun, "prepared-run")
         assert run is not None
         assert run.user_id == user.user_id

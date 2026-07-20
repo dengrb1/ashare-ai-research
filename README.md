@@ -218,6 +218,7 @@ docker compose -p ashare-ai -f compose.yaml -f compose.ghcr.yaml up -d
 - `GET /api/v1/auth/me`
 - `GET /api/v1/app/bootstrap`
 - `GET|PUT /api/v1/assets`
+- `PUT /api/v1/assets/exit-monitor`
 - `GET /api/v1/exit-advice`
 - `GET /api/v1/exit-advice/{advice_id}`
 - `GET /api/v1/ai/models`
@@ -233,6 +234,7 @@ docker compose -p ashare-ai -f compose.yaml -f compose.ghcr.yaml up -d
 - `GET /api/v1/search/financial?q=贵州茅台股价`
 - `GET /api/v1/search/status`
 - `POST /api/v1/research/runs`
+- `GET /api/v1/research/runs/{run_id}`
 - `POST /api/v1/research/runs/{run_id}/cancel`
 - `GET /api/v1/research/runs?limit=5&trading_date=YYYY-MM-DD`
 - `GET|PUT /api/v1/research/settings`
@@ -260,7 +262,7 @@ Cookie 对应请求头。原生手机客户端通过 `/api/v1/auth/token` 获取
 中提交自选股/持仓的任意非空子集；省略 `symbols` 继续兼容旧客户端并研究全部已保存标的。
 报告的 `/symbols` 资源会返回每只股票的正式研究状态、确定性评分、数据门禁原因和交易建议
 资格，符合资格的股票可由报告 Trade Plan 接口生成购买建议。每日研究、回测和 Trade Plan 提交写入 PostgreSQL 后进入各自 Redis
-pending/processing 确认队列；同一用户重复提交同一报告和参数的进行中 Trade Plan 会返回既有任务。
+pending/processing 确认队列；手机客户端可使用 `Idempotency-Key` 安全重试，服务端按用户、路由、Key 和请求体哈希返回首次创建的资源，同 Key 改变请求体会返回 `409`。
 密码登录和 Token 签发共享按来源地址计算的失败尝试限流，Nginx 同时按不可伪造的直连来源
 执行边缘限流；超过阈值返回 `429` 和
 `Retry-After`；成功认证会清除该来源的失败计数。业务 API 默认返回 `Cache-Control: no-store`

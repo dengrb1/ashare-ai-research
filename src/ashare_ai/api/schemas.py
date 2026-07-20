@@ -196,6 +196,15 @@ class AssetStateResponse(BaseModel):
     updated_at: datetime | None = None
 
 
+class ExitMonitorSettingsRequest(BaseModel):
+    """Narrow mobile-safe update that cannot overwrite holdings or the watchlist."""
+
+    exit_monitor_enabled: bool
+    default_profit_trigger: Decimal | None = Field(
+        default=None, gt=0, le=Decimal("100000000000")
+    )
+
+
 class ExitAdviceResponse(_SanitizedErrorResponse):
     advice_id: str
     user_id: str

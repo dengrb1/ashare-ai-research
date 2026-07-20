@@ -190,8 +190,9 @@ def test_backtest_submission_is_idempotent_and_audited(monkeypatch) -> None:
     }
     try:
         client = TestClient(app)
-        first = client.post("/api/v1/backtests", json=payload)
-        second = client.post("/api/v1/backtests", json=payload)
+        headers = {"Idempotency-Key": "mobile-backtest-1"}
+        first = client.post("/api/v1/backtests", json=payload, headers=headers)
+        second = client.post("/api/v1/backtests", json=payload, headers=headers)
         assert first.status_code == 202
         assert second.status_code == 200
         assert first.json()["backtest_id"] == second.json()["backtest_id"]
@@ -199,6 +200,10 @@ def test_backtest_submission_is_idempotent_and_audited(monkeypatch) -> None:
         assert first.json()["completed_at"] is None
         assert first.json()["error_message"] is None
         assert queued == [first.json()["backtest_id"]]
+        conflicting = client.post(
+            "/api/v1/backtests", json={**payload, "name": "different"}, headers=headers
+        )
+        assert conflicting.status_code == 409
         run_id = session.query(JobRun).filter(JobRun.run_type == "BACKTEST").one().run_id
         audit = client.get(f"/api/v1/runs/{run_id}/audit")
         assert audit.json()[0]["event_type"] == "BACKTEST_SUBMITTED"

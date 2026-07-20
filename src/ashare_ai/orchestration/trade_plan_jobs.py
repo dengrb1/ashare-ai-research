@@ -28,6 +28,12 @@ from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.orchestration.builtin_backtest import read_backtest_bundle
 from ashare_ai.orchestration.daily import flow
 from ashare_ai.orchestration.redis_queue import RedisLeasedQueue
+from ashare_ai.orchestration.trade_plan_queue import (
+    PROCESSING_QUEUE_NAME,
+    PROMPT_VERSION,
+    QUEUE_NAME,
+    enqueue_trade_plan,
+)
 from ashare_ai.portfolio.user_assets import UserAssetService
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import (
@@ -39,9 +45,13 @@ from ashare_ai.storage.models import (
 )
 from ashare_ai.storage.objects import LocalObjectStore
 
-QUEUE_NAME = "ashare:trade-plan:pending"
-PROCESSING_QUEUE_NAME = "ashare:trade-plan:processing"
-PROMPT_VERSION = "trade-plan-explanation-v1"
+__all__ = [
+    "PROMPT_VERSION",
+    "consume_trade_plan_queue",
+    "enqueue_trade_plan",
+    "execute_trade_plan_job",
+    "run_trade_plan_job",
+]
 
 
 class TradePlanExplanation(BaseModel):
@@ -51,18 +61,6 @@ class TradePlanExplanation(BaseModel):
     exit_logic: str = Field(min_length=1, max_length=2000)
     key_evidence: list[str] = Field(default_factory=list, max_length=10)
     risks: list[str] = Field(default_factory=list, max_length=10)
-
-
-def enqueue_trade_plan(plan_id: str, redis_url: str | None = None) -> None:
-    import redis
-
-    client = redis.Redis.from_url(redis_url or get_settings().redis_url, decode_responses=True)
-    RedisLeasedQueue(
-        client,
-        pending=QUEUE_NAME,
-        processing=PROCESSING_QUEUE_NAME,
-        lease_seconds=get_settings().worker_lease_seconds,
-    ).enqueue(plan_id)
 
 
 def execute_trade_plan_job(

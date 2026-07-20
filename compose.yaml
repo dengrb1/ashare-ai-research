@@ -151,6 +151,9 @@ services:
     environment:
       SEARXNG_BASE_URL: "http://searxng:8080/"
       SEARXNG_SETTINGS_PATH: "/etc/searxng/settings.yml"
+      GRANIAN_BLOCKING_THREADS: "2"
+      GRANIAN_RUNTIME_THREADS: "1"
+      MALLOC_ARENA_MAX: "2"
     volumes:
       - ./docker/searxng-settings.yml:/etc/searxng/settings.yml:ro
     expose: ["8080"]

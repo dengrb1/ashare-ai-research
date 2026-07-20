@@ -154,6 +154,7 @@ def test_trade_plan_submission_binds_report_run_and_reuses_active_request(monkey
         response = client.post(
             "/api/v1/reports/report-1/trade-plans",
             json={"symbols": ["600000.SH"], "budget_override": 100000},
+            headers={"Idempotency-Key": "mobile-trade-plan-1"},
         )
         assert response.status_code == 202
         assert response.json()["run_id"] == "run-1"
@@ -161,9 +162,16 @@ def test_trade_plan_submission_binds_report_run_and_reuses_active_request(monkey
         duplicate = client.post(
             "/api/v1/reports/report-1/trade-plans",
             json={"symbols": ["600000.SH"], "budget_override": 100000},
+            headers={"Idempotency-Key": "mobile-trade-plan-1"},
         )
         assert duplicate.status_code == 200
         assert duplicate.json()["plan_id"] == response.json()["plan_id"]
+        conflicting = client.post(
+            "/api/v1/reports/report-1/trade-plans",
+            json={"symbols": ["600000.SH"], "budget_override": 90000},
+            headers={"Idempotency-Key": "mobile-trade-plan-1"},
+        )
+        assert conflicting.status_code == 409
         assert len(queued) == 1
         stored = session.get(TradePlanRow, response.json()["plan_id"])
         assert stored is not None

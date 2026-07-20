@@ -158,13 +158,13 @@ export function AssetsPage() {
       <div><span>可用现金（估算）</span><strong className={availableCash !== null && availableCash < 0 ? 'price-down' : ''}>{availableCash === null ? '—' : `¥ ${formatAmount(availableCash)}`}</strong><small>{availableCash === null ? '填写账户总资金后自动计算' : '账户总资金减已记录持仓市值'}</small></div>
     </div>
     <ErrorNotice message={formError} />
-    <Panel title="AI 盈利退出监控" eyebrow="EXIT MONITOR">
-      <div className="asset-total-form">
-        <label>默认盈利触发金额（元）<input type="number" min="0.01" step="0.01" value={profitTriggerDraft} disabled={busy} onChange={(event) => setProfitTriggerDraft(event.target.value)} /></label>
-        <label className="toggle-line"><input type="checkbox" checked={exitMonitorEnabled} disabled={busy} onChange={(event) => void persistExitSettings(event.target.checked)} />盘中每 5 分钟自动检查</label>
+    <Panel title="AI 盈利退出监控" eyebrow="EXIT MONITOR" className="exit-monitor-panel" action={<span className={`monitor-state ${exitMonitorEnabled ? 'enabled' : ''}`}><i />{exitMonitorEnabled ? '监控中' : '已暂停'}</span>}>
+      <div className="exit-monitor-form">
+        <label className="exit-trigger-field">默认盈利触发金额（元）<input type="number" min="0.01" step="0.01" value={profitTriggerDraft} disabled={busy} onChange={(event) => setProfitTriggerDraft(event.target.value)} /><small>严格超过该金额后才会触发研究</small></label>
+        <label className="exit-monitor-toggle"><input type="checkbox" checked={exitMonitorEnabled} disabled={busy} onChange={(event) => void persistExitSettings(event.target.checked)} /><span className="toggle-control" aria-hidden="true" /><span><strong>盘中每 5 分钟自动检查</strong><small>仅在 A 股交易时段运行</small></span></label>
         <button className="primary" disabled={busy} onClick={() => void persistExitSettings()}>保存监控设置</button>
       </div>
-      <p className="form-hint">严格超过全局或个股触发金额时才排队研究；同日价格相对上次变化不足 3% 且研究、持仓未变化时复用结论，不重复付费调用。</p>
+      <p className="exit-monitor-note"><span>i</span>个股设置优先于全局阈值；同日价格变化不足 3% 且研究、持仓未变化时复用结论，不重复付费调用。</p>
     </Panel>
     <div className="split-grid assets-grid">
       <Panel title="我的持仓" eyebrow="HOLDINGS" action={<button className="secondary" disabled={busy} onClick={() => setDraft({ ...EMPTY_POSITION })}>新增记录</button>}>

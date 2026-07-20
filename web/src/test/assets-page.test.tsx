@@ -149,6 +149,33 @@ it('validates and persists the account total explicitly', async () => {
   await waitFor(() => expect(savedBodies.at(-1)?.total_assets).toBe(250000))
 })
 
+it('renders the exit monitor as a compact switch and persists its state', async () => {
+  const savedBodies: Array<{ exit_monitor_enabled?: boolean; default_profit_trigger?: number | null }> = []
+  const initial = { watchlist: [], positions: [], exit_monitor_enabled: false, default_profit_trigger: 2000 }
+  const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    if (url.endsWith('/assets') && init?.method === 'PUT') {
+      const body = JSON.parse(String(init.body))
+      savedBodies.push(body)
+      return jsonResponse(body)
+    }
+    if (url.endsWith('/assets')) return jsonResponse(initial)
+    if (url.includes('/market/quotes')) return jsonResponse([])
+    if (url.endsWith('/market/prefetch')) return jsonResponse({ quotes: [], klines: {}, errors: {} })
+    throw new Error(`unexpected request ${url}`)
+  })
+  vi.stubGlobal('fetch', mockFetch)
+
+  render(<MarketProvider><AssetsPage /></MarketProvider>)
+  expect(await screen.findByText('已暂停')).toBeInTheDocument()
+  const monitor = screen.getByRole('checkbox', { name: /盘中每 5 分钟自动检查/ })
+  expect(monitor).not.toBeChecked()
+  expect(monitor).toHaveAttribute('type', 'checkbox')
+  await userEvent.click(monitor)
+  await waitFor(() => expect(savedBodies.at(-1)).toMatchObject({ exit_monitor_enabled: true, default_profit_trigger: 2000 }))
+  expect(await screen.findByText('监控中')).toBeInTheDocument()
+})
+
 it('rolls the account total back when its save fails', async () => {
   const initial = { watchlist: [], positions: [], total_assets: 200000 }
   const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
