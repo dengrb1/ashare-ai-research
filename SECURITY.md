@@ -1,8 +1,14 @@
 # Security Policy
 
-## Supported version
+## Supported versions
 
-Security fixes are applied to the current `main` branch. Older commits, local data,
+| Version | Supported |
+| --- | --- |
+| 1.0.x | Yes |
+| < 1.0 | No |
+
+Security fixes are applied to the current `main` branch and released as compatible
+1.0.x patches when the supported release is affected. Older commits, local data,
 third-party model gateways, and user-supplied deployment infrastructure are not
 maintained as separate supported releases.
 
