@@ -20,12 +20,13 @@ def test_cli_migrate_bootstraps_empty_database_at_alembic_head(tmp_path, monkeyp
             tables = set(inspect(engine).get_table_names())
             assert "trade_plans" in tables
             assert "user_research_preferences" in tables
+            assert "automatic_research_report_configs" in tables
             assert "api_idempotency_keys" in tables
             with engine.connect() as connection:
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar()
-            assert revision == "0014_chat_message_pit"
+            assert revision == "0015_auto_report_configs"
             assert {
                 "exit_advice",
                 "ai_response_cache",

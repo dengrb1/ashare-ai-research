@@ -512,17 +512,78 @@ class ResearchRequest(BaseModel):
         return self
 
 
+class AutomaticResearchReportSettings(BaseModel):
+    slot: Literal["A", "B"]
+    enabled: bool = False
+    scope: Literal["MARKET", "WATCHLIST", "CUSTOM"] = "MARKET"
+    symbols: list[str] = Field(default_factory=list, max_length=MAX_RESEARCH_SYMBOLS)
+    total_budget: Decimal = Field(gt=0, le=Decimal("100000000000"))
+    per_symbol_budget: Decimal = Field(gt=0, le=Decimal("100000000000"))
+    max_stock_price: Decimal | None = Field(default=None, gt=0, le=Decimal("10000000"))
+    config_version: int = Field(default=1, ge=1)
+
+    @field_validator("scope", mode="before")
+    @classmethod
+    def normalize_scope(cls, value: object) -> object:
+        return value.strip().upper() if isinstance(value, str) else value
+
+    @field_validator("symbols", mode="before")
+    @classmethod
+    def normalize_symbols(cls, value: object) -> object:
+        if not isinstance(value, list):
+            return value
+        normalized = [item.strip().upper() if isinstance(item, str) else item for item in value]
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("automatic research symbols must be unique")
+        return sorted(normalized)
+
+    @field_validator("symbols")
+    @classmethod
+    def validate_symbols(cls, value: list[str]) -> list[str]:
+        import re
+
+        if any(re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", item) is None for item in value):
+            raise ValueError("automatic research contains an invalid A-share symbol")
+        return value
+
+    @model_validator(mode="after")
+    def validate_scope_and_budget(self) -> AutomaticResearchReportSettings:
+        if self.scope == "CUSTOM" and not self.symbols:
+            raise ValueError("custom automatic research requires at least one symbol")
+        if self.scope != "CUSTOM" and self.symbols:
+            raise ValueError("symbols are only accepted for custom automatic research")
+        if self.per_symbol_budget > self.total_budget:
+            raise ValueError("per-symbol budget cannot exceed total budget")
+        return self
+
+
 class ResearchSettingsRequest(BaseModel):
-    auto_enabled: bool
+    auto_enabled: bool | None = None
+    automatic_reports: list[AutomaticResearchReportSettings] | None = Field(
+        default=None, min_length=2, max_length=2
+    )
+
+    @model_validator(mode="after")
+    def validate_settings_shape(self) -> ResearchSettingsRequest:
+        if (self.auto_enabled is None) == (self.automatic_reports is None):
+            raise ValueError("submit either auto_enabled or automatic_reports")
+        if self.automatic_reports is not None:
+            slots = [item.slot for item in self.automatic_reports]
+            if set(slots) != {"A", "B"} or len(slots) != len(set(slots)):
+                raise ValueError(
+                    "automatic_reports must contain report A and report B exactly once"
+                )
+        return self
 
 
 class ResearchSettingsResponse(BaseModel):
     auto_enabled: bool = False
     updated_at: datetime | None = None
-    automatic_scope: Literal["MARKET"] = "MARKET"
+    automatic_scope: Literal["MARKET", "WATCHLIST", "CUSTOM"] = "MARKET"
     automatic_total_budget: Decimal = Decimal("1000000")
     automatic_per_symbol_budget: Decimal = Decimal("80000")
     automatic_max_stock_price: Decimal | None = None
+    automatic_reports: list[AutomaticResearchReportSettings] = Field(default_factory=list)
     schedule_timezone: Literal["Asia/Shanghai"] = "Asia/Shanghai"
     schedule_time: Literal["15:05"] = "15:05"
     snapshot_mode: Literal["SYSTEM_ENFORCED"] = "SYSTEM_ENFORCED"
@@ -605,6 +666,7 @@ class ResearchRunResponse(RunResponse):
     portfolio_reason_code: str | None = None
     portfolio_reason_message: str | None = None
     trigger_source: Literal["AUTO", "MANUAL"] = "MANUAL"
+    automatic_report_slot: Literal["A", "B"] | None = None
     requested_date: date | None = None
 
 

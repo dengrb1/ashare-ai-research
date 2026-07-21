@@ -81,6 +81,42 @@ def test_research_settings_are_per_user_and_default_off() -> None:
         assert updated.status_code == 200
         assert updated.json()["auto_enabled"] is True
         assert updated.json()["automatic_total_budget"] == "1000000"
+        reports = updated.json()["automatic_reports"]
+        assert [item["slot"] for item in reports] == ["A", "B"]
+        assert [item["enabled"] for item in reports] == [True, False]
+
+        configured = client.put(
+            "/api/v1/research/settings",
+            json={
+                "automatic_reports": [
+                    {
+                        "slot": "A",
+                        "enabled": True,
+                        "scope": "CUSTOM",
+                        "symbols": ["600519.SH"],
+                        "total_budget": 500000,
+                        "per_symbol_budget": 50000,
+                        "max_stock_price": 2000,
+                    },
+                    {
+                        "slot": "B",
+                        "enabled": True,
+                        "scope": "WATCHLIST",
+                        "symbols": [],
+                        "total_budget": 300000,
+                        "per_symbol_budget": 30000,
+                    },
+                ]
+            },
+        )
+        assert configured.status_code == 200
+        assert configured.json()["auto_enabled"] is True
+        assert configured.json()["automatic_reports"][0]["scope"] == "CUSTOM"
+        invalid = client.put(
+            "/api/v1/research/settings",
+            json={"auto_enabled": False, "automatic_reports": reports},
+        )
+        assert invalid.status_code == 422
     finally:
         app.dependency_overrides.clear()
         session.close()

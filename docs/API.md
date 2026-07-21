@@ -310,7 +310,7 @@ AI 对话线程和消息均按当前用户保存。发送请求增加 `attachmen
 | `completed_at` | datetime/null | 完成或失败时间 |
 | `error_message` | string/null | 已脱敏的失败原因 |
 
-`ResearchRunResponse` 继承 `RunResponse`，并增加：`phase`、`progress`（0–100）、`report_id`、`report_type`、`report_created_at`、`research_scope`、`target_symbols`、`total_budget`、`per_symbol_budget`、`max_stock_price`、`portfolio_requested`、`portfolio_generated`、`reason_code`、`reason_message`、`formal_eligible_count`、`excluded_symbol_count`、`portfolio_reason_code`、`portfolio_reason_message`、`trigger_source`（`AUTO|MANUAL`）和 `requested_date`。
+`ResearchRunResponse` 继承 `RunResponse`，并增加：`phase`、`progress`（0–100）、`report_id`、`report_type`、`report_created_at`、`research_scope`、`target_symbols`、`total_budget`、`per_symbol_budget`、`max_stock_price`、`portfolio_requested`、`portfolio_generated`、`reason_code`、`reason_message`、`formal_eligible_count`、`excluded_symbol_count`、`portfolio_reason_code`、`portfolio_reason_message`、`trigger_source`（`AUTO|MANUAL`）、`automatic_report_slot`（自动任务为 `A|B`，手动任务为 null）和 `requested_date`。
 
 `BacktestRequest`：
 
@@ -339,7 +339,12 @@ AI 对话线程和消息均按当前用户保存。发送请求增加 `attachmen
 
 `WATCHLIST` 的 `symbols` 可以省略，表示当前用户全部自选股与模拟持仓；如果显式传入，所有代码必须属于当前用户的自选股或持仓。`CUSTOM` 必须至少包含一只代码。非交易日会解析为可用的最近完成交易日；若数据未就绪返回 `409`。
 
-`ResearchSettingsRequest` 只有 `auto_enabled: boolean`。`ResearchSettingsResponse` 返回 `auto_enabled`、`updated_at`、固定的自动研究参数（市场范围、总资金 1,000,000、单股 80,000）、`schedule_timezone=Asia/Shanghai`、`schedule_time=15:05`、`snapshot_mode=SYSTEM_ENFORCED` 和 `portfolio_target_count`。
+`ResearchSettingsRequest` 接受以下两种互斥形态：
+
+- 新客户端提交 `automatic_reports`，必须恰好包含槽位 `A`、`B` 各一次。每项包含 `slot`、`enabled`、`scope`（`MARKET|WATCHLIST|CUSTOM`）、`symbols`、`total_budget`、`per_symbol_budget`、可空 `max_stock_price`；预算校验与手动研究相同，`CUSTOM` 必须提供有效股票代码。
+- 兼容旧客户端的 `auto_enabled: boolean` 仍保留。`true` 启用报告 A，`false` 关闭 A/B，已保存的范围和预算不会丢失。同一请求不得同时提交两个字段。
+
+`ResearchSettingsResponse` 返回 `automatic_reports` 固定 A/B 数组；`auto_enabled` 表示至少一套配置启用。旧字段 `automatic_scope`、`automatic_total_budget`、`automatic_per_symbol_budget`、`automatic_max_stock_price` 继续返回报告 A 的值，并同时返回 `updated_at`、`schedule_timezone=Asia/Shanghai`、`schedule_time=15:05`、`snapshot_mode=SYSTEM_ENFORCED` 和 `portfolio_target_count`。
 
 ### 5.4 Trade Plan 请求
 
@@ -509,11 +514,11 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 
 ### `PUT /api/v1/research/settings`
 
-请求 `{"auto_enabled":true|false}`，返回研究设置。自动研究固定使用上海时区和 `15:05` 调度时间，客户端不能修改自动研究范围、预算或快照模式。
+新客户端完整提交 `{"automatic_reports":[报告A,报告B]}`；旧请求 `{"auto_enabled":true|false}` 继续兼容。自动研究固定使用上海时区和 `15:05` 调度时间，快照模式不可修改。启用一个槽位即运行单报告，两个均启用则同日提交两份独立任务，由默认串行 Worker 依次执行。`WATCHLIST` 在每次运行时动态读取用户当时的自选股与模拟持仓；为空时只跳过该槽位并在两小时窗口内继续重试，不阻塞另一槽位。同一用户、交易日和槽位只接受首次提交，首次提交后修改配置或自选与持仓不会在当日重复创建报告，新配置从下一交易日起生效。
 
 ### `GET /api/v1/research/settings`
 
-返回当前用户自动研究设置。
+返回当前用户自动研究设置以及固定 A/B 两套配置。两套配置即使内容完全相同，也会使用不同槽位幂等键生成两份独立报告。
 
 ### `POST /api/v1/research/runs/{run_id}/cancel`
 

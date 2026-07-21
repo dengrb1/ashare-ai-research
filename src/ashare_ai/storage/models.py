@@ -147,6 +147,28 @@ class UserResearchPreference(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class AutomaticResearchReportConfig(Base):
+    """Versioned per-slot settings for a user's automatic daily research."""
+
+    __tablename__ = "automatic_research_report_configs"
+    __table_args__ = (
+        UniqueConstraint("user_id", "slot", name="uq_automatic_research_user_slot"),
+    )
+
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.user_id", ondelete="CASCADE"), primary_key=True
+    )
+    slot: Mapped[str] = mapped_column(String(1), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    scope: Mapped[str] = mapped_column(String(16), nullable=False, default="MARKET")
+    symbols: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    total_budget: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
+    per_symbol_budget: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
+    max_stock_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    config_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class ModelConfigurationVersion(Base):
     """Immutable, encrypted model configuration revision."""
 

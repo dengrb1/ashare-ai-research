@@ -323,6 +323,7 @@ export interface Run {
   portfolio_reason_code?: string | null
   portfolio_reason_message?: string | null
   trigger_source?: 'AUTO' | 'MANUAL'
+  automatic_report_slot?: 'A' | 'B' | null
   requested_date?: string | null
   reused?: boolean
 }
@@ -341,14 +342,26 @@ export interface ResearchSubmission {
 export interface ResearchSettings {
   auto_enabled: boolean
   updated_at?: string | null
-  automatic_scope: 'MARKET'
+  automatic_scope: ResearchScope
   automatic_total_budget: number | string
   automatic_per_symbol_budget: number | string
   automatic_max_stock_price?: number | string | null
+  automatic_reports?: AutomaticResearchReportSettings[]
   schedule_timezone: 'Asia/Shanghai'
   schedule_time: '15:05'
   snapshot_mode: 'SYSTEM_ENFORCED'
   portfolio_target_count: number
+}
+
+export interface AutomaticResearchReportSettings {
+  slot: 'A' | 'B'
+  enabled: boolean
+  scope: ResearchScope
+  symbols: string[]
+  total_budget: number | string
+  per_symbol_budget: number | string
+  max_stock_price?: number | string | null
+  config_version?: number
 }
 
 export interface Score {

@@ -31,6 +31,7 @@ from ashare_ai.storage.models import (
     AIChatMessage,
     AIChatThread,
     AuditEvent,
+    AutomaticResearchReportConfig,
     BacktestRun,
     CandidateRow,
     EvidenceRow,
@@ -320,6 +321,18 @@ def preview_profile(session: Session, user_id: str, profile: dict[str, Any]) -> 
             "imported": profile.get("research_preference"),
             "default": "CURRENT",
         },
+        "automatic_research_reports": {
+            "current": [
+                _row_dict(row)
+                for row in session.scalars(
+                    select(AutomaticResearchReportConfig).where(
+                        AutomaticResearchReportConfig.user_id == user_id
+                    )
+                ).all()
+            ],
+            "imported": profile.get("automatic_research_reports") or [],
+            "default": "CURRENT",
+        },
         "history": {
             "threads": len(profile.get("ai_chat_threads") or []),
             "thread_id_duplicates": duplicate_threads,
@@ -424,7 +437,13 @@ def apply_profile(
 ) -> dict[str, Any]:
     counts = {"inserted": 0, "skipped": 0, "remapped": 0}
     _merge_assets(session, user_id, profile.get("asset_state") or {}, merge_options)
-    _merge_preference(session, user_id, profile.get("research_preference"), merge_options)
+    _merge_preference(
+        session,
+        user_id,
+        profile.get("research_preference"),
+        profile.get("automatic_research_reports"),
+        merge_options,
+    )
     thread_map = _import_threads(session, user_id, profile, counts)
     run_map = _import_runs(session, user_id, profile, counts)
     snapshot_map = _import_snapshots(
@@ -452,6 +471,13 @@ def _collect_profile(
 ) -> tuple[dict[str, Any], dict[str, bytes]]:
     assets = session.get(UserAssetState, user_id)
     preference = session.get(UserResearchPreference, user_id)
+    automatic_reports = list(
+        session.scalars(
+            select(AutomaticResearchReportConfig).where(
+                AutomaticResearchReportConfig.user_id == user_id
+            )
+        ).all()
+    )
     threads = list(
         session.scalars(select(AIChatThread).where(AIChatThread.user_id == user_id)).all()
     )
@@ -565,6 +591,9 @@ def _collect_profile(
         "schema_version": ARCHIVE_VERSION,
         "asset_state": _without_owner(_row_dict(assets)),
         "research_preference": _without_owner(_row_dict(preference)),
+        "automatic_research_reports": [
+            _without_owner(_row_dict(row)) for row in automatic_reports
+        ],
         "ai_chat_threads": [_without_owner(_row_dict(row)) for row in threads],
         "ai_chat_messages": serialized_messages,
         "job_runs": [_without_owner(_sanitize_paths(_row_dict(row))) for row in runs],
@@ -994,21 +1023,90 @@ def _merge_assets(
 
 
 def _merge_preference(
-    session: Session, user_id: str, imported: Any, options: dict[str, Any]
+    session: Session,
+    user_id: str,
+    imported: Any,
+    imported_reports: Any,
+    options: dict[str, Any],
 ) -> None:
     if not isinstance(imported, dict):
         return
+    now = datetime.now(UTC)
     row = session.get(UserResearchPreference, user_id)
     if row is None:
         row = UserResearchPreference(
             user_id=user_id,
             auto_enabled=bool(imported.get("auto_enabled", False)),
-            updated_at=datetime.now(UTC),
+            updated_at=now,
         )
         session.add(row)
     elif options.get("research_preference") == "IMPORTED":
         row.auto_enabled = bool(imported.get("auto_enabled", False))
-        row.updated_at = datetime.now(UTC)
+        row.updated_at = now
+    reports = imported_reports if isinstance(imported_reports, list) else []
+    use_imported = options.get("research_preference") == "IMPORTED"
+    for raw in reports:
+        if not isinstance(raw, dict) or raw.get("slot") not in {"A", "B"}:
+            continue
+        key = {"user_id": user_id, "slot": str(raw["slot"])}
+        config = session.get(AutomaticResearchReportConfig, key)
+        if config is not None and not use_imported:
+            continue
+        if config is None:
+            config = AutomaticResearchReportConfig(
+                **key,
+                total_budget=Decimal(str(raw.get("total_budget", "1000000"))),
+                per_symbol_budget=Decimal(str(raw.get("per_symbol_budget", "80000"))),
+                updated_at=now,
+            )
+            session.add(config)
+        config.enabled = bool(raw.get("enabled", False))
+        config.scope = str(raw.get("scope", "MARKET"))
+        config.symbols = list(raw.get("symbols") or [])
+        config.total_budget = Decimal(str(raw.get("total_budget", "1000000")))
+        config.per_symbol_budget = Decimal(str(raw.get("per_symbol_budget", "80000")))
+        maximum = raw.get("max_stock_price")
+        config.max_stock_price = Decimal(str(maximum)) if maximum is not None else None
+        config.config_version = max(1, int(raw.get("config_version", 1)))
+        config.updated_at = now
+    # Old v1 archives only contain the legacy switch. Materialize any missing
+    # slots so reads and the normalized scheduler observe the same state.
+    session.flush()
+    stored_slots = set(
+        session.scalars(
+            select(AutomaticResearchReportConfig.slot).where(
+                AutomaticResearchReportConfig.user_id == user_id
+            )
+        ).all()
+    )
+    for slot in {"A", "B"} - stored_slots:
+        session.add(
+            AutomaticResearchReportConfig(
+                user_id=user_id,
+                slot=slot,
+                enabled=bool(row.auto_enabled and slot == "A"),
+                scope="MARKET",
+                symbols=[],
+                total_budget=Decimal("1000000"),
+                per_symbol_budget=Decimal("80000"),
+                updated_at=now,
+            )
+        )
+    session.flush()
+    # The normalized A/B rows are authoritative. Keep the legacy preference
+    # switch synchronized with the final merged state even when CURRENT keeps
+    # an existing slot and IMPORTED only fills a missing one.
+    row.auto_enabled = bool(
+        session.scalar(
+            select(AutomaticResearchReportConfig.user_id)
+            .where(
+                AutomaticResearchReportConfig.user_id == user_id,
+                AutomaticResearchReportConfig.enabled.is_(True),
+            )
+            .limit(1)
+        )
+    )
+    row.updated_at = now
 
 
 def _import_threads(

@@ -20,15 +20,18 @@ from ashare_ai.core.hashing import canonical_json, sha256_bytes
 from ashare_ai.storage.models import (
     AIChatMessage,
     AIChatThread,
+    AutomaticResearchReportConfig,
     Base,
     SecurityMaster,
     UserAccount,
     UserAssetState,
+    UserResearchPreference,
 )
 from ashare_ai.storage.personal_archive import (
     ARCHIVE_FORMAT,
     PersonalArchiveError,
     _looks_like_image,
+    _merge_preference,
     _server_keys,
     _validate_profile_pit,
     apply_profile,
@@ -349,6 +352,89 @@ def test_archive_pit_accepts_portfolio_rows_without_decision_at() -> None:
             "portfolios": [{"portfolio_id": "portfolio-1", "run_id": "run-1"}],
         }
     )
+
+
+def test_archive_report_merge_keeps_legacy_switch_in_sync() -> None:
+    session, user_id = _database()
+    now = datetime.now(UTC)
+    session.add(
+        UserResearchPreference(user_id=user_id, auto_enabled=False, updated_at=now)
+    )
+    session.add(
+        AutomaticResearchReportConfig(
+            user_id=user_id,
+            slot="A",
+            enabled=False,
+            scope="MARKET",
+            symbols=[],
+            total_budget=1_000_000,
+            per_symbol_budget=80_000,
+            updated_at=now,
+        )
+    )
+    session.commit()
+
+    _merge_preference(
+        session,
+        user_id,
+        {"auto_enabled": True},
+        [
+            {
+                "slot": "A",
+                "enabled": True,
+                "scope": "MARKET",
+                "symbols": [],
+                "total_budget": "1000000",
+                "per_symbol_budget": "80000",
+            },
+            {
+                "slot": "B",
+                "enabled": True,
+                "scope": "CUSTOM",
+                "symbols": ["600519.SH"],
+                "total_budget": "500000",
+                "per_symbol_budget": "50000",
+            },
+        ],
+        {"research_preference": "CURRENT"},
+    )
+    session.flush()
+
+    preference = session.get(UserResearchPreference, user_id)
+    report_a = session.get(
+        AutomaticResearchReportConfig, {"user_id": user_id, "slot": "A"}
+    )
+    report_b = session.get(
+        AutomaticResearchReportConfig, {"user_id": user_id, "slot": "B"}
+    )
+    assert preference is not None and preference.auto_enabled is True
+    assert report_a is not None and report_a.enabled is False
+    assert report_b is not None and report_b.enabled is True
+
+
+def test_legacy_archive_materializes_default_report_slots() -> None:
+    session, user_id = _database()
+
+    _merge_preference(
+        session,
+        user_id,
+        {"auto_enabled": True},
+        None,
+        {"research_preference": "IMPORTED"},
+    )
+    session.flush()
+
+    reports = list(
+        session.scalars(
+            select(AutomaticResearchReportConfig)
+            .where(AutomaticResearchReportConfig.user_id == user_id)
+            .order_by(AutomaticResearchReportConfig.slot)
+        ).all()
+    )
+    assert [(report.slot, report.enabled) for report in reports] == [
+        ("A", True),
+        ("B", False),
+    ]
 
 
 def test_stock_name_mentions_cannot_be_bound_to_a_different_symbol(monkeypatch) -> None:

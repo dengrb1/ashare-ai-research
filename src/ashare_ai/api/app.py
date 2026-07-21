@@ -492,6 +492,7 @@ def _research_run_response(db: Session, row: JobRun) -> ResearchRunResponse:
             "portfolio_reason_code": portfolio_outcome.get("reason_code"),
             "portfolio_reason_message": portfolio_outcome.get("reason_message"),
             "trigger_source": manifest.get("trigger_source", "MANUAL"),
+            "automatic_report_slot": manifest.get("automatic_report_slot"),
             "requested_date": manifest.get("requested_date", row.trading_date),
         }
     )
@@ -2232,8 +2233,15 @@ def research_settings(db: DbSession, context: Current) -> ResearchSettingsRespon
 def update_research_settings(
     payload: ResearchSettingsRequest, db: DbSession, context: Writer
 ) -> ResearchSettingsResponse:
+    reports = (
+        [item.model_dump(mode="python") for item in payload.automatic_reports]
+        if payload.automatic_reports is not None
+        else None
+    )
     settings = ResearchSettingsService(db).update(
-        context.user.user_id, auto_enabled=payload.auto_enabled
+        context.user.user_id,
+        auto_enabled=payload.auto_enabled,
+        automatic_reports=reports,
     )
     return ResearchSettingsResponse.model_validate(
         {**settings, "portfolio_target_count": _configured_portfolio_target_count()}

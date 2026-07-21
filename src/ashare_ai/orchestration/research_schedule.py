@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from datetime import UTC, date, datetime, time, timedelta
-from decimal import Decimal
 from importlib import import_module
 from typing import Any, Protocol
 
@@ -10,16 +10,21 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ashare_ai.core.config import get_settings
 from ashare_ai.core.hashing import stable_hash
 from ashare_ai.core.security import safe_error_message
 from ashare_ai.core.time import SHANGHAI
 from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.orchestration.research_jobs import enqueue_research
+from ashare_ai.orchestration.research_settings import ResearchSettingsService
 from ashare_ai.storage.database import SessionLocal
-from ashare_ai.storage.models import JobRun, UserAccount, UserResearchPreference
+from ashare_ai.storage.models import (
+    AutomaticResearchReportConfig,
+    JobRun,
+    UserAccount,
+    UserAssetState,
+)
 
-AUTO_TOTAL_BUDGET = Decimal("1000000")
-AUTO_PER_SYMBOL_BUDGET = Decimal("80000")
 MARKET_OPEN = time(9, 0)
 AUTO_START = time(15, 5)
 AUTO_RETRY_WINDOW = timedelta(hours=2)
@@ -148,44 +153,106 @@ def dispatch_auto_research(
         pipeline_factory = load_pipeline
     pipeline = pipeline_factory()
     queued: list[str] = []
+    skipped: list[dict[str, str]] = []
     with session_factory() as session:
         user_ids = list(
             session.scalars(
-                select(UserResearchPreference.user_id)
-                .join(UserAccount, UserAccount.user_id == UserResearchPreference.user_id)
+                select(AutomaticResearchReportConfig.user_id)
+                .join(UserAccount, UserAccount.user_id == AutomaticResearchReportConfig.user_id)
                 .where(
-                    UserResearchPreference.auto_enabled.is_(True),
+                    AutomaticResearchReportConfig.enabled.is_(True),
                     UserAccount.enabled.is_(True),
                 )
+                .distinct()
             ).all()
         )
+        user_settings = {
+            user_id: ResearchSettingsService(session).get(user_id) for user_id in user_ids
+        }
     for user_id in user_ids:
-        run_id = _submit_auto_for_user(
-            user_id=user_id,
-            trading_date=current.date(),
-            pipeline=pipeline,
-            session_factory=session_factory,
-            enqueue=enqueue,
-        )
-        if run_id is not None:
-            queued.append(run_id)
-    return {"state": "READY", "queued": queued, "enabled_user_count": len(user_ids)}
+        reports = user_settings[user_id]["automatic_reports"]
+        for report in reports:
+            if not report["enabled"]:
+                continue
+            try:
+                run_id = _submit_auto_for_user(
+                    user_id=user_id,
+                    trading_date=current.date(),
+                    report=report,
+                    pipeline=pipeline,
+                    session_factory=session_factory,
+                    enqueue=enqueue,
+                )
+                if run_id is not None:
+                    queued.append(run_id)
+                elif report["scope"] == "WATCHLIST":
+                    skipped.append(
+                        {"user_id": user_id, "slot": report["slot"], "reason": "EMPTY_SCOPE"}
+                    )
+            except Exception as exc:
+                skipped.append(
+                    {
+                        "user_id": user_id,
+                        "slot": report["slot"],
+                        "reason": type(exc).__name__,
+                    }
+                )
+    return {
+        "state": "READY",
+        "queued": queued,
+        "enabled_user_count": len(user_ids),
+        "skipped": skipped,
+    }
 
 
 def _submit_auto_for_user(
     *,
     user_id: str,
     trading_date: date,
+    report: dict[str, Any],
     pipeline: Any,
     session_factory: Callable[[], Session],
     enqueue: Callable[[str], None],
 ) -> str | None:
-    idempotency_key = stable_hash(
-        {
-            "kind": "AUTO_DAILY_RESEARCH",
-            "user_id": user_id,
-            "trading_date": trading_date,
-        }
+    slot = str(report["slot"])
+    scope = str(report["scope"])
+    target_symbols = list(report.get("symbols") or [])
+    if scope == "WATCHLIST":
+        with session_factory() as session:
+            assets = session.get(UserAssetState, user_id)
+            if assets is None:
+                return None
+            target_symbols = sorted(
+                set(str(symbol) for symbol in assets.watchlist)
+                | {
+                    str(position.get("symbol", "")).upper()
+                    for position in assets.positions
+                    if position.get("symbol")
+                }
+            )
+        if not target_symbols:
+            return None
+    elif scope == "MARKET":
+        target_symbols = []
+    budget = {
+        "total_budget": str(report["total_budget"]),
+        "per_symbol_budget": str(report["per_symbol_budget"]),
+        "max_stock_price": (
+            str(report["max_stock_price"]) if report.get("max_stock_price") is not None else None
+        ),
+    }
+    frozen_config = {
+        "slot": slot,
+        "scope": scope,
+        "symbols": target_symbols,
+        "research_budget": budget,
+        "config_version": int(report.get("config_version", 1)),
+    }
+    idempotency_key = _automatic_run_key(
+        kind="AUTO_DAILY_RESEARCH",
+        user_id=user_id,
+        trading_date=trading_date,
+        slot=slot,
     )
     with session_factory() as session:
         existing = session.scalar(
@@ -198,29 +265,32 @@ def _submit_auto_for_user(
         run = session.get(JobRun, run_id)
         if run is None:
             raise RuntimeError("pipeline did not persist automatic research run")
-        active_key = stable_hash(
-            {
-                "kind": "ACTIVE_DAILY_RESEARCH",
-                "trigger_source": "AUTO",
-                "user_id": user_id,
-                "trading_date": trading_date,
-            }
+        active_key = _automatic_run_key(
+            kind="ACTIVE_DAILY_RESEARCH",
+            user_id=user_id,
+            trading_date=trading_date,
+            slot=slot,
+            trigger_source="AUTO",
         )
-        budget = {
-            "total_budget": str(AUTO_TOTAL_BUDGET),
-            "per_symbol_budget": str(AUTO_PER_SYMBOL_BUDGET),
-            "max_stock_price": None,
-        }
+        target_count = _configured_portfolio_target_count()
+        portfolio_requested = scope == "MARKET" or len(target_symbols) >= target_count
         manifest = {
             **dict(run.manifest),
             "trigger_source": "AUTO",
             "requested_date": trading_date.isoformat(),
             "actual_research_date": trading_date.isoformat(),
-            "research_scope": "MARKET",
-            "target_symbols": [],
-            "tracked_symbols": [],
+            "automatic_report_slot": slot,
+            "automatic_report_config": frozen_config,
+            "research_scope": scope,
+            "target_symbols": target_symbols,
+            "tracked_symbols": target_symbols,
             "research_budget": budget,
-            "portfolio_requested": True,
+            "portfolio_requested": portfolio_requested,
+            "research_only_reason": (
+                None
+                if portfolio_requested
+                else f"定向研究标的少于 {target_count} 只，正式个股研究正常完成但不生成整体组合"
+            ),
             "snapshot_mode": "SYSTEM_ENFORCED",
         }
         run.user_id = user_id
@@ -237,6 +307,10 @@ def _submit_auto_for_user(
                 "user_id": user_id,
                 "requested_date": trading_date.isoformat(),
                 "actual_research_date": trading_date.isoformat(),
+                "automatic_report_slot": slot,
+                "research_scope": scope,
+                "target_symbol_count": len(target_symbols),
+                "frozen_config": frozen_config,
                 "input_hash": run.input_hash,
             },
         )
@@ -272,6 +346,40 @@ def _submit_auto_for_user(
                 session.commit()
         raise
     return run_id
+
+
+def _automatic_run_key(
+    *,
+    kind: str,
+    user_id: str,
+    trading_date: date,
+    slot: str,
+    trigger_source: str | None = None,
+) -> str:
+    identity: dict[str, Any] = {
+        "kind": kind,
+        "user_id": user_id,
+        "trading_date": trading_date,
+    }
+    if trigger_source is not None:
+        identity["trigger_source"] = trigger_source
+    # Slot A replaces the legacy single automatic report and deliberately
+    # retains its key so a mid-window deployment cannot submit it twice.
+    if slot != "A":
+        identity["automatic_report_slot"] = slot
+    return stable_hash(identity)
+
+
+def _configured_portfolio_target_count() -> int:
+    path = get_settings().policy_config_path
+    try:
+        value = json.loads(path.read_bytes())["portfolio"]["target_count"]
+        target_count = int(value)
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("versioned portfolio target_count is unavailable") from exc
+    if target_count <= 0:
+        raise RuntimeError("portfolio target_count must be positive")
+    return target_count
 
 
 def _date_value(value: object) -> date | None:

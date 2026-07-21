@@ -156,7 +156,7 @@ export const api = {
 
   submitResearch: (payload: string | ResearchSubmission) => request<Run>('/research/runs', { method: 'POST', body: JSON.stringify(typeof payload === 'string' ? { trading_date: payload } : payload) }),
   researchSettings: () => request<ResearchSettings>('/research/settings'),
-  saveResearchSettings: (autoEnabled: boolean) => request<ResearchSettings>('/research/settings', { method: 'PUT', body: JSON.stringify({ auto_enabled: autoEnabled }) }),
+  saveResearchSettings: (payload: boolean | { automatic_reports: import('./types').AutomaticResearchReportSettings[] }) => request<ResearchSettings>('/research/settings', { method: 'PUT', body: JSON.stringify(typeof payload === 'boolean' ? { auto_enabled: payload } : payload) }),
   researchRuns: (limit = 5, tradingDate?: string, published = false) => request<Run[]>(`/research/runs${params({ limit, trading_date: tradingDate, mine: 'true', published: published ? 'true' : undefined })}`),
   cancelResearch: (runId: string) => request<Run>(`/research/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' }),
   runs: () => request<Run[] | { items: Run[] }>('/runs'),
