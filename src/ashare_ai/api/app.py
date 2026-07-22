@@ -4,7 +4,7 @@ import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal, NoReturn
 from uuid import uuid4
@@ -127,7 +127,7 @@ from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.orchestration.backtest_jobs import enqueue_backtest
 from ashare_ai.orchestration.daily import load_pipeline
 from ashare_ai.orchestration.personal_archive_jobs import enqueue_personal_archive
-from ashare_ai.orchestration.research_jobs import enqueue_research
+from ashare_ai.orchestration.research_jobs import enqueue_research, enqueue_research_at
 from ashare_ai.orchestration.research_schedule import (
     AKShareDataReadiness,
     FreeExchangeCalendar,
@@ -317,20 +317,49 @@ def _manual_research_date(requested_date: date, now: datetime) -> date:
         return requested_date
     try:
         sessions = FreeExchangeCalendar().sessions(
-            requested_date - timedelta(days=20), current.date()
+            requested_date - timedelta(days=20), current.date() + timedelta(days=10)
         )
-        readiness = AKShareDataReadiness()
         return resolve_manual_research_date(
             requested_date=requested_date,
             now=current,
             sessions=sessions,
-            data_ready=lambda value: readiness.ready(value, current),
+            data_ready=lambda _: True,
+            require_ready=False,
         )
     except Exception as exc:
         raise HTTPException(
             status_code=409,
-            detail="no completed trading session with ready data is available",
+            detail=safe_error_message(exc),
         ) from exc
+
+
+def _research_readiness_wait(trading_date: date, now: datetime) -> dict[str, str | int] | None:
+    """Return durable wait metadata without changing the selected session."""
+    if get_settings().canonical_bundle_mode in {"file", "demo"}:
+        return None
+    current = now.astimezone(SHANGHAI) if now.tzinfo else now.replace(tzinfo=SHANGHAI)
+    try:
+        ready = AKShareDataReadiness().ready(trading_date, current)
+    except Exception:
+        ready = False
+    if ready:
+        return None
+    try:
+        sessions = FreeExchangeCalendar().sessions(
+            trading_date + timedelta(days=1), trading_date + timedelta(days=10)
+        )
+        next_session = next(value for value in sessions if value > trading_date)
+        deadline = datetime.combine(next_session, time(9, 0), tzinfo=SHANGHAI)
+    except Exception:
+        deadline = current + timedelta(minutes=get_settings().daily_research_retry_limit_minutes)
+    retry_at = min(
+        current + timedelta(minutes=get_settings().daily_research_retry_minutes), deadline
+    )
+    return {
+        "deadline_at": deadline.astimezone(UTC).isoformat(),
+        "next_retry_at": retry_at.astimezone(UTC).isoformat(),
+        "attempt_count": 0,
+    }
 
 
 def _trade_plan_policy_payload(run: JobRun) -> dict[str, Any]:
@@ -444,6 +473,8 @@ def _research_run_response(db: Session, row: JobRun) -> ResearchRunResponse:
             "CANCEL_REQUESTED": "正在停止（当前阶段完成后）",
             "CANCELLED": "研究已停止",
         }[normalized]
+    elif normalized == "DATA_READINESS_WAITING":
+        phase, progress = "等待基准数据同步", 0
     elif normalized in {"PENDING", "QUEUED"}:
         phase, progress = "等待 Worker", 0
     else:
@@ -494,6 +525,10 @@ def _research_run_response(db: Session, row: JobRun) -> ResearchRunResponse:
             "trigger_source": manifest.get("trigger_source", "MANUAL"),
             "automatic_report_slot": manifest.get("automatic_report_slot"),
             "requested_date": manifest.get("requested_date", row.trading_date),
+            "data_readiness_state": (
+                "WAITING_FOR_BENCHMARKS" if normalized == "DATA_READINESS_WAITING" else None
+            ),
+            "next_retry_at": (manifest.get("data_readiness_wait") or {}).get("next_retry_at"),
         }
     )
 
@@ -2035,7 +2070,9 @@ def submit_research(
         response.status_code = status.HTTP_200_OK
         return RunResponse.model_validate(existing_run)
     requested_date = payload.trading_date
-    actual_research_date = _manual_research_date(requested_date, datetime.now(SHANGHAI))
+    submitted_at = datetime.now(SHANGHAI)
+    actual_research_date = _manual_research_date(requested_date, submitted_at)
+    readiness_wait = _research_readiness_wait(actual_research_date, submitted_at)
     if payload.scope == "WATCHLIST":
         assets = UserAssetService(db).get(context.user.user_id)
         available_symbols = sorted(
@@ -2142,9 +2179,12 @@ def submit_research(
             if portfolio_requested
             else f"定向研究标的少于 {target_count} 只，正式个股研究正常完成但不生成整体组合"
         ),
+        "data_readiness_wait": readiness_wait,
     }
     run.manifest = frozen_manifest
     run.input_hash = stable_hash(frozen_manifest)
+    if readiness_wait is not None:
+        run.status = "DATA_READINESS_WAITING"
     AuditLogger(db).record(
         run_id,
         "RESEARCH_SUBMITTED",
@@ -2203,7 +2243,23 @@ def submit_research(
         response.status_code = 200
         return RunResponse.model_validate(winner)
     try:
-        enqueue_research(run_id)
+        if readiness_wait is not None:
+            enqueue_research_at(
+                run_id, datetime.fromisoformat(str(readiness_wait["next_retry_at"]))
+            )
+            AuditLogger(db).record(
+                run_id,
+                "DATA_READINESS_WAITING",
+                "Research is waiting for all required benchmark data",
+                details={
+                    "trading_date": actual_research_date.isoformat(),
+                    "next_retry_at": readiness_wait["next_retry_at"],
+                    "deadline_at": readiness_wait["deadline_at"],
+                },
+            )
+            db.commit()
+        else:
+            enqueue_research(run_id)
     except Exception as exc:
         run.status = "FAILED"
         run.active_research_key = None
@@ -2218,7 +2274,19 @@ def submit_research(
         )
         db.commit()
         raise HTTPException(status_code=503, detail="research queue unavailable") from exc
-    return RunResponse.model_validate(run)
+    return RunResponse.model_validate(
+        {
+            **{column.name: getattr(run, column.name) for column in run.__table__.columns},
+            "data_readiness_state": (
+                "WAITING_FOR_BENCHMARKS"
+                if run.status == "DATA_READINESS_WAITING"
+                else None
+            ),
+            "next_retry_at": (dict(run.manifest).get("data_readiness_wait") or {}).get(
+                "next_retry_at"
+            ),
+        }
+    )
 
 
 @app.get("/api/v1/research/settings", response_model=ResearchSettingsResponse)
@@ -2317,7 +2385,7 @@ def cancel_research_run(
         "Daily research stop requested by its owner",
         details={"user_id": context.user.user_id, "previous_status": normalized},
     )
-    if normalized in {"PENDING", "QUEUED"}:
+    if normalized in {"PENDING", "QUEUED", "DATA_READINESS_WAITING"}:
         row.status = "CANCELLED"
         row.active_research_key = None
         row.error_message = None
@@ -2326,7 +2394,11 @@ def cancel_research_run(
             run_id,
             "RESEARCH_CANCELLED",
             "Queued daily research cancelled before worker execution",
-            details={"boundary": "queued"},
+            details={
+                "boundary": (
+                    "queued" if normalized != "DATA_READINESS_WAITING" else "data_readiness_wait"
+                )
+            },
         )
     elif normalized in {"RUNNING", "PROCESSING"}:
         row.status = "CANCEL_REQUESTED"

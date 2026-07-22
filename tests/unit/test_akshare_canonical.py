@@ -13,6 +13,7 @@ from ashare_ai.core.time import SHANGHAI
 from ashare_ai.orchestration.akshare_bundle import (
     AKShareCanonicalBundleBuilder,
     AKShareCanonicalProvider,
+    BenchmarkDataNotReadyError,
     FallbackCanonicalProvider,
     MarketDataAcquisitionError,
 )
@@ -483,6 +484,58 @@ def test_bundle_fails_closed_when_all_benchmark_sources_fail() -> None:
         assert "000300" in str(exc)
     else:
         raise AssertionError("benchmark acquisition must fail closed")
+
+
+def test_bundle_reports_every_lagging_benchmark_as_retryable_data_readiness() -> None:
+    trading_date = date(2026, 7, 21)
+
+    class LaggingBenchmarksProvider(Provider):
+        def benchmark_bars(self, code, start_date, end_date):
+            return [
+                item
+                for item in super().benchmark_bars(code, start_date, end_date)
+                if date.fromisoformat(str(item["日期"])[:10]) < trading_date
+            ]
+
+    builder = AKShareCanonicalBundleBuilder(
+        provider=LaggingBenchmarksProvider(trading_date),
+        clock=lambda: datetime(2026, 7, 21, 20, tzinfo=SHANGHAI),
+        bundle_size=20,
+        history_sessions=65,
+    )
+
+    try:
+        builder.build(trading_date, datetime(2026, 7, 21, 18, tzinfo=SHANGHAI))
+    except BenchmarkDataNotReadyError as exc:
+        assert exc.retryable is True
+        assert exc.target_date == trading_date
+        assert exc.missing_benchmarks == ("CSI1000", "CSI300", "CSI500")
+        assert exc.last_available_dates == {
+            "CSI1000": date(2026, 7, 20),
+            "CSI300": date(2026, 7, 20),
+            "CSI500": date(2026, 7, 20),
+        }
+        assert exc.audit_details()["missing_date_summary"] == {
+            name: {"count": 1, "first": "2026-07-21", "last": "2026-07-21"}
+            for name in ("CSI1000", "CSI300", "CSI500")
+        }
+    else:
+        raise AssertionError("lagging benchmark returns must not produce a partial bundle")
+
+
+def test_bundle_builds_when_every_benchmark_return_reaches_target_session() -> None:
+    trading_date = date(2026, 7, 21)
+    bundle = AKShareCanonicalBundleBuilder(
+        provider=Provider(trading_date),
+        clock=lambda: datetime(2026, 7, 21, 20, tzinfo=SHANGHAI),
+        bundle_size=20,
+        history_sessions=65,
+    ).build(trading_date, datetime(2026, 7, 21, 18, tzinfo=SHANGHAI))
+
+    assert all(
+        trading_date in bundle.benchmark_returns[name]
+        for name in ("CSI300", "CSI500", "CSI1000", "EQUAL_WEIGHT_UNIVERSE")
+    )
 
 
 def test_canonical_provider_falls_back_for_missing_history_and_tracks_source() -> None:

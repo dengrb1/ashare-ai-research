@@ -98,6 +98,71 @@ class MarketDataAcquisitionError(RuntimeError):
         }
 
 
+class BenchmarkDataNotReadyError(RuntimeError):
+    """Retryable failure when required benchmark returns have not caught up.
+
+    This deliberately carries only dates and benchmark identifiers so it can be
+    recorded in run audits and returned through the public, sanitized error path.
+    It distinguishes a normal post-close vendor lag from an invalid research
+    request: callers may reschedule the same frozen task, but must never build a
+    snapshot with an incomplete return series.
+    """
+
+    reason = "BENCHMARK_DATA_NOT_READY"
+    retryable = True
+
+    def __init__(
+        self,
+        *,
+        target_date: date,
+        missing_benchmarks: tuple[str, ...],
+        last_available_dates: dict[str, date | None],
+        missing_dates_by_benchmark: dict[str, tuple[date, ...]] | None = None,
+    ) -> None:
+        self.target_date = target_date
+        self.missing_benchmarks = tuple(sorted(set(missing_benchmarks)))
+        self.last_available_dates = {
+            name: last_available_dates.get(name) for name in self.missing_benchmarks
+        }
+        self.missing_dates_by_benchmark = {
+            name: tuple(sorted(set(values)))
+            for name, values in (missing_dates_by_benchmark or {}).items()
+            if name in self.missing_benchmarks
+        }
+        detail_parts = []
+        for name in self.missing_benchmarks:
+            last_available = self.last_available_dates[name]
+            last_available_text = (
+                last_available.isoformat() if last_available is not None else "无"
+            )
+            detail_parts.append(f"{name}（最后可用日：{last_available_text}）")
+        details = "；".join(detail_parts)
+        super().__init__(
+            f"基准数据尚未同步至目标交易日 {target_date.isoformat()}：{details}；可稍后重试"
+        )
+
+    def audit_details(self) -> dict[str, Any]:
+        missing_date_summary = {
+            name: {
+                "count": len(values),
+                "first": values[0].isoformat() if values else None,
+                "last": values[-1].isoformat() if values else None,
+            }
+            for name, values in self.missing_dates_by_benchmark.items()
+        }
+        return {
+            "reason": self.reason,
+            "retryable": self.retryable,
+            "target_date": self.target_date.isoformat(),
+            "missing_benchmarks": list(self.missing_benchmarks),
+            "last_available_dates": {
+                name: value.isoformat() if value is not None else None
+                for name, value in self.last_available_dates.items()
+            },
+            "missing_date_summary": missing_date_summary,
+        }
+
+
 class AKShareCanonicalProvider:
     source = "akshare"
 
@@ -1144,11 +1209,12 @@ class AKShareCanonicalBundleBuilder:
         self, start_date: date, trading_date: date, bars: list[DailyBar]
     ) -> dict[str, dict[date, float]]:
         result: dict[str, dict[date, float]] = {}
-        for name, code in (
+        benchmark_codes = (
             ("CSI300", "000300"),
             ("CSI500", "000905"),
             ("CSI1000", "000852"),
-        ):
+        )
+        for name, code in benchmark_codes:
             rows = self._normalized_history(
                 self.provider.benchmark_bars(code, start_date, trading_date), trading_date
             )
@@ -1164,6 +1230,19 @@ class AKShareCanonicalBundleBuilder:
         result["EQUAL_WEIGHT_UNIVERSE"] = {
             value_date: sum(values) / len(values) for value_date, values in sorted(by_date.items())
         }
+        required_returns = (*[name for name, _ in benchmark_codes], "EQUAL_WEIGHT_UNIVERSE")
+        missing = tuple(
+            name for name in required_returns if trading_date not in result.get(name, {})
+        )
+        if missing:
+            raise BenchmarkDataNotReadyError(
+                target_date=trading_date,
+                missing_benchmarks=missing,
+                last_available_dates={
+                    name: max(result.get(name, {}), default=None) for name in missing
+                },
+                missing_dates_by_benchmark={name: (trading_date,) for name in missing},
+            )
         return result
 
 

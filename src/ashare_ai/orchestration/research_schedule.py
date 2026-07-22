@@ -58,15 +58,19 @@ class AKShareDataReadiness:
         del checked_at
         from ashare_ai.orchestration.akshare_bundle import AKShareCanonicalProvider
 
-        rows = AKShareCanonicalProvider().benchmark_bars(
-            "000300", trading_date - timedelta(days=10), trading_date
-        )
-        available = sorted(
-            parsed
-            for row in rows
-            if (parsed := _date_value(row.get("日期", row.get("date")))) is not None
-        )
-        return bool(available) and available[-1] == trading_date
+        provider = AKShareCanonicalProvider()
+        # The backtest policy consumes all three series.  A CSI300-only probe
+        # can otherwise admit a run that is guaranteed to fail at snapshot time.
+        for code in ("000300", "000905", "000852"):
+            rows = provider.benchmark_bars(code, trading_date - timedelta(days=10), trading_date)
+            available = sorted(
+                parsed
+                for row in rows
+                if (parsed := _date_value(row.get("日期", row.get("date")))) is not None
+            )
+            if not available or available[-1] != trading_date:
+                return False
+        return True
 
 
 def resolve_manual_research_date(
@@ -75,6 +79,7 @@ def resolve_manual_research_date(
     now: datetime,
     sessions: tuple[date, ...],
     data_ready: Callable[[date], bool],
+    require_ready: bool = True,
 ) -> date:
     current = _aware_shanghai(now)
     if requested_date > current.date():
@@ -99,7 +104,7 @@ def resolve_manual_research_date(
         if requested_date < candidate:
             raise RuntimeError("only the latest uncontaminated session can use live data")
 
-    if not data_ready(candidate):
+    if require_ready and not data_ready(candidate):
         raise RuntimeError("the selected trading session is not ready")
     return candidate
 

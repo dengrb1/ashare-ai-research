@@ -463,6 +463,9 @@ class RunResponse(_SanitizedErrorResponse):
     output_hash: str | None
     started_at: datetime
     completed_at: datetime | None
+    # Additive operational metadata for pollers. Existing clients may ignore it.
+    data_readiness_state: str | None = None
+    next_retry_at: datetime | None = None
 
 
 class ResearchRequest(BaseModel):

@@ -132,7 +132,7 @@ code, pre, .eyebrow, .kicker { font-family: 'Cascadia Mono', 'SFMono-Regular', C
 .sidebar nav a:hover { color: var(--text); background: rgba(255,255,255,.025); }
 .sidebar nav a.active { color: #baf0e4; background: linear-gradient(90deg, rgba(76,211,181,.14), rgba(76,211,181,.035)); border-color: rgba(76,211,181,.18); box-shadow: inset 2px 0 var(--accent); }
 .sidebar nav a.active > span { color: var(--accent); }
-.nav-group { padding: 20px 14px 7px; color: #4c6269; font: 11px 'Cascadia Mono', Consolas, monospace; letter-spacing: .15em; }
+.nav-group { padding: 20px 14px 7px; color: #4c6269; font-family: inherit; font-size: 11px; font-weight: 500; line-height: 1.5; letter-spacing: .04em; }
 .sidebar-foot { margin-top: auto; padding: 15px 12px 0; border-top: 1px solid var(--line); }
 .feed-state { color: #8bb9ac; font-size: 11px; }
 .feed-state i, .data-meta i { display: inline-block; width: 6px; height: 6px; margin-right: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); }

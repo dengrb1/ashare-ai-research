@@ -7,6 +7,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from ashare_ai.core.config import Settings
+from ashare_ai.orchestration.akshare_bundle import BenchmarkDataNotReadyError
 from ashare_ai.orchestration.backtest_snapshot import create_backtest_snapshot
 from ashare_ai.orchestration.builtin import BuiltinDailyBackend
 from ashare_ai.orchestration.builtin_backtest import read_backtest_bundle
@@ -212,3 +213,59 @@ def test_historical_rules_do_not_backfill_current_st_status(tmp_path) -> None:
         if item.symbol == symbol and item.trading_date == trading_date
     )
     assert current_bar.trade_status.value == "SUSPENDED"
+
+
+def test_backtest_snapshot_reports_missing_benchmark_calendar_coverage(tmp_path) -> None:
+    engine = create_engine("sqlite+pysqlite://")
+    Base.metadata.create_all(engine)
+    trading_date = date(2026, 7, 21)
+    source = make_demo_bundle(trading_date)
+    incomplete_csi500 = dict(source.benchmark_returns["CSI500"])
+    del incomplete_csi500[trading_date]
+    bundle = source.model_copy(
+        update={
+            "benchmark_returns": {
+                **source.benchmark_returns,
+                "CSI500": incomplete_csi500,
+            }
+        }
+    )
+    backend = BuiltinDailyBackend(
+        session_factory=sessionmaker(bind=engine, class_=Session, expire_on_commit=False),
+        object_root=tmp_path / "objects",
+        state_root=tmp_path / "state",
+        policy_path="configs/first_release.v1.json",
+        allow_demo_data=True,
+    )
+    with Session(engine) as session:
+        run = JobRun(
+            run_id="incomplete-benchmark-run",
+            run_type="DAILY",
+            trading_date=trading_date,
+            decision_at=bundle.decision_at,
+            status="RUNNING",
+            idempotency_key="incomplete-benchmark-key",
+            manifest={},
+            input_hash="8" * 64,
+            started_at=bundle.decision_at,
+        )
+        session.add(run)
+        session.flush()
+        try:
+            create_backtest_snapshot(
+                session=session,
+                run=run,
+                bundle=bundle,
+                lake_root=tmp_path / "lake",
+                policy=backend.policy,
+            )
+        except BenchmarkDataNotReadyError as exc:
+            assert exc.missing_benchmarks == ("CSI500",)
+            assert exc.last_available_dates == {"CSI500": date(2026, 7, 20)}
+            assert exc.audit_details()["missing_date_summary"]["CSI500"] == {
+                "count": 1,
+                "first": "2026-07-21",
+                "last": "2026-07-21",
+            }
+        else:
+            raise AssertionError("snapshot must fail closed on missing required benchmark date")

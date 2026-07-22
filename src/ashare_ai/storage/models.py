@@ -371,7 +371,7 @@ class JobRun(Base):
     run_type: Mapped[str] = mapped_column(String(32), nullable=False)
     trading_date: Mapped[date] = mapped_column(Date, nullable=False)
     decision_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
     manifest: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     input_hash: Mapped[str] = mapped_column(String(64), nullable=False)

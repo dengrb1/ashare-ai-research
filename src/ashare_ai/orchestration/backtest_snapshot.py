@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from math import sqrt
 from pathlib import Path
@@ -22,6 +22,7 @@ from ashare_ai.backtest.engine import (
 )
 from ashare_ai.core.contracts import TradeStatus
 from ashare_ai.core.hashing import stable_hash
+from ashare_ai.orchestration.akshare_bundle import BenchmarkDataNotReadyError
 from ashare_ai.orchestration.builtin_backtest import (
     BacktestBundle,
     TradingRuleObservation,
@@ -257,6 +258,33 @@ def _build_bundle(
             for name, values in bundle.benchmark_returns.items()
         }
     )
+    required = tuple(policy.backtest.required_benchmarks)
+    benchmark_values = bundle.benchmark_returns
+    missing_dates_by_benchmark: dict[str, tuple[date, ...]] = {}
+    for name in required:
+        benchmark_return_by_date = benchmark_values.get(name, {})
+        missing_dates = tuple(
+            value_date for value_date in calendar if value_date not in benchmark_return_by_date
+        )
+        if missing_dates:
+            missing_dates_by_benchmark[name] = missing_dates
+    if missing_dates_by_benchmark:
+        raise BenchmarkDataNotReadyError(
+            target_date=bundle.trading_date,
+            missing_benchmarks=tuple(missing_dates_by_benchmark),
+            last_available_dates={
+                name: max(
+                    (
+                        value_date
+                        for value_date in benchmark_values.get(name, {})
+                        if value_date <= bundle.trading_date
+                    ),
+                    default=None,
+                )
+                for name in missing_dates_by_benchmark
+            },
+            missing_dates_by_benchmark=missing_dates_by_benchmark,
+        )
     benchmarks = tuple(
         BenchmarkSeriesInput(
             name=name,
@@ -264,12 +292,9 @@ def _build_bundle(
             snapshot_hash=benchmark_hash,
             returns={trading_date: values[trading_date] for trading_date in calendar},
         )
-        for name, values in sorted(bundle.benchmark_returns.items())
+        for name, values in sorted(benchmark_values.items())
         if set(calendar) <= set(values)
     )
-    required = tuple(policy.backtest.required_benchmarks)
-    if not set(required) <= {item.name for item in benchmarks}:
-        raise RuntimeError("backtest snapshot benchmarks do not cover the calendar")
     hashes = tuple(
         sorted(
             {

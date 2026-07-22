@@ -326,6 +326,8 @@ export interface Run {
   automatic_report_slot?: 'A' | 'B' | null
   requested_date?: string | null
   reused?: boolean
+  data_readiness_state?: string | null
+  next_retry_at?: string | null
 }
 
 export type ResearchScope = 'MARKET' | 'WATCHLIST' | 'CUSTOM'

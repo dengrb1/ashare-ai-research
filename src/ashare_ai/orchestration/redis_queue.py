@@ -45,6 +45,17 @@ end
 return expired
 """
 
+PROMOTE_DELAYED_SCRIPT = """
+-- delayed-queue-promote
+local items = redis.call('zrangebyscore', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[2])
+for _, item in ipairs(items) do
+  if redis.call('zrem', KEYS[1], item) > 0 then
+    redis.call('lpush', KEYS[2], item)
+  end
+end
+return items
+"""
+
 
 class RedisLeasedQueue:
     def __init__(
@@ -54,6 +65,7 @@ class RedisLeasedQueue:
         pending: str,
         processing: str,
         lease_seconds: int,
+        delayed: str | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.client = client
@@ -61,12 +73,35 @@ class RedisLeasedQueue:
         self.processing = processing
         self.leases = f"{processing}:leases"
         self.owners = f"{processing}:owners"
+        self.delayed = delayed
         self.lease_seconds = lease_seconds
         self.clock = clock
         self._tokens: dict[str, str] = {}
 
     def enqueue(self, item: str) -> None:
         self.client.lpush(self.pending, item)
+
+    def enqueue_at(self, item: str, available_at: float) -> None:
+        if self.delayed is None:
+            raise RuntimeError("delayed queue is not configured")
+        # ZSET members are unique, so repeated scheduling updates one durable
+        # delivery instead of creating duplicate external work.
+        self.client.zadd(self.delayed, {item: available_at})
+
+    def promote_due(self, *, limit: int = 100) -> list[str]:
+        if self.delayed is None:
+            return []
+        return cast(
+            list[str],
+            self.client.eval(
+                PROMOTE_DELAYED_SCRIPT,
+                2,
+                self.delayed,
+                self.pending,
+                self.clock(),
+                limit,
+            ),
+        )
 
     def requeue_expired(self) -> list[str]:
         return cast(
@@ -154,6 +189,7 @@ class RedisLeasedQueue:
         on_error: Callable[[str, Exception], None] | None = None,
     ) -> None:
         while True:
+            self.promote_due()
             self.requeue_expired()
             item = self.claim()
             if item is None:
