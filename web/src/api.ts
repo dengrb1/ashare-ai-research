@@ -1,4 +1,4 @@
-import type { AIChatMessage, AIChatThread, AssetState, AuditEvent, Candidate, DataEnvelope, ExitAdvice, FinancialSearchResult, FinancialSearchStatus, KlineBar, KlineQueryOptions, MarketPrefetchResponse, ModelSettings, ModelSettingsDraft, Portfolio, Quote, Report, ReportSymbol, ResearchSettings, ResearchSubmission, Run, Score, Snapshot, TokenPair, TradePlan, User } from './types'
+import type { AIChatAttachment, AIChatMessage, AIChatThread, AssetState, AuditEvent, Candidate, DataEnvelope, ExitAdvice, FinancialSearchResult, FinancialSearchStatus, KlineBar, KlineQueryOptions, MarketPrefetchResponse, ModelSettings, ModelSettingsDraft, PersonalArchiveJob, Portfolio, Quote, Report, ReportSymbol, ResearchSettings, ResearchSubmission, Run, Score, Snapshot, TokenPair, TradePlan, User } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api/v1').replace(/\/$/, '')
 
@@ -68,8 +68,27 @@ export const api = {
   exitAdvice: (limit = 30) => request<ExitAdvice[]>(`/exit-advice${params({ limit })}`),
   aiModels: () => request<{ models: string[]; reasoning_efforts: string[]; web_search_available: boolean; cache_enabled: boolean }>('/ai/models'),
   aiChatThreads: () => request<AIChatThread[]>('/ai/chat/threads'),
+  aiChatThreadIndex: (options: { cursor?: string; q?: string; archived?: boolean; limit?: number } = {}) => request<{ items: AIChatThread[]; next_cursor?: string | null }>(`/ai/chat/thread-index${params({ cursor: options.cursor, q: options.q, archived: options.archived ? 'true' : undefined, limit: options.limit })}`),
   createAIChatThread: (title = '新对话') => request<AIChatThread>('/ai/chat/threads', { method: 'POST', body: JSON.stringify({ title }) }),
+  patchAIChatThread: (threadId: string, payload: { title?: string; pinned?: boolean; archived?: boolean; group_label?: string | null }) => request<AIChatThread>(`/ai/chat/threads/${encodeURIComponent(threadId)}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  deleteAIChatThread: (threadId: string) => request<void>(`/ai/chat/threads/${encodeURIComponent(threadId)}`, { method: 'DELETE' }),
+  bulkDeleteAIChatThreads: (threadIds: string[]) => request<{ deleted: number }>('/ai/chat/threads:bulk-delete', { method: 'POST', body: JSON.stringify({ thread_ids: threadIds }) }),
   aiChatMessages: (threadId: string) => request<AIChatMessage[]>(`/ai/chat/threads/${encodeURIComponent(threadId)}/messages`),
+  uploadAIChatAttachments: (files: File[], threadId?: string) => {
+    const body = new FormData()
+    files.forEach((file) => body.append('files', file))
+    if (threadId) body.append('thread_id', threadId)
+    return request<AIChatAttachment[]>('/ai/chat/attachments', { method: 'POST', body })
+  },
+  createPersonalExport: (passphrase: string) => request<PersonalArchiveJob>('/me/data-exports', { method: 'POST', body: JSON.stringify({ passphrase }) }),
+  personalExport: (archiveId: string) => request<PersonalArchiveJob>(`/me/data-exports/${encodeURIComponent(archiveId)}`),
+  deletePersonalExport: (archiveId: string) => request<void>(`/me/data-exports/${encodeURIComponent(archiveId)}`, { method: 'DELETE' }),
+  uploadPersonalImport: (file: File, passphrase: string) => {
+    const body = new FormData(); body.append('archive', file); body.append('passphrase', passphrase)
+    return request<PersonalArchiveJob>('/me/data-imports', { method: 'POST', body })
+  },
+  personalImport: (archiveId: string) => request<PersonalArchiveJob>(`/me/data-imports/${encodeURIComponent(archiveId)}`),
+  applyPersonalImport: (archiveId: string, mergeOptions: Record<string, unknown>, idempotencyKey: string) => request<PersonalArchiveJob>(`/me/data-imports/${encodeURIComponent(archiveId)}/apply`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ merge_options: mergeOptions }) }),
 
   quotes: async (symbols: string[], refresh = false) => {
     const rows = await request<Array<Quote & { change_percent?: number; previous_close?: number }>>(`/market/quotes${params({ symbols: symbols.join(','), refresh: refresh ? 'true' : undefined })}`)
@@ -137,7 +156,7 @@ export const api = {
 
   submitResearch: (payload: string | ResearchSubmission) => request<Run>('/research/runs', { method: 'POST', body: JSON.stringify(typeof payload === 'string' ? { trading_date: payload } : payload) }),
   researchSettings: () => request<ResearchSettings>('/research/settings'),
-  saveResearchSettings: (autoEnabled: boolean) => request<ResearchSettings>('/research/settings', { method: 'PUT', body: JSON.stringify({ auto_enabled: autoEnabled }) }),
+  saveResearchSettings: (payload: boolean | { automatic_reports: import('./types').AutomaticResearchReportSettings[] }) => request<ResearchSettings>('/research/settings', { method: 'PUT', body: JSON.stringify(typeof payload === 'boolean' ? { auto_enabled: payload } : payload) }),
   researchRuns: (limit = 5, tradingDate?: string, published = false) => request<Run[]>(`/research/runs${params({ limit, trading_date: tradingDate, mine: 'true', published: published ? 'true' : undefined })}`),
   cancelResearch: (runId: string) => request<Run>(`/research/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' }),
   runs: () => request<Run[] | { items: Run[] }>('/runs'),
@@ -161,34 +180,76 @@ export const api = {
 
 export async function streamAIChat(
   threadId: string,
-  payload: { content: string; model: string; reasoning_effort: string; web_search: boolean },
+  payload: { content: string; model: string; reasoning_effort: string; web_search: boolean; attachment_ids?: string[]; mention_refs?: Array<{ symbol: string; name: string }>; decision_at?: string },
   onEvent: (event: Record<string, unknown>) => void,
   signal?: AbortSignal,
+  idempotencyKey: string = crypto.randomUUID(),
 ) {
   const headers = new Headers({ 'Content-Type': 'application/json' })
+  headers.set('Idempotency-Key', idempotencyKey)
   const token = csrfToken()
   if (token) { headers.set('X-CSRF-Token', token); headers.set('X-CSRFToken', token) }
-  const response = await fetch(`${API_BASE}/ai/chat/threads/${encodeURIComponent(threadId)}/messages:stream`, {
-    method: 'POST', headers, body: JSON.stringify(payload), credentials: 'include', signal,
-  })
-  if (!response.ok || !response.body) throw new ApiError(response.status, `AI 对话请求失败 (${response.status})`)
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  while (true) {
-    const { value, done } = await reader.read()
-    buffer += decoder.decode(value || new Uint8Array(), { stream: !done })
-    const blocks = buffer.split('\n\n')
-    buffer = blocks.pop() || ''
-    for (const block of blocks) {
-      const data = block.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('\n')
-      if (!data) continue
-      const event = JSON.parse(data) as Record<string, unknown>
-      onEvent(event)
-      if (event.type === 'error') throw new Error(String(event.message || 'AI 对话生成失败'))
+  let sawDelta = false
+  for (let attempt = 0; attempt <= 2; attempt += 1) {
+    try {
+      const response = await fetch(`${API_BASE}/ai/chat/threads/${encodeURIComponent(threadId)}/messages:stream`, {
+        method: 'POST', headers, body: JSON.stringify(payload), credentials: 'include', signal,
+      })
+      if (!response.ok || !response.body) {
+        const error = new ApiError(response.status, `AI 对话请求失败 (${response.status})`)
+        ;(error as ApiError & { retryable?: boolean }).retryable = [408, 429, 500, 502, 503, 504].includes(response.status)
+        throw error
+      }
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let terminalDone = false
+      while (true) {
+        const { value, done } = await reader.read()
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done })
+        const blocks = buffer.split('\n\n')
+        buffer = blocks.pop() || ''
+        for (const block of blocks) {
+          const data = block.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('\n')
+          if (!data) continue
+          const event = JSON.parse(data) as Record<string, unknown>
+          if (event.type === 'delta') sawDelta = true
+          if (event.type === 'done') terminalDone = true
+          onEvent(event)
+          if (event.type === 'error') {
+            const error = new ApiError(0, String(event.message || 'AI 对话生成失败'), String(event.code || 'CHAT_ERROR'))
+            ;(error as ApiError & { requestId?: string; retryable?: boolean }).requestId = String(event.request_id || '')
+            ;(error as ApiError & { requestId?: string; retryable?: boolean }).retryable = Boolean(event.retryable)
+            throw error
+          }
+        }
+        if (done) break
+      }
+      if (!terminalDone) {
+        const error = new ApiError(0, 'AI 对话连接在完成前中断', 'CHAT_STREAM_INCOMPLETE')
+        ;(error as ApiError & { retryable?: boolean }).retryable = !sawDelta
+        throw error
+      }
+      return
+    } catch (reason) {
+      if (signal?.aborted) throw reason
+      const retryable = !sawDelta && (
+        reason instanceof TypeError
+        || (reason instanceof ApiError && (
+          [408, 429, 500, 502, 503, 504].includes(reason.status)
+          || Boolean((reason as ApiError & { retryable?: boolean }).retryable)
+        ))
+      )
+      if (!retryable || attempt >= 2) throw reason
+      await new Promise((resolve) => window.setTimeout(resolve, 250 * (2 ** attempt)))
     }
-    if (done) break
   }
+}
+
+export async function downloadPersonalArchive(archiveId: string) {
+  const response = await fetch(`${API_BASE}/me/data-exports/${encodeURIComponent(archiveId)}/download`, { credentials: 'include' })
+  if (!response.ok) throw new ApiError(response.status, `档案下载失败 (${response.status})`)
+  return response.blob()
 }
 
 export function unwrapList<T>(payload: T[] | { items?: T[]; data?: T[] }) {

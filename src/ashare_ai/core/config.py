@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+pysqlite:///./data/ashare.db"
     redis_url: str = "redis://localhost:6379/0"
     lake_root: Path = Path("data/lake")
+    private_object_root: Path = Path("data/private")
     policy_config_path: Path = runtime_resource_path("configs/first_release.v2.json")
     object_store_endpoint: str | None = None
     object_store_bucket: str = "ashare-research"
@@ -87,7 +88,9 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-5.6-sol"
     llm_reasoning_effort: str = "high"
     llm_timeout_seconds: float = Field(default=90.0, gt=0, le=600)
+    llm_agent_max_concurrency: int = Field(default=4, ge=1, le=16)
     model_settings_encryption_keys: str | None = None
+    personal_data_encryption_keys: str | None = None
     model_allowed_hosts: str | None = None
     enable_prefect_flows: bool = False
 
@@ -165,6 +168,10 @@ class Settings(BaseSettings):
             problems.append("MODEL_ALLOWED_HOSTS must explicitly allow model gateway hosts")
         if self.agent_backend == "openai_compatible" and not self.model_settings_encryption_keys:
             problems.append("MODEL_SETTINGS_ENCRYPTION_KEYS is required for the model backend")
+        if not (self.personal_data_encryption_keys or self.model_settings_encryption_keys):
+            problems.append(
+                "PERSONAL_DATA_ENCRYPTION_KEYS is required for images and personal archives"
+            )
         if self.allow_demo_data or self.canonical_bundle_mode == "demo":
             problems.append("demo market data is forbidden in production")
         if problems:

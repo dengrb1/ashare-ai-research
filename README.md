@@ -223,8 +223,17 @@ docker compose -p ashare-ai -f compose.yaml -f compose.ghcr.yaml up -d
 - `GET /api/v1/exit-advice/{advice_id}`
 - `GET /api/v1/ai/models`
 - `GET|POST /api/v1/ai/chat/threads`
+- `GET /api/v1/ai/chat/thread-index`
+- `PATCH|DELETE /api/v1/ai/chat/threads/{thread_id}`
+- `POST /api/v1/ai/chat/threads:bulk-delete`
 - `GET /api/v1/ai/chat/threads/{thread_id}/messages`
 - `POST /api/v1/ai/chat/threads/{thread_id}/messages:stream`
+- `POST /api/v1/ai/chat/attachments`
+- `GET /api/v1/ai/chat/attachments/{attachment_id}/content`
+- `POST|GET|DELETE /api/v1/me/data-exports[/{export_id}]`
+- `GET /api/v1/me/data-exports/{export_id}/download`
+- `POST|GET /api/v1/me/data-imports[/{import_id}]`
+- `POST /api/v1/me/data-imports/{import_id}/apply`
 - `GET|POST /api/v1/admin/users`
 - `PATCH /api/v1/admin/users/{user_id}`
 - `GET /api/v1/market/quotes?symbols=600000.SH,000001.SZ`
@@ -337,9 +346,14 @@ WebGUI 可选择动态市场股票池、从当前用户的自选与持仓中自�
 报告，并为合格股票冻结用途为 `SINGLE_SYMBOL_ADVICE` 的验证快照，但不把单股信号伪装成
 组合信号，也不放宽组合约束。研究范围和预算均进入运行输入哈希，表单中的实时价格只用于
 下单手数预览，不进入不可变研究快照。
-每位用户的自动日研默认关闭；开启后调度器在上海交易日 15:05 起检查数据就绪状态，未就绪
-时每 5 分钟重试、最长 2 小时，数据就绪前不创建运行或冻结 `decision_at`。自动任务固定使用
-全市场、总资金 100 万元、单股 8 万元且无股价上限；手动任务使用独立 `MANUAL` 幂等键，
+每位用户的自动日研默认关闭；研究页的设置悬浮窗提供报告 A、B 两套独立配置，可分别启停并设置
+全市场、动态自选与持仓或手工股票范围，以及总预算、单股最高投入和最高可接受股价。开启一套即
+运行单报告，两套均开启则在同一交易日提交两份独立任务，由默认串行 Worker 依次执行；配置相同
+也按 A/B 槽位生成两份报告。调度器在上海交易日 15:05 起检查数据就绪状态，未就绪时每 5 分钟
+重试、最长 2 小时，数据就绪前不创建运行或冻结 `decision_at`。自选与持仓在实际运行时动态读取，
+为空只跳过对应槽位且不阻塞另一槽位。每次自动任务会把槽位、配置版本、范围和预算冻结进 Manifest
+及输入哈希；同一用户、交易日和槽位只提交一次，当日首次提交后修改的配置从下一交易日起生效。
+旧版 `auto_enabled` 设置请求仍兼容。手动任务使用独立 `MANUAL` 幂等键，
 可以和同日 `AUTO` 任务并行。冻结快照模式由系统强制开启，界面只读展示。
 配置 `TUSHARE_TOKEN` 后，Research Worker 也只在免费源失败、历史缺失或财报/公告字段
 不完整时补用 Tushare，并把各数据集的实际来源写入冻结记录。
@@ -349,6 +363,8 @@ Demo 数据必须同时显式设置 `CANONICAL_BUNDLE_MODE=demo` 和 `ALLOW_DEMO
 模型可分别设置。启用新版本前必须通过严格 JSON Schema 连通性探测，失败时旧版本继续
 生效。每次日研会把配置 ID、版本和哈希固定到 Manifest，排队或运行中的任务不会跟随
 后续热切换。未启用模型配置时仍可使用确定性的内置 Agent 完成合规验收。
+
+AI 股票问答支持用股票名称 `@`提及、置顶/分组/归档/搜索/批量删除、幂等 SSE 重放和 PNG/JPEG/WebP/非动画 GIF。图片按用户隔离加密，自上传成功起固定保留 7 天，到期瞬间停止读取并由 Worker 物理清理。当前用户可在“个人档案”页导出加密完整档案，或上传后先预览、再分类合并；任何图片和账户凭据均不进入档案。格式详见 [`docs/PERSONAL_ARCHIVE.md`](docs/PERSONAL_ARCHIVE.md)。
 AKShare 每个证券列表、股票历史或基准历史逻辑请求默认执行两轮受限尝试，每轮依次访问东方财富和新浪；空响应、连接中断、超时和 JSON 解码失败均会触发备用源或下一轮。可通过 `AKSHARE_FETCH_MAX_ATTEMPTS=2` 和 `AKSHARE_FETCH_BACKOFF_SECONDS=1` 调整轮数与轮间退避。单个非必需股票失败会脱敏记录并跳过，但有效标的仍不得少于 15；证券列表或基准在全部尝试后失败时任务安全终止，不会使用前一日缓存或不完整数据冒充当日快照。
 新闻风险按来源可信度分层：巨潮等官方来源可产生 HIGH/CRITICAL，免费媒体重大负面最多为
 MEDIUM，不能单独硬阻断；跨源新闻按标题、日期和内容哈希去重。评分只使用

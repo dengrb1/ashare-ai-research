@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import update
@@ -17,6 +17,7 @@ from ashare_ai.storage.models import JobRun
 
 QUEUE_NAME = "ashare:research:pending"
 PROCESSING_QUEUE_NAME = "ashare:research:processing"
+DELAYED_QUEUE_NAME = "ashare:research:delayed"
 
 _TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "FUSED", "CANCELLED"}
 
@@ -41,6 +42,84 @@ def enqueue_research(run_id: str, redis_url: str | None = None) -> None:
         processing=PROCESSING_QUEUE_NAME,
         lease_seconds=get_settings().worker_lease_seconds,
     ).enqueue(run_id)
+
+
+def enqueue_research_at(
+    run_id: str, available_at: datetime, redis_url: str | None = None
+) -> None:
+    import redis
+
+    client = redis.Redis.from_url(redis_url or get_settings().redis_url, decode_responses=True)
+    RedisLeasedQueue(
+        client,
+        pending=QUEUE_NAME,
+        processing=PROCESSING_QUEUE_NAME,
+        delayed=DELAYED_QUEUE_NAME,
+        lease_seconds=get_settings().worker_lease_seconds,
+    ).enqueue_at(run_id, available_at.timestamp())
+
+
+def _retry_waiting_research(run_id: str) -> bool:
+    """Promote a due data-readiness wait, or persist its next safe retry.
+
+    The immutable run parameters live in the manifest; only operational wait
+    metadata is advanced here.
+    """
+    from ashare_ai.orchestration.research_schedule import AKShareDataReadiness
+
+    now = datetime.now(UTC)
+    with SessionLocal() as session:
+        run = session.get(JobRun, run_id)
+        if run is None:
+            return False
+        if run.status != "DATA_READINESS_WAITING":
+            return True
+        wait = dict((run.manifest or {}).get("data_readiness_wait") or {})
+        deadline_raw = wait.get("deadline_at")
+        try:
+            deadline = datetime.fromisoformat(str(deadline_raw))
+            deadline = deadline if deadline.tzinfo else deadline.replace(tzinfo=UTC)
+        except ValueError:
+            deadline = now
+        if now >= deadline:
+            run.status = "FAILED"
+            run.active_research_key = None
+            run.error_message = "benchmark data did not synchronize before the next trading session"
+            run.completed_at = now
+            AuditLogger(session).record(
+                run_id, "DATA_READINESS_TIMEOUT", "Benchmark data wait expired",
+                severity="ERROR", details={"deadline_at": deadline.isoformat()},
+            )
+            session.commit()
+            return False
+        ready = False
+        try:
+            ready = AKShareDataReadiness().ready(run.trading_date, now)
+        except Exception:
+            ready = False
+        if ready:
+            run.status = "PENDING"
+            wait["next_retry_at"] = None
+            run.manifest = {**dict(run.manifest), "data_readiness_wait": wait}
+            AuditLogger(session).record(
+                run_id, "DATA_READINESS_READY", "Required benchmark data synchronized",
+                details={"trading_date": run.trading_date.isoformat()},
+            )
+            session.commit()
+            return True
+        retry_at = min(
+            now + timedelta(minutes=get_settings().daily_research_retry_minutes), deadline
+        )
+        wait["next_retry_at"] = retry_at.isoformat()
+        wait["attempt_count"] = int(wait.get("attempt_count", 0)) + 1
+        run.manifest = {**dict(run.manifest), "data_readiness_wait": wait}
+        AuditLogger(session).record(
+            run_id, "DATA_READINESS_RETRY", "Required benchmark data is not synchronized yet",
+            details={"next_retry_at": retry_at.isoformat(), "attempt_count": wait["attempt_count"]},
+        )
+        session.commit()
+    enqueue_research_at(run_id, retry_at)
+    return False
 
 
 def mark_research_failed(
@@ -213,11 +292,58 @@ def execute_research_job(
                 session.commit()
         return result
     except Exception as exc:
+        # Bundle construction performs the same complete-benchmark check as the
+        # submission probe. A provider race is therefore deferred, never
+        # converted into an opaque terminal snapshot failure.
+        from ashare_ai.orchestration.akshare_bundle import BenchmarkDataNotReadyError
+
+        if isinstance(exc, BenchmarkDataNotReadyError):
+            now = datetime.now(UTC)
+            with session_factory() as session:
+                run = session.get(JobRun, run_id)
+                if run is not None:
+                    wait = dict((run.manifest or {}).get("data_readiness_wait") or {})
+                    deadline_raw = wait.get("deadline_at")
+                    deadline = (
+                        datetime.fromisoformat(str(deadline_raw))
+                        if deadline_raw
+                        else now
+                        + timedelta(minutes=get_settings().daily_research_retry_limit_minutes)
+                    )
+                    if deadline.tzinfo is None:
+                        deadline = deadline.replace(tzinfo=UTC)
+                    if now < deadline:
+                        retry_at = min(
+                            now + timedelta(minutes=get_settings().daily_research_retry_minutes),
+                            deadline,
+                        )
+                        wait.update(
+                            {
+                                "deadline_at": deadline.isoformat(),
+                                "next_retry_at": retry_at.isoformat(),
+                                "attempt_count": int(wait.get("attempt_count", 0)) + 1,
+                            }
+                        )
+                        run.status = "DATA_READINESS_WAITING"
+                        run.error_message = None
+                        run.completed_at = None
+                        run.manifest = {**dict(run.manifest), "data_readiness_wait": wait}
+                        AuditLogger(session).record(
+                            run_id,
+                            "DATA_READINESS_WAITING",
+                            "Research paused until all required benchmarks synchronize",
+                            details={**_error_details(exc), "next_retry_at": retry_at.isoformat()},
+                        )
+                        session.commit()
+                        enqueue_research_at(run_id, retry_at)
+                        return {"run_id": run_id, "status": "DATA_READINESS_WAITING"}
         mark_research_failed(run_id, exc, session_factory=session_factory)
         raise
 
 
 def run_research_job(run_id: str) -> dict[str, Any]:
+    if not _retry_waiting_research(run_id):
+        return {"run_id": run_id, "status": "DATA_READINESS_WAITING"}
     return execute_research_job(run_id, pipeline=load_pipeline())
 
 
@@ -229,6 +355,7 @@ def consume_research_queue() -> None:
         client,
         pending=QUEUE_NAME,
         processing=PROCESSING_QUEUE_NAME,
+        delayed=DELAYED_QUEUE_NAME,
         lease_seconds=get_settings().worker_lease_seconds,
     )
     queue.consume_forever(run_research_job)

@@ -57,6 +57,7 @@ __all__ = [
 class TradePlanExplanation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    summary: str | None = Field(default=None, max_length=1000)
     entry_logic: str = Field(min_length=1, max_length=2000)
     exit_logic: str = Field(min_length=1, max_length=2000)
     key_evidence: list[str] = Field(default_factory=list, max_length=10)
@@ -387,7 +388,8 @@ def _generate_ai_explanation(
                     "content": (
                         "你是模拟交易方案解释 Agent。只能解释给定确定性数值，不得修改、"
                         "重算或新增数量、价格、仓位、止盈止损和历史指标；禁止承诺收益。"
-                        "只返回要求的文本字段。"
+                        "所有字段必须使用简体中文，面向普通投资者。summary 用一两句话说明"
+                        "当前是买入还是暂不买入及主要原因；只返回要求的文本字段。"
                     ),
                 },
                 {

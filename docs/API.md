@@ -118,8 +118,19 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 卖出建议 | GET | `/api/v1/exit-advice/{advice_id}` | 登录 |
 | AI 对话 | GET | `/api/v1/ai/models` | 登录 |
 | AI 对话 | GET/POST | `/api/v1/ai/chat/threads` | 登录/写入 |
+| AI 对话 | GET | `/api/v1/ai/chat/thread-index` | 登录 |
+| AI 对话 | PATCH/DELETE | `/api/v1/ai/chat/threads/{thread_id}` | 写入 |
+| AI 对话 | POST | `/api/v1/ai/chat/threads:bulk-delete` | 写入 |
 | AI 对话 | GET | `/api/v1/ai/chat/threads/{thread_id}/messages` | 登录 |
 | AI 对话 | POST | `/api/v1/ai/chat/threads/{thread_id}/messages:stream` | 写入、SSE |
+| AI 图片 | POST | `/api/v1/ai/chat/attachments` | 写入、multipart |
+| AI 图片 | GET | `/api/v1/ai/chat/attachments/{attachment_id}/content` | 登录、所有者 |
+| 个人档案 | POST | `/api/v1/me/data-exports` | 写入、202 |
+| 个人档案 | GET/DELETE | `/api/v1/me/data-exports/{export_id}` | 登录/写入、所有者 |
+| 个人档案 | GET | `/api/v1/me/data-exports/{export_id}/download` | 登录、所有者 |
+| 个人档案 | POST | `/api/v1/me/data-imports` | 写入、multipart、202 |
+| 个人档案 | GET | `/api/v1/me/data-imports/{import_id}` | 登录、所有者 |
+| 个人档案 | POST | `/api/v1/me/data-imports/{import_id}/apply` | 写入、幂等、202 |
 | 用户管理 | GET/POST | `/api/v1/admin/users` | 管理员 |
 | 用户管理 | PATCH | `/api/v1/admin/users/{user_id}` | 管理员 |
 | 用户管理 | POST | `/api/v1/admin/users/{user_id}/password` | 管理员 |
@@ -221,7 +232,8 @@ Web 登录。请求体为 `LoginRequest`：
 | `cost` | number | 大于 0，最多 10,000,000 |
 | `target_weight` | number/null | 0–1；兼容旧客户端，当前持仓权重由市值和总资产派生 |
 | `acquired_on` | date/null | 买入日期；缺失时 AI 可研究但模拟卖出数量被 T+1 门禁阻断 |
-| `profit_trigger_amount` | decimal/null | 个股人民币浮盈触发金额，优先于全局值 |
+| `profit_trigger_amount` | decimal/null | 旧客户端兼容字段；仅在未设置个股股价线时作为个股浮盈金额规则 |
+| `exit_trigger_price` | decimal/null | 最新股价严格超过该元/股价格时触发，优先于金额规则 |
 
 `AssetStateRequest`：
 
@@ -253,8 +265,8 @@ Web 登录。请求体为 `LoginRequest`：
     "max_research_symbols":100,
     "max_trade_plan_symbols":15,
     "portfolio_target_count":10,
-    "features": {"watchlist_research_selection":true,"formal_watchlist_reports":true,"report_symbol_eligibility":true,"trade_plan_generation":true,"research_cancellation":true,"idempotency_key":true,"paper_portfolio_only":true},
-    "endpoints": {"assets":"/api/v1/assets","exit_monitor_settings":"/api/v1/assets/exit-monitor","research_runs":"/api/v1/research/runs","research_run":"/api/v1/research/runs/{run_id}","research_settings":"/api/v1/research/settings","report_symbols":"/api/v1/reports/{report_id}/symbols","report_trade_plans":"/api/v1/reports/{report_id}/trade-plans","trade_plan":"/api/v1/trade-plans/{plan_id}"}
+    "features": {"watchlist_research_selection":true,"formal_watchlist_reports":true,"report_symbol_eligibility":true,"trade_plan_generation":true,"research_cancellation":true,"idempotency_key":true,"paper_portfolio_only":true,"persistent_ai_chat":true,"chat_images_seven_day_retention":true,"personal_archive_export_import":true},
+    "endpoints": {"assets":"/api/v1/assets","exit_monitor_settings":"/api/v1/assets/exit-monitor","research_runs":"/api/v1/research/runs","research_run":"/api/v1/research/runs/{run_id}","research_settings":"/api/v1/research/settings","ai_chat_threads":"/api/v1/ai/chat/threads","ai_chat_thread_index":"/api/v1/ai/chat/thread-index","personal_data_exports":"/api/v1/me/data-exports","personal_data_imports":"/api/v1/me/data-imports"}
   }
 }
 ```
@@ -263,11 +275,21 @@ Web 登录。请求体为 `LoginRequest`：
 
 ### 5.2 卖出建议与 AI 对话
 
-盈利监控按 `(最新价 - 成本价) × 持股数` 计算，严格大于个股或全局触发金额才提交研究。同一用户、股票和交易日内，仅当价格相对上次建议变化至少 3%、持仓变化或正式评分变化时重新调用 AI；完全相同的模型、提示版本和上下文输入复用用户隔离的持久缓存。
+个股已设 `exit_trigger_price` 时，最新价必须严格超过该价格才提交研究；否则按 `(最新价 - 成本价) × 持股数` 与旧个股金额或全局 `default_profit_trigger` 比较。`ExitAdviceResponse` 新增 `trigger_type=PRICE|PROFIT_AMOUNT` 和 `trigger_price`；价格规则的 `trigger_amount` 仍返回等价浮盈金额，供旧客户端继续读取。同一用户、股票和交易日内，仅当价格相对上次建议变化至少 3%、持仓变化或正式评分变化时重新调用 AI。
 
 `ExitAdviceResponse.result` 包含 `action=HOLD|REDUCE|SELL`、`summary`、`confidence`、`sell_ladder[]`、`stop_loss_price`、`risks`、`sellable_quantity`、`execution_blockers` 和 `paper_trade_only=true`。每档包含 `target_price`、`quantity`、`estimated_gross_proceeds`、`reason` 与 `status`。缺少买入日期、T+1 未满足、证券主数据或带生效日期交易规则不可用时，档位状态为阻断，不得据此修改模拟持仓。
 
-AI 对话线程和消息均按当前用户保存。发送请求为 `AIChatSendRequest`：`content`、`model`、`reasoning_effort=low|medium|high|xhigh`、`web_search`。`model` 只能选择当前管理员配置中的搜索模型或研究模型。消息中的 `@六位代码[.交易所]`，以及已保存持仓名称，会附加当前用户可见的持仓、最新行情、近 30 根日 K 和最近正式评分；`web_search=true` 时通过配置的 SearXNG 获取最多 5 条来源摘要。
+AI 对话线程和消息均按当前用户保存。发送请求增加 `attachment_ids`、经证券主数据逐项核对名称与代码绑定的 `mention_refs[{symbol,name}]`、可选带时区 `decision_at` 及 `Idempotency-Key`；服务端拒绝未来时点并为本次调用冻结权威 `decision_at`。消息响应新增 `trading_date`、`decision_at`、`available_at`。正式评分只读取 `ScoreRow.decision_at <= 本次决策时点` 的当前用户成功运行，K 线使用相同截止时点，缺少可验证抓取时点的报价不会进入上下文。
+
+助手历史在 Responses API 中编码为 `output_text`，用户/系统文本为 `input_text`，未到期的近期用户图片为 `input_image`；每张已销毁图片分别加入不可用标记。SSE 会先发 `meta` 事件，随后发 `delta`、`done` 或安全 `error`；错误含 `code`、`request_id`和 `retryable`。只有收到上游 `response.completed` 后才写入完成状态和缓存。浏览器与模型网关均仅在首个正文片段之前，对网络错误、408、429、5xx 或明确可重试错误使用同一幂等键进行有限重试；正文出现后断线会保留部分内容并标记未完成。
+
+`POST /ai/chat/attachments` 支持 PNG、JPEG、WebP 和非动画 GIF；每条最多 4 张、单张 10 MB、合计 25 MB。服务端校验真实签名、MIME、尺寸和动画状态，不接受远程 URL。`expires_at=uploaded_at+7天` 固定不延长；到期瞬间读取返回 `410`，后台五分钟内物理清理。
+
+### 5.3 个人档案
+
+导出、导入均只处理当前登录用户的资源。导出与导入预览首次提交返回 `202` 和 `archive_id`，状态包含 `PENDING|PROCESSING|SUCCEEDED|FAILED|CANCELLED`、`phase`、`progress` 与 24 小时 `expires_at`。预览的 `history.classification` 按聊天线程、聊天消息、研究运行、报告和回测分别列出 `new|duplicate|conflict`，每项包含来源 ID 与规范化哈希；用户确认前即可看到后续跳过或重映射范围。导入应用要求 `Idempotency-Key`；同键同请求返回首个任务，同键异请求返回 `409`。
+
+导出包不包含任何图片、图片 URI/文件名/内容哈希、密码、角色、会话、Token、API Key、响应缓存或服务器路径。导入还要求有效服务端来源认证，拒绝用户自行构造的派生评分、运行和 Manifest。格式、加密及合并细节见 [`docs/PERSONAL_ARCHIVE.md`](PERSONAL_ARCHIVE.md)。
 
 流式接口使用 `text/event-stream`，事件依次为 `meta`、多个 `delta`、`done`，失败时为 `error`。Nginx 缓冲通过 `X-Accel-Buffering: no` 禁用；客户端必须处理断线且不得把 Cookie、Bearer token 或完整敏感持仓写入日志。
 
@@ -288,7 +310,7 @@ AI 对话线程和消息均按当前用户保存。发送请求为 `AIChatSendRe
 | `completed_at` | datetime/null | 完成或失败时间 |
 | `error_message` | string/null | 已脱敏的失败原因 |
 
-`ResearchRunResponse` 继承 `RunResponse`，并增加：`phase`、`progress`（0–100）、`report_id`、`report_type`、`report_created_at`、`research_scope`、`target_symbols`、`total_budget`、`per_symbol_budget`、`max_stock_price`、`portfolio_requested`、`portfolio_generated`、`reason_code`、`reason_message`、`formal_eligible_count`、`excluded_symbol_count`、`portfolio_reason_code`、`portfolio_reason_message`、`trigger_source`（`AUTO|MANUAL`）和 `requested_date`。
+`ResearchRunResponse` 继承 `RunResponse`，并增加：`phase`、`progress`（0–100）、`report_id`、`report_type`、`report_created_at`、`research_scope`、`target_symbols`、`total_budget`、`per_symbol_budget`、`max_stock_price`、`portfolio_requested`、`portfolio_generated`、`reason_code`、`reason_message`、`formal_eligible_count`、`excluded_symbol_count`、`portfolio_reason_code`、`portfolio_reason_message`、`trigger_source`（`AUTO|MANUAL`）、`automatic_report_slot`（自动任务为 `A|B`，手动任务为 null）和 `requested_date`。
 
 `BacktestRequest`：
 
@@ -317,7 +339,12 @@ AI 对话线程和消息均按当前用户保存。发送请求为 `AIChatSendRe
 
 `WATCHLIST` 的 `symbols` 可以省略，表示当前用户全部自选股与模拟持仓；如果显式传入，所有代码必须属于当前用户的自选股或持仓。`CUSTOM` 必须至少包含一只代码。非交易日会解析为可用的最近完成交易日；若数据未就绪返回 `409`。
 
-`ResearchSettingsRequest` 只有 `auto_enabled: boolean`。`ResearchSettingsResponse` 返回 `auto_enabled`、`updated_at`、固定的自动研究参数（市场范围、总资金 1,000,000、单股 80,000）、`schedule_timezone=Asia/Shanghai`、`schedule_time=15:05`、`snapshot_mode=SYSTEM_ENFORCED` 和 `portfolio_target_count`。
+`ResearchSettingsRequest` 接受以下两种互斥形态：
+
+- 新客户端提交 `automatic_reports`，必须恰好包含槽位 `A`、`B` 各一次。每项包含 `slot`、`enabled`、`scope`（`MARKET|WATCHLIST|CUSTOM`）、`symbols`、`total_budget`、`per_symbol_budget`、可空 `max_stock_price`；预算校验与手动研究相同，`CUSTOM` 必须提供有效股票代码。
+- 兼容旧客户端的 `auto_enabled: boolean` 仍保留。`true` 启用报告 A，`false` 关闭 A/B，已保存的范围和预算不会丢失。同一请求不得同时提交两个字段。
+
+`ResearchSettingsResponse` 返回 `automatic_reports` 固定 A/B 数组；`auto_enabled` 表示至少一套配置启用。旧字段 `automatic_scope`、`automatic_total_budget`、`automatic_per_symbol_budget`、`automatic_max_stock_price` 继续返回报告 A 的值，并同时返回 `updated_at`、`schedule_timezone=Asia/Shanghai`、`schedule_time=15:05`、`snapshot_mode=SYSTEM_ENFORCED` 和 `portfolio_target_count`。
 
 ### 5.4 Trade Plan 请求
 
@@ -437,7 +464,7 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 
 ### `GET /api/v1/reports/{report_id}/symbols`
 
-返回逐股票 `ReportSymbolResponse[]`：`symbol`、`name`、`research_status`（`FORMAL`、`FORMAL_WITH_LIMITATIONS`、`RISK_BLOCKED`）、`advice_eligible`、`recommendation`（不符合资格时固定为 `NO_BUY`）、`exclusion_reasons`、`data_quality`、嵌套 `score`、`rank`、`prediction_percentile`、`industry_code`。
+返回逐股票 `ReportSymbolResponse[]`：`symbol`、`name`、`research_status`（`FORMAL`、`FORMAL_WITH_LIMITATIONS`、`RISK_BLOCKED`）、`advice_eligible`、`recommendation`（不符合资格时固定为 `NO_BUY`）、`exclusion_reasons`、`data_quality`、嵌套 `score`、`rank`、`prediction_percentile`、`industry_code`，以及面向普通投资者的 `plain_language_summary` 和按基本面/技术面/市场情绪拆分的 `component_summaries`。这两个摘要字段只解释既有评分和门禁结果，不改变交易规则。
 
 只有 `advice_eligible=true` 的股票才允许提交 Trade Plan；客户端必须展示门禁原因，不得把 `NO_BUY` 转换成买入提示。
 
@@ -466,7 +493,7 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
   -H "Authorization: Bearer <ACCESS_TOKEN>"
 ```
 
-提交相同的用户、日期、范围、标的和预算且已有进行中任务时返回既有运行，状态码为 `200`。队列不可用返回 `503`；交易日无可用数据返回 `409`。实时 AKShare 模式只允许冻结当日已就绪数据，或在下一交易日开盘前/非交易日冻结最近已完成交易日；开盘后不会回退到上一交易日，以免实时快照混入未来信息。冻结文件模式仍可按文件覆盖日期运行历史研究。
+提交相同的用户、日期、范围、标的和预算且已有进行中任务时返回既有运行，状态码为 `200`。队列不可用返回 `503`；交易时段、未来日期或不安全的历史实时重建返回 `409`。收盘后若股票日线已到而任一策略基准（CSI300、CSI500、CSI1000）尚未覆盖目标日，仍创建 `202` 任务，状态为 `DATA_READINESS_WAITING`；轮询研究详情会返回“等待基准数据同步”以及新增的 `next_retry_at`。系统在冻结的原始范围、预算、价格上限、幂等键和活动键不变的前提下按固定间隔重试；在下一交易日开盘前仍不完整时以脱敏操作性原因终止，且绝不回退到开盘后的上一日实时快照。实时 AKShare 模式只允许冻结当日已就绪数据，或在下一交易日开盘前/非交易日冻结最近已完成交易日；冻结文件模式仍可按文件覆盖日期运行历史研究。
 
 ### `GET /api/v1/research/runs`
 
@@ -487,11 +514,11 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 
 ### `PUT /api/v1/research/settings`
 
-请求 `{"auto_enabled":true|false}`，返回研究设置。自动研究固定使用上海时区和 `15:05` 调度时间，客户端不能修改自动研究范围、预算或快照模式。
+新客户端完整提交 `{"automatic_reports":[报告A,报告B]}`；旧请求 `{"auto_enabled":true|false}` 继续兼容。自动研究固定使用上海时区和 `15:05` 调度时间，快照模式不可修改。启用一个槽位即运行单报告，两个均启用则同日提交两份独立任务，由默认串行 Worker 依次执行。`WATCHLIST` 在每次运行时动态读取用户当时的自选股与模拟持仓；为空时只跳过该槽位并在两小时窗口内继续重试，不阻塞另一槽位。同一用户、交易日和槽位只接受首次提交，首次提交后修改配置或自选与持仓不会在当日重复创建报告，新配置从下一交易日起生效。
 
 ### `GET /api/v1/research/settings`
 
-返回当前用户自动研究设置。
+返回当前用户自动研究设置以及固定 A/B 两套配置。两套配置即使内容完全相同，也会使用不同槽位幂等键生成两份独立报告。
 
 ### `POST /api/v1/research/runs/{run_id}/cancel`
 

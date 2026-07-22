@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
@@ -73,7 +74,7 @@ class FakeStructuredLLMClient:
                 "score": scores[request["component"]],
                 "confidence": 0.75,
                 "evidence": [evidence],
-                "positive_factors": ["fake evidence-grounded factor"],
+                "positive_factors": ["测试用的中文证据要点"],
                 "negative_factors": [],
                 "risk_flags": [],
             },
@@ -87,6 +88,22 @@ class FakeStructuredLLMClient:
                 retry_count=0,
             ),
         )
+
+
+class ConcurrentFakeStructuredLLMClient(FakeStructuredLLMClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.active = 0
+        self.maximum_active = 0
+
+    async def generate_structured(self, **kwargs: Any) -> StructuredGeneration:
+        self.active += 1
+        self.maximum_active = max(self.maximum_active, self.active)
+        try:
+            await asyncio.sleep(0.01)
+            return await super().generate_structured(**kwargs)
+        finally:
+            self.active -= 1
 
 
 def test_run_context_normalizes_postgres_utc_timestamp_to_shanghai(tmp_path) -> None:
@@ -397,7 +414,7 @@ def test_small_custom_research_succeeds_reports_all_symbols_and_freezes_advice_s
         assert report is not None
         html = backend.object_store.get(report.object_uri).decode("utf-8")
         assert all(symbol in html for symbol in targets)
-        assert "NO_BUY" in html
+        assert "暂不买入" in html
         assert candidate_id == backend._stage_digest(run_id, "candidates")
 
 
@@ -593,7 +610,17 @@ def test_llm_component_results_are_audited_with_transport_metadata(tmp_path) -> 
         assert {call.model_provider for call in calls} == {"fake-provider"}
         assert {call.model_name for call in calls} == {"fake-model"}
         assert {call.result["score"] for call in calls if call.component == "fundamental"} == {71.0}
-        assert all(call.result["prompt_version"] == "builtin-llm-v1" for call in calls)
+        assert all(call.result["prompt_version"] == "builtin-llm-v2" for call in calls)
+
+
+def test_llm_component_requests_use_configured_bounded_concurrency(tmp_path) -> None:
+    client = ConcurrentFakeStructuredLLMClient()
+    backend, _, pipeline, run_id, feature_snapshot_id = _prepared_llm_backend(tmp_path, client)
+    backend._settings = backend._settings.model_copy(update={"llm_agent_max_concurrency": 2})
+
+    pipeline.run_research_agents(run_id, feature_snapshot_id)
+
+    assert client.maximum_active == 2
 
 
 def test_llm_component_rejects_future_evidence(tmp_path) -> None:

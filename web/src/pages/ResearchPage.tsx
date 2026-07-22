@@ -5,7 +5,7 @@ import { ErrorNotice, formatNumber, formatTime, Loading, Panel, StatusPill, toda
 import { useMarket } from '../context/MarketContext'
 import { usePageRefresh } from '../context/RefreshContext'
 import { researchRunTimestamp } from '../researchRuns'
-import type { ResearchScope, ResearchSettings, Run } from '../types'
+import type { AutomaticResearchReportSettings, ResearchScope, ResearchSettings, Run } from '../types'
 
 const ACTIVE = new Set(['PENDING', 'QUEUED', 'RUNNING', 'PROCESSING', 'CANCEL_REQUESTED'])
 
@@ -33,6 +33,30 @@ const SCOPE_LABELS: Record<ResearchScope, string> = {
   CUSTOM: '手工指定股票',
 }
 
+type AutomaticReportDraft = Omit<AutomaticResearchReportSettings, 'symbols' | 'total_budget' | 'per_symbol_budget' | 'max_stock_price'> & {
+  symbolsText: string
+  totalBudget: string
+  perSymbolBudget: string
+  maxStockPrice: string
+}
+
+function automaticReportDrafts(settings: ResearchSettings): AutomaticReportDraft[] {
+  const fallback: AutomaticResearchReportSettings[] = [
+    { slot: 'A', enabled: settings.auto_enabled, scope: settings.automatic_scope || 'MARKET', symbols: [], total_budget: settings.automatic_total_budget || 1000000, per_symbol_budget: settings.automatic_per_symbol_budget || 80000, max_stock_price: settings.automatic_max_stock_price },
+    { slot: 'B', enabled: false, scope: 'MARKET', symbols: [], total_budget: 1000000, per_symbol_budget: 80000, max_stock_price: null },
+  ]
+  return (settings.automatic_reports?.length === 2 ? settings.automatic_reports : fallback).map((report) => ({
+    slot: report.slot,
+    enabled: report.enabled,
+    scope: report.scope,
+    symbolsText: report.symbols.join('、'),
+    totalBudget: String(report.total_budget),
+    perSymbolBudget: String(report.per_symbol_budget),
+    maxStockPrice: report.max_stock_price == null ? '' : String(report.max_stock_price),
+    config_version: report.config_version,
+  }))
+}
+
 export function ResearchPage() {
   const { watchlist, positions, quotes, subscribe } = useMarket()
   const [date, setDate] = useState(today())
@@ -51,6 +75,9 @@ export function ResearchPage() {
   const [submitting, setSubmitting] = useState(false)
   const [settings, setSettings] = useState<ResearchSettings | null>(null)
   const [settingsSaving, setSettingsSaving] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [automaticDrafts, setAutomaticDrafts] = useState<AutomaticReportDraft[]>([])
+  const [settingsError, setSettingsError] = useState('')
   const [error, setError] = useState('')
 
   const assetSymbols = useMemo(() => Array.from(new Set([
@@ -134,11 +161,35 @@ export function ResearchPage() {
     finally { setCancelling('') }
   }
 
-  async function toggleAutoResearch() {
+  function openAutomaticSettings() {
+    if (!settings) return
+    setAutomaticDrafts(automaticReportDrafts(settings)); setSettingsError(''); setSettingsOpen(true)
+  }
+
+  function updateAutomaticDraft(slot: 'A' | 'B', patch: Partial<AutomaticReportDraft>) {
+    setAutomaticDrafts((current) => current.map((item) => item.slot === slot ? { ...item, ...patch } : item))
+  }
+
+  async function saveAutomaticSettings() {
     if (!settings || settingsSaving) return
+    const reports: AutomaticResearchReportSettings[] = []
+    for (const draft of automaticDrafts) {
+      const total = positiveNumber(draft.totalBudget)
+      const perSymbol = positiveNumber(draft.perSymbolBudget)
+      const maximum = positiveNumber(draft.maxStockPrice)
+      const symbols = parseSymbols(draft.symbolsText)
+      if (!total || !perSymbol) { setSettingsError(`报告 ${draft.slot} 的预算必须大于 0`); return }
+      if (perSymbol > total) { setSettingsError(`报告 ${draft.slot} 的单股投入不能超过总预算`); return }
+      if (draft.maxStockPrice.trim() && !maximum) { setSettingsError(`报告 ${draft.slot} 的最高股价必须大于 0`); return }
+      if (draft.scope === 'CUSTOM' && !symbols.length) { setSettingsError(`报告 ${draft.slot} 需要至少一只有效 A 股代码`); return }
+      reports.push({ slot: draft.slot, enabled: draft.enabled, scope: draft.scope, symbols: draft.scope === 'CUSTOM' ? symbols : [], total_budget: total, per_symbol_budget: perSymbol, max_stock_price: maximum, config_version: draft.config_version })
+    }
     setSettingsSaving(true); setError('')
-    try { setSettings(await api.saveResearchSettings(!settings.auto_enabled)) }
-    catch (reason) { setError(reason instanceof Error ? reason.message : '自动日研设置保存失败') }
+    try {
+      setSettings(await api.saveResearchSettings({ automatic_reports: reports }))
+      setSettingsOpen(false)
+    }
+    catch (reason) { setSettingsError(reason instanceof Error ? reason.message : '自动日研设置保存失败') }
     finally { setSettingsSaving(false) }
   }
 
@@ -147,9 +198,23 @@ export function ResearchPage() {
   const targetCount = settings?.portfolio_target_count || 15
   return <div className="research-layout">
     <Panel title="自动每日研究" eyebrow="PER-USER SCHEDULE" className="full-span auto-research-panel">
-      <div className="auto-research-summary"><span>{settings?.auto_enabled ? '●' : '○'}</span><div><strong>{settings?.auto_enabled ? '已开启' : '默认关闭'} · 15:00 收盘，15:05 开始检查</strong><p>仅在上海交易日运行；数据未就绪时每 5 分钟重试，最长 2 小时。固定使用全市场、总资金 100 万元、单股 8 万元。</p></div></div>
-      <button className={settings?.auto_enabled ? 'secondary' : 'primary'} disabled={!settings || settingsSaving} onClick={() => void toggleAutoResearch()}>{settingsSaving ? '正在保存…' : settings?.auto_enabled ? '关闭自动日研' : '开启自动日研'}</button>
+      <div className="auto-research-summary"><span>{settings?.auto_enabled ? '●' : '○'}</span><div><strong>{settings?.auto_enabled ? `已开启 ${settings.automatic_reports?.filter((item) => item.enabled).length || 1} 个报告` : '当前未启用'} · 15:00 收盘，15:05 开始检查</strong><p>报告 A、B 可分别设置范围与预算；开启一个即单报告，两个都开启即依次运行两份报告。</p></div></div>
+      <button className="secondary" disabled={!settings} onClick={openAutomaticSettings}>设置</button>
     </Panel>
+    {settingsOpen && <div className="automatic-settings-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false) }}>
+      <section className="automatic-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="automatic-settings-title">
+        <header><div><span>AUTOMATIC DAILY REPORTS</span><h2 id="automatic-settings-title">自动每日报告设置</h2><p>两套配置相互独立。自选与持仓会在每天运行时读取最新内容。</p></div><button type="button" className="secondary automatic-settings-close" aria-label="关闭设置" onClick={() => setSettingsOpen(false)}>×</button></header>
+        <div className="automatic-report-grid">{automaticDrafts.map((draft) => <article key={draft.slot} className={draft.enabled ? 'enabled' : ''}>
+          <div className="automatic-report-head"><div><span>报告 {draft.slot}</span><strong>{draft.enabled ? '已启用' : '未启用'}</strong></div><label className="automatic-switch"><input type="checkbox" checked={draft.enabled} onChange={(event) => updateAutomaticDraft(draft.slot, { enabled: event.target.checked })} /><i /><span>{draft.enabled ? '每天运行' : '暂停'}</span></label></div>
+          <label>研究范围<select value={draft.scope} onChange={(event) => updateAutomaticDraft(draft.slot, { scope: event.target.value as ResearchScope })}><option value="MARKET">全市场</option><option value="WATCHLIST">我的自选与持仓</option><option value="CUSTOM">手工指定股票</option></select></label>
+          {draft.scope === 'CUSTOM' && <label>股票代码<textarea rows={3} value={draft.symbolsText} onChange={(event) => updateAutomaticDraft(draft.slot, { symbolsText: event.target.value })} placeholder="600519.SH、000001.SZ" /><small>已识别 {parseSymbols(draft.symbolsText).length} 只股票</small></label>}
+          {draft.scope === 'WATCHLIST' && <div className="automatic-dynamic-note">运行时动态读取当前自选股和模拟持仓；若为空，该报告会在两小时窗口内继续等待。</div>}
+          <div className="automatic-budget-fields"><label>总预算（元）<input type="number" min="1" value={draft.totalBudget} onChange={(event) => updateAutomaticDraft(draft.slot, { totalBudget: event.target.value })} /></label><label>单股最高投入（元）<input type="number" min="1" value={draft.perSymbolBudget} onChange={(event) => updateAutomaticDraft(draft.slot, { perSymbolBudget: event.target.value })} /></label><label>最高可接受股价（元）<input type="number" min="0.01" step="0.01" value={draft.maxStockPrice} onChange={(event) => updateAutomaticDraft(draft.slot, { maxStockPrice: event.target.value })} placeholder="不限" /></label></div>
+        </article>)}</div>
+        {settingsError && <div className="failure-box" role="alert"><strong>无法保存</strong><p>{settingsError}</p></div>}
+        <footer><p>上海交易日 15:05 同时提交启用的配置，由串行 Worker 依次执行。</p><div><button type="button" className="secondary" onClick={() => setSettingsOpen(false)}>取消</button><button type="button" className="primary" disabled={settingsSaving} onClick={() => void saveAutomaticSettings()}>{settingsSaving ? '正在保存…' : '保存设置'}</button></div></footer>
+      </section>
+    </div>}
     <Panel title="发起每日研究" eyebrow="NEW RESEARCH RUN" className="full-span">
       <div className="run-form research-run-form">
         <label>交易日<input type="date" value={date} max={today()} onChange={(event) => setDate(event.target.value)} /></label>
@@ -187,7 +252,7 @@ export function ResearchPage() {
     <Panel title="跨日期活动任务" eyebrow="MY ACTIVE RUNS" className="full-span">
       {activity.length ? <div className="research-run-list">{activity.map((run) => {
         const status = run.status.toUpperCase()
-        return <article className="research-run-card" key={`active-${run.run_id}`}><div className="research-run-head"><div><strong>{run.trading_date || run.requested_date || '待确定交易日'}</strong><code>{run.run_id}</code></div><StatusPill status={run.status} /></div><div className="run-scope-summary"><span>{run.trigger_source === 'AUTO' ? '自动日研' : '手动研究'}</span><span>{run.phase || '等待流水线更新'}</span><span>进度 {run.progress ?? 0}%</span><span>开始 {formatTime(run.started_at || run.created_at)}</span></div>{status === 'CANCEL_REQUESTED' ? <div className="warning-box"><strong>正在停止</strong><p>当前阶段完成后将安全停止。</p></div> : <button className="secondary" disabled={cancelling === run.run_id} onClick={() => void cancel(run)}>{cancelling === run.run_id ? '正在请求停止…' : '停止任务'}</button>}</article>
+        return <article className="research-run-card" key={`active-${run.run_id}`}><div className="research-run-head"><div><strong>{run.trading_date || run.requested_date || '待确定交易日'}</strong><code>{run.run_id}</code></div><StatusPill status={run.status} /></div><div className="run-scope-summary"><span>{run.trigger_source === 'AUTO' ? '自动日研' : '手动研究'}</span>{run.automatic_report_slot && <span>报告 {run.automatic_report_slot}</span>}<span>{run.phase || '等待流水线更新'}</span><span>进度 {run.progress ?? 0}%</span><span>开始 {formatTime(run.started_at || run.created_at)}</span></div>{status === 'CANCEL_REQUESTED' ? <div className="warning-box"><strong>正在停止</strong><p>当前阶段完成后将安全停止。</p></div> : <button className="secondary" disabled={cancelling === run.run_id} onClick={() => void cancel(run)}>{cancelling === run.run_id ? '正在请求停止…' : '停止任务'}</button>}</article>
       })}</div> : <div className="run-await"><span>✓</span><strong>当前没有活动任务</strong><p>这里会汇总当前用户跨交易日的运行中研究。</p></div>}
     </Panel>
     <Panel title="最近 5 次运行" eyebrow="LIVE PROGRESS" className="full-span recent-run-panel" action={runs[0] && <StatusPill status={runs[0].status} />}>
@@ -199,9 +264,10 @@ export function ResearchPage() {
           const reportLink = `/reports?date=${encodeURIComponent(run.trading_date || date)}&run_id=${encodeURIComponent(run.run_id)}`
           return <article className="research-run-card" key={run.run_id}>
             <div className="research-run-head"><div><strong>{run.trading_date || date}</strong><code>{run.run_id}</code></div><StatusPill status={run.status} /></div>
-            <div className="run-scope-summary"><span>{run.trigger_source === 'AUTO' ? '自动日研' : '手动研究'}</span><span>{SCOPE_LABELS[run.research_scope || 'MARKET']}</span>{run.requested_date && run.requested_date !== run.trading_date ? <span>请求 {run.requested_date} → 实际 {run.trading_date}</span> : null}{run.target_symbols?.length ? <span>{run.target_symbols.length} 只指定股票</span> : null}{run.total_budget ? <span>预算 {formatNumber(Number(run.total_budget))} 元</span> : null}</div>
+            <div className="run-scope-summary"><span>{run.trigger_source === 'AUTO' ? '自动日研' : '手动研究'}</span>{run.automatic_report_slot && <span>报告 {run.automatic_report_slot}</span>}<span>{SCOPE_LABELS[run.research_scope || 'MARKET']}</span>{run.requested_date && run.requested_date !== run.trading_date ? <span>请求 {run.requested_date} → 实际 {run.trading_date}</span> : null}{run.target_symbols?.length ? <span>{run.target_symbols.length} 只指定股票</span> : null}{run.total_budget ? <span>预算 {formatNumber(Number(run.total_budget))} 元</span> : null}</div>
             <div className="progress-track" role="progressbar" aria-label="研究完成进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={run.progress ?? (isActive ? 5 : 100)}><i className={normalized === 'FAILED' ? 'failed' : normalized === 'FUSED' ? 'warning' : isActive ? 'active' : 'done'} style={{ width: `${run.progress ?? (isActive ? 5 : 100)}%` }} />{isActive && <span className="progress-runner" aria-hidden="true" />}</div>
             <div className="research-run-meta"><span>{run.phase || (isActive ? '研究流水线运行中' : '已结束')}</span><span>{displayTime.label} {formatTime(displayTime.value)}</span></div>
+            {normalized === 'DATA_READINESS_WAITING' && <div className="warning-box"><strong>等待基准数据同步</strong><p>股票日线已就绪，系统正在等待全部策略基准覆盖本交易日；下次重试 {formatTime(run.next_retry_at || undefined)}。</p></div>}
             {normalized === 'FAILED' && <div className="failure-box"><strong>运行失败</strong><p>{run.error_message || '未返回具体失败原因，请查看审计事件。'}</p></div>}
             {normalized === 'FUSED' && <div className="warning-box"><strong>观察模式 · {run.reason_code || 'UNSPECIFIED'}</strong><p>{run.reason_message || '正式组合条件未满足'}；正式可用 {run.formal_eligible_count ?? 0} 只，排除 {run.excluded_symbol_count || 0} 只。</p></div>}
             {normalized === 'SUCCEEDED' && <div className="success-box"><strong>正式个股研究已完成</strong><p>{run.portfolio_generated ? '评分、候选池、预算组合和日报已生成。' : run.portfolio_reason_message || '全部目标股票的正式报告已生成；本次未生成整体组合。'}</p></div>}

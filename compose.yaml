@@ -11,10 +11,12 @@ x-app-service: &app-service
     NUMEXPR_NUM_THREADS: "1"
     ARROW_IO_THREADS: "1"
     SEARXNG_BASE_URL: "http://searxng:8080"
+    PRIVATE_OBJECT_ROOT: "/data/private"
   extra_hosts: ["host.docker.internal:host-gateway"]
   volumes:
     - lake-data:/data/lake
     - object-data:/data/objects
+    - private-data:/data/private
   restart: unless-stopped
   security_opt: ["no-new-privileges:true"]
   pids_limit: 128
@@ -25,6 +27,15 @@ x-app-service: &app-service
       max-file: "3"
 
 services:
+  private-data-init:
+    image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+    user: "0:0"
+    entrypoint: ["sh", "-c"]
+    command: ["chown -R 10001:10001 /data/private"]
+    volumes: ["private-data:/data/private"]
+    restart: "no"
+    security_opt: ["no-new-privileges:true"]
+
   web:
     build:
       context: ./web
@@ -50,6 +61,8 @@ services:
     ports: ["${SERVICE_BIND_ADDRESS:-127.0.0.1}:8000:8000"]
     mem_limit: 320m
     depends_on:
+      private-data-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -62,13 +75,15 @@ services:
       timeout: 5s
       retries: 5
 
-  # Default low-memory worker. It polls all three queues serially and runs each
+  # Default low-memory worker. It polls all configured queues serially and runs each
   # heavy job in an isolated child process so completed heaps return to the OS.
   job-worker:
     <<: *app-service
     command: ["python", "-m", "ashare_ai.orchestration.serial_worker"]
     mem_limit: 700m
     depends_on:
+      api:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       redis:
@@ -89,6 +104,8 @@ services:
     command: ["python", "-m", "ashare_ai.orchestration.runner"]
     mem_limit: 256m
     depends_on:
+      api:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       redis:
@@ -105,6 +122,8 @@ services:
     command: ["python", "-m", "ashare_ai.orchestration.backtest_worker"]
     mem_limit: 700m
     depends_on:
+      api:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       redis:
@@ -116,6 +135,8 @@ services:
     command: ["python", "-m", "ashare_ai.orchestration.research_worker"]
     mem_limit: 700m
     depends_on:
+      api:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       redis:
@@ -127,6 +148,8 @@ services:
     command: ["python", "-m", "ashare_ai.orchestration.trade_plan_worker"]
     mem_limit: 700m
     depends_on:
+      api:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       redis:
@@ -138,6 +161,8 @@ services:
     command: ["python", "-m", "ashare_ai.orchestration.exit_advice_worker"]
     mem_limit: 320m
     depends_on:
+      api:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       redis:
@@ -232,3 +257,4 @@ volumes:
   redis-data:
   lake-data:
   object-data:
+  private-data:

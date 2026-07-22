@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from ashare_ai.core.hashing import stable_hash
 from ashare_ai.core.time import SHANGHAI
 from ashare_ai.orchestration.research_schedule import (
+    _automatic_run_key,
     auto_dispatch_state,
     dispatch_auto_research,
     resolve_manual_research_date,
@@ -18,7 +19,13 @@ from ashare_ai.orchestration.runner import (
     run_scheduler_loop,
     seconds_until_next_tick,
 )
-from ashare_ai.storage.models import Base, JobRun, UserAccount, UserResearchPreference
+from ashare_ai.storage.models import (
+    AutomaticResearchReportConfig,
+    Base,
+    JobRun,
+    UserAccount,
+    UserResearchPreference,
+)
 
 
 class Calendar:
@@ -94,6 +101,29 @@ def test_auto_dispatch_state_enforces_window_and_readiness() -> None:
     ) == "RETRY_EXPIRED"
 
 
+def test_slot_a_keeps_legacy_keys_during_upgrade() -> None:
+    trading_date = date(2026, 7, 15)
+    legacy_idempotency = stable_hash(
+        {
+            "kind": "AUTO_DAILY_RESEARCH",
+            "user_id": "user-1",
+            "trading_date": trading_date,
+        }
+    )
+    assert _automatic_run_key(
+        kind="AUTO_DAILY_RESEARCH",
+        user_id="user-1",
+        trading_date=trading_date,
+        slot="A",
+    ) == legacy_idempotency
+    assert _automatic_run_key(
+        kind="AUTO_DAILY_RESEARCH",
+        user_id="user-1",
+        trading_date=trading_date,
+        slot="B",
+    ) != legacy_idempotency
+
+
 def test_auto_dispatch_is_per_user_and_idempotent() -> None:
     engine = create_engine("sqlite+pysqlite://")
     Base.metadata.create_all(engine)
@@ -116,9 +146,27 @@ def test_auto_dispatch_is_per_user_and_idempotent() -> None:
         session.add(
             UserResearchPreference(
                 user_id=user_id,
-                auto_enabled=True,
+                # The normalized report rows are authoritative; this legacy
+                # cache may temporarily drift after an interrupted import.
+                auto_enabled=False,
                 updated_at=now.astimezone(UTC),
             )
+        )
+        session.add_all(
+            [
+                AutomaticResearchReportConfig(
+                    user_id=user_id,
+                    slot=slot,
+                    enabled=True,
+                    scope="MARKET",
+                    symbols=[],
+                    total_budget=1_000_000,
+                    per_symbol_budget=80_000,
+                    config_version=1,
+                    updated_at=now.astimezone(UTC),
+                )
+                for slot in ("A", "B")
+            ]
         )
         session.commit()
 
@@ -152,6 +200,14 @@ def test_auto_dispatch_is_per_user_and_idempotent() -> None:
         pipeline_factory=Pipeline,
         enqueue=queued.append,
     )
+    with factory() as session:
+        for run in session.scalars(select(JobRun)).all():
+            run.status = "SUCCEEDED"
+            run.active_research_key = None
+        for config in session.scalars(select(AutomaticResearchReportConfig)).all():
+            config.config_version += 1
+            config.total_budget += 1
+        session.commit()
     second = dispatch_auto_research(
         now=now,
         calendar=Calendar(),
@@ -162,14 +218,15 @@ def test_auto_dispatch_is_per_user_and_idempotent() -> None:
     )
 
     assert first["enabled_user_count"] == 1
-    assert len(queued) == 1
+    assert len(queued) == 2
     assert second["queued"] == []
     with factory() as session:
-        run = session.scalar(select(JobRun))
-        assert run is not None
-        assert run.manifest["trigger_source"] == "AUTO"
-        assert run.manifest["requested_date"] == "2026-07-15"
-        assert run.manifest["actual_research_date"] == "2026-07-15"
+        runs = list(session.scalars(select(JobRun)).all())
+        assert len(runs) == 2
+        assert {run.manifest["automatic_report_slot"] for run in runs} == {"A", "B"}
+        assert all(run.manifest["trigger_source"] == "AUTO" for run in runs)
+        assert all(run.manifest["requested_date"] == "2026-07-15" for run in runs)
+        assert all(run.manifest["actual_research_date"] == "2026-07-15" for run in runs)
 
 
 def test_auto_dispatch_does_not_create_run_before_data_ready() -> None:

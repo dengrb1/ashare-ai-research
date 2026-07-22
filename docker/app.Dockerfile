@@ -30,7 +30,7 @@ ENV NEODATA_FINANCIAL_SEARCH_PATH=/opt/neodata-financial-search/query.py \
 # otherwise-unused essential perl-base package eliminates its unfixed runtime
 # CVEs without affecting Python, health checks, migrations, or workers.
 RUN dpkg --purge --force-remove-essential perl-base \
-    && mkdir -p /data/lake /data/objects \
+    && mkdir -p /data/lake /data/objects /data/private \
     && chown -R appuser:appuser /app /data
 USER appuser
 

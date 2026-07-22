@@ -28,23 +28,29 @@ afterEach(() => {
 })
 
 describe('research observation mode and precise reports', () => {
-  it('keeps frozen snapshots system-enforced and saves the per-user auto switch', async () => {
+  it('keeps frozen snapshots system-enforced and saves independent automatic reports', async () => {
+    const reports = [
+      { slot: 'A', enabled: true, scope: 'MARKET', symbols: [], total_budget: 1000000, per_symbol_budget: 80000 },
+      { slot: 'B', enabled: false, scope: 'MARKET', symbols: [], total_budget: 1000000, per_symbol_budget: 80000 },
+    ]
     const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
       if (url.endsWith('/assets')) return jsonResponse({ watchlist: [], positions: [] })
-      if (url.endsWith('/research/settings') && init?.method === 'PUT') return jsonResponse({ auto_enabled: true, automatic_scope: 'MARKET', automatic_total_budget: 1000000, automatic_per_symbol_budget: 80000, schedule_timezone: 'Asia/Shanghai', schedule_time: '15:05', snapshot_mode: 'SYSTEM_ENFORCED' })
+      if (url.endsWith('/research/settings') && init?.method === 'PUT') return jsonResponse({ auto_enabled: true, automatic_scope: 'MARKET', automatic_total_budget: 1000000, automatic_per_symbol_budget: 80000, automatic_reports: reports, schedule_timezone: 'Asia/Shanghai', schedule_time: '15:05', snapshot_mode: 'SYSTEM_ENFORCED' })
       if (url.endsWith('/research/settings')) return jsonResponse({ auto_enabled: false, automatic_scope: 'MARKET', automatic_total_budget: 1000000, automatic_per_symbol_budget: 80000, schedule_timezone: 'Asia/Shanghai', schedule_time: '15:05', snapshot_mode: 'SYSTEM_ENFORCED' })
       if (url.includes('/research/runs?')) return jsonResponse([])
       throw new Error(`unexpected request ${url}`)
     })
     vi.stubGlobal('fetch', mockFetch)
     render(researchWrapper(<ResearchPage />))
-    expect(await screen.findByText(/默认关闭 · 15:00 收盘/)).toBeInTheDocument()
+    expect(await screen.findByText(/当前未启用 · 15:00 收盘/)).toBeInTheDocument()
     expect(screen.getByText(/系统强制开启（只读）/)).toBeInTheDocument()
-    await userEvent.click(screen.getByRole('button', { name: '开启自动日研' }))
-    await waitFor(() => expect(screen.getByText(/已开启 · 15:00 收盘/)).toBeInTheDocument())
+    await userEvent.click(screen.getByRole('button', { name: '设置' }))
+    await userEvent.click(screen.getAllByRole('checkbox')[0])
+    await userEvent.click(screen.getByRole('button', { name: '保存设置' }))
+    await waitFor(() => expect(screen.getByText(/已开启 1 个报告 · 15:00 收盘/)).toBeInTheDocument())
     const call = mockFetch.mock.calls.find(([url, init]) => String(url).endsWith('/research/settings') && init?.method === 'PUT')
-    expect(JSON.parse(String(call?.[1]?.body))).toEqual({ auto_enabled: true })
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual({ automatic_reports: reports })
   })
 
   it('shows recent FUSED and failed runs with exact report links', async () => {
@@ -256,9 +262,9 @@ describe('research observation mode and precise reports', () => {
     expect(screen.getAllByText('AKShare').length).toBeGreaterThan(0)
     expect(screen.getByText(/延迟数据/)).toBeInTheDocument()
     expect(await screen.findByText('composite-v2')).toBeInTheDocument()
-    expect(screen.getByText('NO_BUY · 当前不满足买入条件')).toBeInTheDocument()
-    expect(screen.getByText('INSUFFICIENT_HISTORY')).toBeInTheDocument()
-    expect(screen.getByText('AI 解释不可用')).toBeInTheDocument()
+    expect(screen.getByText('当前不满足买入条件')).toBeInTheDocument()
+    expect(screen.getByText('历史样本不足，暂不生成方案')).toBeInTheDocument()
+    expect(screen.getByText('AI 说明不可用')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '已展示该股方案' })).toBeDisabled()
     expect(mockFetch.mock.calls.some(([url, init]) => String(url).endsWith('/trade-plans') && init?.method === 'POST')).toBe(false)
   })

@@ -85,6 +85,8 @@ def test_native_bearer_refresh_rotation_revoke_expiry_and_disable() -> None:
                 "paper_portfolio_only": True,
                 "profit_exit_monitor": True,
                 "persistent_ai_chat": True,
+                "chat_images_seven_day_retention": True,
+                "personal_archive_export_import": True,
                 "searxng_web_research": True,
             }
         assert bootstrap_body["capabilities"]["endpoints"]["report_symbols"] == (

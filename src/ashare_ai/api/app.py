@@ -1,14 +1,27 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal, NoReturn
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -16,7 +29,15 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import StreamingResponse
 
 from ashare_ai import __version__
-from ashare_ai.agents.chat import allow_chat_request, stream_chat_response
+from ashare_ai.agents.attachments import (
+    MAX_IMAGES_PER_MESSAGE,
+    MAX_MESSAGE_IMAGE_BYTES,
+    AttachmentError,
+    AttachmentService,
+    inspect_image,
+)
+from ashare_ai.agents.chat import ChatStreamError, allow_chat_request, stream_chat_response
+from ashare_ai.agents.chat_threads import ChatThreadService, InvalidThreadCursor
 from ashare_ai.agents.model_settings import (
     ModelConfigurationService,
     ModelSettingsDraft,
@@ -44,8 +65,12 @@ from ashare_ai.api.schemas import (
     MAX_RESEARCH_SYMBOLS,
     MAX_TRADE_PLAN_SYMBOLS,
     MAX_WATCHLIST_SYMBOLS,
+    AIChatAttachmentResponse,
+    AIChatBulkDeleteRequest,
     AIChatMessageResponse,
     AIChatSendRequest,
+    AIChatThreadIndexResponse,
+    AIChatThreadPatchRequest,
     AIChatThreadRequest,
     AIChatThreadResponse,
     AIModelOptionsResponse,
@@ -69,6 +94,9 @@ from ashare_ai.api.schemas import (
     ModelSettingsRequest,
     ModelSettingsResponse,
     PasswordResetRequest,
+    PersonalArchiveApplyRequest,
+    PersonalArchiveExportRequest,
+    PersonalArchiveJobResponse,
     PortfolioResponse,
     QuoteResponse,
     RefreshTokenRequest,
@@ -98,7 +126,8 @@ from ashare_ai.market.service import get_market_data_service
 from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.orchestration.backtest_jobs import enqueue_backtest
 from ashare_ai.orchestration.daily import load_pipeline
-from ashare_ai.orchestration.research_jobs import enqueue_research
+from ashare_ai.orchestration.personal_archive_jobs import enqueue_personal_archive
+from ashare_ai.orchestration.research_jobs import enqueue_research, enqueue_research_at
 from ashare_ai.orchestration.research_schedule import (
     AKShareDataReadiness,
     FreeExchangeCalendar,
@@ -112,6 +141,7 @@ from ashare_ai.orchestration.trade_plan_queue import (
     enqueue_trade_plan,
 )
 from ashare_ai.portfolio.user_assets import UNSET_TOTAL_ASSETS, UserAssetService
+from ashare_ai.reports.chinese_summary import component_summary, symbol_summary
 from ashare_ai.search.service import (
     FinancialSearchBusyError,
     FinancialSearchResponse,
@@ -129,6 +159,7 @@ from ashare_ai.storage.models import (
     CandidateRow,
     ExitAdviceRow,
     JobRun,
+    PersonalArchiveJob,
     PortfolioRow,
     ReportRow,
     ScoreRow,
@@ -137,8 +168,18 @@ from ashare_ai.storage.models import (
     UserAccount,
 )
 from ashare_ai.storage.objects import LocalObjectStore, ObjectStore, S3ObjectStore
+from ashare_ai.storage.personal_archive import (
+    MAX_ARCHIVE_BYTES,
+    PersonalArchiveError,
+    delete_private_archive,
+    private_archive_target_path,
+    read_private_archive,
+    wrap_job_secret,
+)
 from ashare_ai.storage.repositories import QueryRepository
 from ashare_ai.trading.default_rules import ensure_builtin_trading_rules
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -148,6 +189,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         bootstrap_admin(session)
         ensure_builtin_trading_rules(session)
         ModelConfigurationService().bootstrap_from_environment(session)
+        AttachmentService(session).cleanup_expired()
         session.commit()
     yield
 
@@ -276,20 +318,49 @@ def _manual_research_date(requested_date: date, now: datetime) -> date:
         return requested_date
     try:
         sessions = FreeExchangeCalendar().sessions(
-            requested_date - timedelta(days=20), current.date()
+            requested_date - timedelta(days=20), current.date() + timedelta(days=10)
         )
-        readiness = AKShareDataReadiness()
         return resolve_manual_research_date(
             requested_date=requested_date,
             now=current,
             sessions=sessions,
-            data_ready=lambda value: readiness.ready(value, current),
+            data_ready=lambda _: True,
+            require_ready=False,
         )
     except Exception as exc:
         raise HTTPException(
             status_code=409,
-            detail="no completed trading session with ready data is available",
+            detail=safe_error_message(exc),
         ) from exc
+
+
+def _research_readiness_wait(trading_date: date, now: datetime) -> dict[str, str | int] | None:
+    """Return durable wait metadata without changing the selected session."""
+    if get_settings().canonical_bundle_mode in {"file", "demo"}:
+        return None
+    current = now.astimezone(SHANGHAI) if now.tzinfo else now.replace(tzinfo=SHANGHAI)
+    try:
+        ready = AKShareDataReadiness().ready(trading_date, current)
+    except Exception:
+        ready = False
+    if ready:
+        return None
+    try:
+        sessions = FreeExchangeCalendar().sessions(
+            trading_date + timedelta(days=1), trading_date + timedelta(days=10)
+        )
+        next_session = next(value for value in sessions if value > trading_date)
+        deadline = datetime.combine(next_session, time(9, 0), tzinfo=SHANGHAI)
+    except Exception:
+        deadline = current + timedelta(minutes=get_settings().daily_research_retry_limit_minutes)
+    retry_at = min(
+        current + timedelta(minutes=get_settings().daily_research_retry_minutes), deadline
+    )
+    return {
+        "deadline_at": deadline.astimezone(UTC).isoformat(),
+        "next_retry_at": retry_at.astimezone(UTC).isoformat(),
+        "attempt_count": 0,
+    }
 
 
 def _trade_plan_policy_payload(run: JobRun) -> dict[str, Any]:
@@ -403,6 +474,8 @@ def _research_run_response(db: Session, row: JobRun) -> ResearchRunResponse:
             "CANCEL_REQUESTED": "正在停止（当前阶段完成后）",
             "CANCELLED": "研究已停止",
         }[normalized]
+    elif normalized == "DATA_READINESS_WAITING":
+        phase, progress = "等待基准数据同步", 0
     elif normalized in {"PENDING", "QUEUED"}:
         phase, progress = "等待 Worker", 0
     else:
@@ -451,7 +524,12 @@ def _research_run_response(db: Session, row: JobRun) -> ResearchRunResponse:
             "portfolio_reason_code": portfolio_outcome.get("reason_code"),
             "portfolio_reason_message": portfolio_outcome.get("reason_message"),
             "trigger_source": manifest.get("trigger_source", "MANUAL"),
+            "automatic_report_slot": manifest.get("automatic_report_slot"),
             "requested_date": manifest.get("requested_date", row.trading_date),
+            "data_readiness_state": (
+                "WAITING_FOR_BENCHMARKS" if normalized == "DATA_READINESS_WAITING" else None
+            ),
+            "next_retry_at": (manifest.get("data_readiness_wait") or {}).get("next_retry_at"),
         }
     )
 
@@ -558,6 +636,8 @@ def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
                 "paper_portfolio_only": True,
                 "profit_exit_monitor": True,
                 "persistent_ai_chat": True,
+                "chat_images_seven_day_retention": True,
+                "personal_archive_export_import": True,
                 "searxng_web_research": True,
             },
             endpoints={
@@ -571,6 +651,9 @@ def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
                 "trade_plan": "/api/v1/trade-plans/{plan_id}",
                 "exit_advice": "/api/v1/exit-advice",
                 "ai_chat_threads": "/api/v1/ai/chat/threads",
+                "ai_chat_thread_index": "/api/v1/ai/chat/thread-index",
+                "personal_data_exports": "/api/v1/me/data-exports",
+                "personal_data_imports": "/api/v1/me/data-imports",
             },
         ),
     )
@@ -678,11 +761,39 @@ def ai_chat_threads(
     limit: int = Query(default=30, ge=1, le=100),
     before: datetime | None = None,
 ) -> list[AIChatThreadResponse]:
-    statement = select(AIChatThread).where(AIChatThread.user_id == context.user.user_id)
+    statement = select(AIChatThread).where(
+        AIChatThread.user_id == context.user.user_id,
+        AIChatThread.archived_at.is_(None),
+    )
     if before is not None:
         statement = statement.where(AIChatThread.updated_at < before)
     rows = db.scalars(statement.order_by(AIChatThread.updated_at.desc()).limit(limit)).all()
     return [AIChatThreadResponse.model_validate(row) for row in rows]
+
+
+@app.get("/api/v1/ai/chat/thread-index", response_model=AIChatThreadIndexResponse)
+def ai_chat_thread_index(
+    db: DbSession,
+    context: Current,
+    limit: int = Query(default=30, ge=1, le=100),
+    cursor: str | None = None,
+    archived: bool = False,
+    q: str | None = Query(default=None, max_length=128),
+) -> AIChatThreadIndexResponse:
+    try:
+        rows, next_cursor = ChatThreadService(db).list_index(
+            user_id=context.user.user_id,
+            limit=limit,
+            cursor=cursor,
+            archived=archived,
+            query=q,
+        )
+    except InvalidThreadCursor as exc:
+        raise HTTPException(status_code=422, detail="invalid thread cursor") from exc
+    return AIChatThreadIndexResponse(
+        items=[AIChatThreadResponse.model_validate(row) for row in rows],
+        next_cursor=next_cursor,
+    )
 
 
 @app.post(
@@ -704,6 +815,45 @@ def create_ai_chat_thread(
     db.commit()
     db.refresh(row)
     return AIChatThreadResponse.model_validate(row)
+
+
+@app.patch(
+    "/api/v1/ai/chat/threads/{thread_id}", response_model=AIChatThreadResponse
+)
+def patch_ai_chat_thread(
+    thread_id: str,
+    payload: AIChatThreadPatchRequest,
+    db: DbSession,
+    context: Writer,
+) -> AIChatThreadResponse:
+    try:
+        row = ChatThreadService(db).patch(
+            context.user.user_id,
+            thread_id,
+            payload.model_dump(exclude_unset=True),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="AI chat thread not found") from exc
+    return AIChatThreadResponse.model_validate(row)
+
+
+@app.delete("/api/v1/ai/chat/threads/{thread_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_ai_chat_thread(thread_id: str, db: DbSession, context: Writer) -> Response:
+    try:
+        ChatThreadService(db).delete(context.user.user_id, thread_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="AI chat thread not found") from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/api/v1/ai/chat/threads:bulk-delete")
+def bulk_delete_ai_chat_threads(
+    payload: AIChatBulkDeleteRequest, db: DbSession, context: Writer
+) -> dict[str, int]:
+    deleted = ChatThreadService(db).bulk_delete(
+        context.user.user_id, payload.thread_ids
+    )
+    return {"deleted": deleted}
 
 
 @app.get(
@@ -734,12 +884,360 @@ def ai_chat_messages(
     return [AIChatMessageResponse.model_validate(row) for row in rows]
 
 
+@app.post(
+    "/api/v1/ai/chat/attachments",
+    response_model=list[AIChatAttachmentResponse],
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_ai_chat_attachments(
+    db: DbSession,
+    context: Writer,
+    files: Annotated[list[UploadFile], File()],
+    thread_id: Annotated[str | None, Form()] = None,
+) -> list[AIChatAttachmentResponse]:
+    if not files or len(files) > MAX_IMAGES_PER_MESSAGE:
+        raise HTTPException(status_code=422, detail="each message accepts 1 to 4 images")
+    payloads: list[tuple[bytes, str | None]] = []
+    total = 0
+    try:
+        for uploaded in files:
+            payload = await uploaded.read(MAX_MESSAGE_IMAGE_BYTES + 1)
+            total += len(payload)
+            if total > MAX_MESSAGE_IMAGE_BYTES:
+                raise AttachmentError(
+                    "每条消息的图片合计不能超过 25 MB", code="IMAGE_TOTAL_TOO_LARGE"
+                )
+            inspect_image(payload, uploaded.content_type)
+            payloads.append((payload, uploaded.content_type))
+        service = AttachmentService(db)
+        rows = [
+            service.create(
+                user_id=context.user.user_id,
+                thread_id=thread_id,
+                payload=payload,
+                claimed_mime=mime,
+            )
+            for payload, mime in payloads
+        ]
+    except AttachmentError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    finally:
+        for uploaded in files:
+            await uploaded.close()
+    return [AIChatAttachmentResponse.model_validate(row) for row in rows]
+
+
+@app.get("/api/v1/ai/chat/attachments/{attachment_id}/content")
+def ai_chat_attachment_content(
+    attachment_id: str, db: DbSession, context: Current
+) -> Response:
+    service = AttachmentService(db)
+    row = service.get_owned(context.user.user_id, attachment_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="image not found")
+    try:
+        payload = service.read(context.user.user_id, attachment_id)
+    except AttachmentError as exc:
+        status_code = 410 if exc.code == "IMAGE_EXPIRED" else 404
+        raise HTTPException(
+            status_code=status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    return Response(
+        content=payload,
+        media_type=row.mime_type,
+        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
+    )
+
+
+def _owned_archive_job(db: Session, user_id: str, archive_id: str) -> PersonalArchiveJob:
+    row = db.scalar(
+        select(PersonalArchiveJob).where(
+            PersonalArchiveJob.archive_id == archive_id,
+            PersonalArchiveJob.user_id == user_id,
+        )
+    )
+    if row is None or row.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="personal archive job not found")
+    return row
+
+
+@app.post(
+    "/api/v1/me/data-exports",
+    response_model=PersonalArchiveJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def create_personal_data_export(
+    payload: PersonalArchiveExportRequest,
+    db: DbSession,
+    context: Writer,
+) -> PersonalArchiveJobResponse:
+    now = datetime.now(UTC)
+    archive_id = str(uuid4())
+    try:
+        encrypted_secret = wrap_job_secret(payload.passphrase, archive_id)
+    except PersonalArchiveError as exc:
+        raise HTTPException(
+            status_code=503, detail={"code": exc.code, "message": str(exc)}
+        ) from exc
+    row = PersonalArchiveJob(
+        archive_id=archive_id,
+        user_id=context.user.user_id,
+        kind="EXPORT",
+        status="PENDING",
+        phase="QUEUED",
+        progress=0,
+        encrypted_secret=encrypted_secret,
+        created_at=now,
+        expires_at=now + timedelta(hours=24),
+    )
+    db.add(row)
+    db.commit()
+    try:
+        enqueue_personal_archive(archive_id)
+    except Exception as exc:
+        row.status = "FAILED"
+        row.phase = "FAILED"
+        row.error_code = "ARCHIVE_QUEUE_UNAVAILABLE"
+        row.encrypted_secret = None
+        row.completed_at = datetime.now(UTC)
+        db.commit()
+        raise HTTPException(status_code=503, detail="personal archive queue unavailable") from exc
+    return PersonalArchiveJobResponse.model_validate(row)
+
+
+@app.get(
+    "/api/v1/me/data-exports/{export_id}", response_model=PersonalArchiveJobResponse
+)
+def personal_data_export_status(
+    export_id: str, db: DbSession, context: Current
+) -> PersonalArchiveJobResponse:
+    return PersonalArchiveJobResponse.model_validate(
+        _owned_archive_job(db, context.user.user_id, export_id)
+    )
+
+
+@app.get("/api/v1/me/data-exports/{export_id}/download")
+def download_personal_data_export(
+    export_id: str, db: DbSession, context: Current
+) -> Response:
+    row = _owned_archive_job(db, context.user.user_id, export_id)
+    if row.expires_at <= datetime.now(UTC):
+        raise HTTPException(status_code=410, detail="personal archive expired")
+    if row.status != "SUCCEEDED" or not row.output_object_uri:
+        raise HTTPException(status_code=409, detail="personal archive is not ready")
+    try:
+        payload = read_private_archive(row.output_object_uri)
+    except PersonalArchiveError as exc:
+        raise HTTPException(status_code=404, detail="personal archive file not found") from exc
+    return Response(
+        content=payload,
+        media_type="application/vnd.ashare.personal-profile",
+        headers={
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": 'attachment; filename="personal-profile.ashare"',
+        },
+    )
+
+
+@app.delete(
+    "/api/v1/me/data-exports/{export_id}", status_code=status.HTTP_204_NO_CONTENT
+)
+def delete_personal_data_export(
+    export_id: str, db: DbSession, context: Writer
+) -> Response:
+    row = db.scalar(
+        select(PersonalArchiveJob)
+        .where(
+            PersonalArchiveJob.archive_id == export_id,
+            PersonalArchiveJob.user_id == context.user.user_id,
+        )
+        .with_for_update()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="personal archive job not found")
+    delete_private_archive(row.source_object_uri)
+    delete_private_archive(row.output_object_uri)
+    row.deleted_at = datetime.now(UTC)
+    row.encrypted_secret = None
+    if row.status in {"PENDING", "PROCESSING"}:
+        row.status = "CANCELLED"
+        row.phase = "DELETED"
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post(
+    "/api/v1/me/data-imports",
+    response_model=PersonalArchiveJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def upload_personal_data_import(
+    db: DbSession,
+    context: Writer,
+    archive: Annotated[UploadFile, File()],
+    passphrase: Annotated[str, Form(min_length=8, max_length=128)],
+) -> PersonalArchiveJobResponse:
+    now = datetime.now(UTC)
+    archive_id = str(uuid4())
+    try:
+        encrypted_secret = wrap_job_secret(passphrase, archive_id)
+        path = private_archive_target_path(
+            context.user.user_id, archive_id, "source.ashare"
+        )
+        total = 0
+        with path.open("wb") as handle:
+            while chunk := await archive.read(1024 * 1024):
+                total += len(chunk)
+                if total > MAX_ARCHIVE_BYTES:
+                    raise PersonalArchiveError(
+                        "档案超过大小上限", code="ARCHIVE_TOO_LARGE"
+                    )
+                handle.write(chunk)
+        if total == 0:
+            raise PersonalArchiveError("档案为空", code="ARCHIVE_FORMAT_INVALID")
+    except PersonalArchiveError as exc:
+        if "path" in locals() and path.exists():
+            path.unlink()
+        raise HTTPException(
+            status_code=422, detail={"code": exc.code, "message": str(exc)}
+        ) from exc
+    finally:
+        await archive.close()
+    row = PersonalArchiveJob(
+        archive_id=archive_id,
+        user_id=context.user.user_id,
+        kind="IMPORT_PREVIEW",
+        status="PENDING",
+        phase="QUEUED",
+        progress=0,
+        encrypted_secret=encrypted_secret,
+        source_object_uri=path.as_uri(),
+        created_at=now,
+        expires_at=now + timedelta(hours=24),
+    )
+    db.add(row)
+    db.commit()
+    try:
+        enqueue_personal_archive(archive_id)
+    except Exception as exc:
+        row.status = "FAILED"
+        row.phase = "FAILED"
+        row.error_code = "ARCHIVE_QUEUE_UNAVAILABLE"
+        row.encrypted_secret = None
+        row.completed_at = datetime.now(UTC)
+        db.commit()
+        raise HTTPException(status_code=503, detail="personal archive queue unavailable") from exc
+    return PersonalArchiveJobResponse.model_validate(row)
+
+
+@app.get(
+    "/api/v1/me/data-imports/{import_id}", response_model=PersonalArchiveJobResponse
+)
+def personal_data_import_status(
+    import_id: str, db: DbSession, context: Current
+) -> PersonalArchiveJobResponse:
+    row = _owned_archive_job(db, context.user.user_id, import_id)
+    if row.kind not in {"IMPORT_PREVIEW", "IMPORT_APPLY"}:
+        raise HTTPException(status_code=404, detail="personal import job not found")
+    return PersonalArchiveJobResponse.model_validate(row)
+
+
+@app.post(
+    "/api/v1/me/data-imports/{import_id}/apply",
+    response_model=PersonalArchiveJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def apply_personal_data_import(
+    import_id: str,
+    payload: PersonalArchiveApplyRequest,
+    response: Response,
+    db: DbSession,
+    context: Writer,
+    idempotency_key: IdempotencyKey = None,
+) -> PersonalArchiveJobResponse:
+    preview = _owned_archive_job(db, context.user.user_id, import_id)
+    if preview.kind != "IMPORT_PREVIEW" or preview.status != "SUCCEEDED":
+        raise HTTPException(status_code=409, detail="import preview is not ready")
+    if preview.expires_at <= datetime.now(UTC) or not preview.source_object_uri:
+        raise HTTPException(status_code=410, detail="import preview expired")
+    route = f"/api/v1/me/data-imports/{import_id}/apply"
+    fingerprint = _idempotency_fingerprint(
+        context.user.user_id, route, idempotency_key, payload.model_dump(mode="json")
+    )
+    replay = _find_idempotency(
+        db,
+        user_id=context.user.user_id,
+        route=route,
+        fingerprint=fingerprint,
+    )
+    if replay is not None:
+        row = _owned_archive_job(db, context.user.user_id, replay.resource_id)
+        response.status_code = status.HTTP_200_OK
+        return PersonalArchiveJobResponse.model_validate(row)
+    now = datetime.now(UTC)
+    job_id = str(uuid4())
+    row = PersonalArchiveJob(
+        archive_id=job_id,
+        user_id=context.user.user_id,
+        kind="IMPORT_APPLY",
+        status="PENDING",
+        phase="QUEUED",
+        progress=0,
+        encrypted_secret=preview.encrypted_secret,
+        source_object_uri=preview.source_object_uri,
+        source_archive_id=preview.archive_id,
+        merge_options=payload.merge_options,
+        created_at=now,
+        expires_at=preview.expires_at,
+    )
+    db.add(row)
+    _remember_idempotency(
+        db,
+        user_id=context.user.user_id,
+        route=route,
+        fingerprint=fingerprint,
+        resource_type="PERSONAL_ARCHIVE",
+        resource_id=job_id,
+    )
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        replay = _find_idempotency(
+            db,
+            user_id=context.user.user_id,
+            route=route,
+            fingerprint=fingerprint,
+        )
+        if replay is not None:
+            response.status_code = status.HTTP_200_OK
+            return PersonalArchiveJobResponse.model_validate(
+                _owned_archive_job(db, context.user.user_id, replay.resource_id)
+            )
+        raise HTTPException(status_code=409, detail="import apply conflicted") from exc
+    try:
+        enqueue_personal_archive(job_id)
+    except Exception as exc:
+        row.status = "FAILED"
+        row.phase = "FAILED"
+        row.error_code = "ARCHIVE_QUEUE_UNAVAILABLE"
+        row.completed_at = datetime.now(UTC)
+        db.commit()
+        raise HTTPException(status_code=503, detail="personal archive queue unavailable") from exc
+    return PersonalArchiveJobResponse.model_validate(row)
+
+
 @app.post("/api/v1/ai/chat/threads/{thread_id}/messages:stream")
 def stream_ai_chat_message(
     thread_id: str,
     payload: AIChatSendRequest,
     db: DbSession,
     context: Writer,
+    idempotency_key: IdempotencyKey = None,
 ) -> StreamingResponse:
     owned = db.scalar(
         select(AIChatThread.thread_id).where(
@@ -749,7 +1247,14 @@ def stream_ai_chat_message(
     )
     if owned is None:
         raise HTTPException(status_code=404, detail="AI chat thread not found")
-    if not allow_chat_request(context.user.user_id):
+    effective_key = idempotency_key or str(uuid4())
+    existing = db.scalar(
+        select(AIChatMessage.message_id).where(
+            AIChatMessage.thread_id == thread_id,
+            AIChatMessage.idempotency_key_sha256 == sha256_bytes(effective_key.encode()),
+        )
+    )
+    if existing is None and not allow_chat_request(context.user.user_id):
         raise HTTPException(
             status_code=429,
             detail="AI chat rate limit exceeded",
@@ -757,6 +1262,7 @@ def stream_ai_chat_message(
         )
 
     async def events() -> AsyncIterator[str]:
+        request_id = str(uuid4())
         try:
             async for event in stream_chat_response(
                 user_id=context.user.user_id,
@@ -765,13 +1271,46 @@ def stream_ai_chat_message(
                 model=payload.model,
                 reasoning_effort=payload.reasoning_effort,
                 web_search=payload.web_search,
+                attachment_ids=payload.attachment_ids,
+                mention_refs=[item.model_dump() for item in payload.mention_refs],
+                decision_at=payload.decision_at or datetime.now(UTC),
+                idempotency_key=effective_key,
+                request_id=request_id,
             ):
                 yield f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
-        except ValueError as exc:
-            event = {"type": "error", "message": str(exc)}
+        except ChatStreamError as exc:
+            logger.warning(
+                "AI chat stream failed type=%s code=%s upstream_status=%s",
+                type(exc).__name__,
+                exc.code,
+                exc.status_code,
+            )
+            event = {
+                "type": "error",
+                "code": exc.code,
+                "message": str(exc),
+                "request_id": exc.request_id,
+                "retryable": exc.retryable,
+            }
             yield f"event: error\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
-        except Exception:
-            event = {"type": "error", "message": "AI 对话生成失败"}
+        except ValueError as exc:
+            event = {
+                "type": "error",
+                "code": "CHAT_REQUEST_INVALID",
+                "message": str(exc),
+                "request_id": request_id,
+                "retryable": False,
+            }
+            yield f"event: error\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as exc:
+            logger.exception("AI chat stream failed type=%s", type(exc).__name__)
+            event = {
+                "type": "error",
+                "code": "CHAT_INTERNAL_ERROR",
+                "message": "AI 对话生成失败",
+                "request_id": request_id,
+                "retryable": False,
+            }
             yield f"event: error\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
@@ -1224,6 +1763,19 @@ def report_symbols(report_id: str, db: DbSession, context: Current) -> list[Repo
                 rank=candidate.rank if candidate else None,
                 prediction_percentile=candidate.prediction_percentile if candidate else None,
                 industry_code=candidate.industry_code if candidate else None,
+                plain_language_summary=symbol_summary(
+                    total_score=score.total_score,
+                    fundamental_score=score.fundamental_score,
+                    technical_score=score.technical_score,
+                    sentiment_score=score.sentiment_score,
+                    advice_eligible=advice_eligible,
+                    reasons=reasons,
+                ),
+                component_summaries={
+                    "fundamental": component_summary("fundamental", score.fundamental_score),
+                    "technical": component_summary("technical", score.technical_score),
+                    "sentiment": component_summary("sentiment", score.sentiment_score),
+                },
             )
         )
     return result
@@ -1532,7 +2084,9 @@ def submit_research(
         response.status_code = status.HTTP_200_OK
         return RunResponse.model_validate(existing_run)
     requested_date = payload.trading_date
-    actual_research_date = _manual_research_date(requested_date, datetime.now(SHANGHAI))
+    submitted_at = datetime.now(SHANGHAI)
+    actual_research_date = _manual_research_date(requested_date, submitted_at)
+    readiness_wait = _research_readiness_wait(actual_research_date, submitted_at)
     if payload.scope == "WATCHLIST":
         assets = UserAssetService(db).get(context.user.user_id)
         available_symbols = sorted(
@@ -1639,9 +2193,12 @@ def submit_research(
             if portfolio_requested
             else f"定向研究标的少于 {target_count} 只，正式个股研究正常完成但不生成整体组合"
         ),
+        "data_readiness_wait": readiness_wait,
     }
     run.manifest = frozen_manifest
     run.input_hash = stable_hash(frozen_manifest)
+    if readiness_wait is not None:
+        run.status = "DATA_READINESS_WAITING"
     AuditLogger(db).record(
         run_id,
         "RESEARCH_SUBMITTED",
@@ -1700,7 +2257,23 @@ def submit_research(
         response.status_code = 200
         return RunResponse.model_validate(winner)
     try:
-        enqueue_research(run_id)
+        if readiness_wait is not None:
+            enqueue_research_at(
+                run_id, datetime.fromisoformat(str(readiness_wait["next_retry_at"]))
+            )
+            AuditLogger(db).record(
+                run_id,
+                "DATA_READINESS_WAITING",
+                "Research is waiting for all required benchmark data",
+                details={
+                    "trading_date": actual_research_date.isoformat(),
+                    "next_retry_at": readiness_wait["next_retry_at"],
+                    "deadline_at": readiness_wait["deadline_at"],
+                },
+            )
+            db.commit()
+        else:
+            enqueue_research(run_id)
     except Exception as exc:
         run.status = "FAILED"
         run.active_research_key = None
@@ -1715,7 +2288,19 @@ def submit_research(
         )
         db.commit()
         raise HTTPException(status_code=503, detail="research queue unavailable") from exc
-    return RunResponse.model_validate(run)
+    return RunResponse.model_validate(
+        {
+            **{column.name: getattr(run, column.name) for column in run.__table__.columns},
+            "data_readiness_state": (
+                "WAITING_FOR_BENCHMARKS"
+                if run.status == "DATA_READINESS_WAITING"
+                else None
+            ),
+            "next_retry_at": (dict(run.manifest).get("data_readiness_wait") or {}).get(
+                "next_retry_at"
+            ),
+        }
+    )
 
 
 @app.get("/api/v1/research/settings", response_model=ResearchSettingsResponse)
@@ -1730,8 +2315,15 @@ def research_settings(db: DbSession, context: Current) -> ResearchSettingsRespon
 def update_research_settings(
     payload: ResearchSettingsRequest, db: DbSession, context: Writer
 ) -> ResearchSettingsResponse:
+    reports = (
+        [item.model_dump(mode="python") for item in payload.automatic_reports]
+        if payload.automatic_reports is not None
+        else None
+    )
     settings = ResearchSettingsService(db).update(
-        context.user.user_id, auto_enabled=payload.auto_enabled
+        context.user.user_id,
+        auto_enabled=payload.auto_enabled,
+        automatic_reports=reports,
     )
     return ResearchSettingsResponse.model_validate(
         {**settings, "portfolio_target_count": _configured_portfolio_target_count()}
@@ -1807,7 +2399,7 @@ def cancel_research_run(
         "Daily research stop requested by its owner",
         details={"user_id": context.user.user_id, "previous_status": normalized},
     )
-    if normalized in {"PENDING", "QUEUED"}:
+    if normalized in {"PENDING", "QUEUED", "DATA_READINESS_WAITING"}:
         row.status = "CANCELLED"
         row.active_research_key = None
         row.error_message = None
@@ -1816,7 +2408,11 @@ def cancel_research_run(
             run_id,
             "RESEARCH_CANCELLED",
             "Queued daily research cancelled before worker execution",
-            details={"boundary": "queued"},
+            details={
+                "boundary": (
+                    "queued" if normalized != "DATA_READINESS_WAITING" else "data_readiness_wait"
+                )
+            },
         )
     elif normalized in {"RUNNING", "PROCESSING"}:
         row.status = "CANCEL_REQUESTED"

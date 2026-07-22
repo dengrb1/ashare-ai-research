@@ -48,6 +48,7 @@ export interface PaperPosition {
   target_weight?: number | null
   acquired_on?: string | null
   profit_trigger_amount?: number | string | null
+  exit_trigger_price?: number | string | null
 }
 
 export interface AssetState {
@@ -69,6 +70,8 @@ export interface ExitAdvice {
   current_price: number | string
   unrealized_profit: number | string
   trigger_amount: number | string
+  trigger_type?: 'PRICE' | 'PROFIT_AMOUNT'
+  trigger_price?: number | string | null
   position_snapshot: Record<string, unknown>
   research_context: Record<string, unknown>
   result?: Record<string, unknown> | null
@@ -83,6 +86,12 @@ export interface ExitAdvice {
 export interface AIChatThread {
   thread_id: string
   title: string
+  group_mode?: 'AUTO' | 'MANUAL'
+  group_type?: 'GENERAL' | 'SINGLE' | 'MULTI'
+  group_label?: string | null
+  cumulative_mentions?: Array<{ symbol: string; name: string }>
+  pinned_at?: string | null
+  archived_at?: string | null
   created_at: string
   updated_at: string
 }
@@ -92,14 +101,52 @@ export interface AIChatMessage {
   thread_id: string
   role: 'user' | 'assistant'
   content: string
+  status?: 'PENDING' | 'STREAMING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+  trading_date?: string
+  decision_at?: string
+  available_at?: string
+  parent_message_id?: string | null
   mentioned_symbols: string[]
+  mention_refs?: Array<{ symbol: string; name: string }>
+  attachment_ids?: string[]
   model_name?: string | null
   reasoning_effort?: string | null
   sources: Array<Record<string, unknown>>
   cache_hit: boolean
   input_tokens: number
   output_tokens: number
+  error_code?: string | null
+  request_id?: string | null
   created_at: string
+}
+
+export interface AIChatAttachment {
+  attachment_id: string
+  thread_id?: string | null
+  mime_type: string
+  byte_size: number
+  width: number
+  height: number
+  uploaded_at: string
+  expires_at: string
+  deleted_at?: string | null
+  deletion_reason?: string | null
+}
+
+export interface PersonalArchiveJob {
+  archive_id: string
+  kind: 'EXPORT' | 'IMPORT_PREVIEW' | 'IMPORT_APPLY'
+  status: 'PENDING' | 'PROCESSING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED'
+  phase: string
+  progress: number
+  source_archive_id?: string | null
+  result?: Record<string, unknown> | null
+  error_code?: string | null
+  created_at: string
+  started_at?: string | null
+  completed_at?: string | null
+  expires_at: string
+  deleted_at?: string | null
 }
 
 export interface MarketDataStatus {
@@ -276,8 +323,11 @@ export interface Run {
   portfolio_reason_code?: string | null
   portfolio_reason_message?: string | null
   trigger_source?: 'AUTO' | 'MANUAL'
+  automatic_report_slot?: 'A' | 'B' | null
   requested_date?: string | null
   reused?: boolean
+  data_readiness_state?: string | null
+  next_retry_at?: string | null
 }
 
 export type ResearchScope = 'MARKET' | 'WATCHLIST' | 'CUSTOM'
@@ -294,14 +344,26 @@ export interface ResearchSubmission {
 export interface ResearchSettings {
   auto_enabled: boolean
   updated_at?: string | null
-  automatic_scope: 'MARKET'
+  automatic_scope: ResearchScope
   automatic_total_budget: number | string
   automatic_per_symbol_budget: number | string
   automatic_max_stock_price?: number | string | null
+  automatic_reports?: AutomaticResearchReportSettings[]
   schedule_timezone: 'Asia/Shanghai'
   schedule_time: '15:05'
   snapshot_mode: 'SYSTEM_ENFORCED'
   portfolio_target_count: number
+}
+
+export interface AutomaticResearchReportSettings {
+  slot: 'A' | 'B'
+  enabled: boolean
+  scope: ResearchScope
+  symbols: string[]
+  total_budget: number | string
+  per_symbol_budget: number | string
+  max_stock_price?: number | string | null
+  config_version?: number
 }
 
 export interface Score {
@@ -342,6 +404,8 @@ export interface ReportSymbol {
   rank?: number | null
   prediction_percentile?: number | null
   industry_code?: string | null
+  plain_language_summary?: string | null
+  component_summaries?: Record<string, string>
 }
 
 export interface Portfolio {

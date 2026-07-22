@@ -63,6 +63,7 @@ from ashare_ai.portfolio.risk import (
     PortfolioRiskState,
     transition_drawdown_state,
 )
+from ashare_ai.reports.chinese_summary import component_summary, symbol_summary
 from ashare_ai.reports.daily import DailyReportService
 from ashare_ai.scoring.dividends import calculate_dividend_bonus
 from ashare_ai.scoring.formula import FORMULA_VERSION, FORMULA_VERSION_V2, build_composite_score
@@ -91,19 +92,25 @@ _COMPONENT_SYSTEM_INSTRUCTIONS: dict[str, str] = {
         "You are the fundamental analyst. Return only an evidence-grounded fundamental "
         "subscore and concise factors from the supplied request. Cite only supplied evidence. "
         "Score must be 0-100 and confidence must be 0-1. You cannot set a final score, "
-        "portfolio weight, or target price."
+        "portfolio weight, or target price. All positive_factors, negative_factors, and "
+        "risk_flags must be concise simplified Chinese for ordinary investors; "
+        "do not promise returns."
     ),
     "technical": (
         "You are the technical analyst. Return only an evidence-grounded technical subscore "
         "and concise factors from the supplied request. Cite only supplied evidence. You "
         "must return score 0-100 and confidence 0-1, and cannot set a final score, "
-        "portfolio weight, or target price."
+        "portfolio weight, or target price. All positive_factors, negative_factors, and "
+        "risk_flags must be concise simplified Chinese for ordinary investors; "
+        "do not promise returns."
     ),
     "sentiment": (
         "You are the sentiment analyst. Return only an evidence-grounded sentiment subscore "
         "and concise factors from the supplied request. Cite only supplied evidence. You "
         "must return score 0-100 and confidence 0-1, and cannot set a final score, "
-        "portfolio weight, or target price."
+        "portfolio weight, or target price. All positive_factors, negative_factors, and "
+        "risk_flags must be concise simplified Chinese for ordinary investors; "
+        "do not promise returns."
     ),
 }
 
@@ -621,6 +628,11 @@ class BuiltinDailyBackend:
         bundle = self._read_stage(run_id, "bundle", CanonicalDailyBundle)
         features = self._read_stage(run_id, "features", FeatureArtifact)
         llm_client = self._resolve_llm_client(run_id)
+        llm_results = (
+            self._run_llm_components(llm_client, bundle.decision_at, features.items, bundle)
+            if llm_client is not None
+            else {}
+        )
         items: list[SymbolAgentSet] = []
         for feature_item in features.items:
             evidence = self._evidence_for_symbol(bundle, feature_item.symbol)
@@ -668,12 +680,9 @@ class BuiltinDailyBackend:
                     )
                     if quality.get("fundamental_placeholder")
                     else self._run_llm_component(
-                        llm_client,
                         "fundamental",
                         feature_item.symbol,
-                        bundle.decision_at,
-                        feature_item.fundamental,
-                        evidence[0],
+                        llm_results,
                     )
                 )
                 sentiment_result = (
@@ -686,23 +695,17 @@ class BuiltinDailyBackend:
                     )
                     if quality.get("sentiment_placeholder")
                     else self._run_llm_component(
-                        llm_client,
                         "sentiment",
                         feature_item.symbol,
-                        bundle.decision_at,
-                        feature_item.sentiment,
-                        evidence[2],
+                        llm_results,
                     )
                 )
                 results = (
                     fundamental_result,
                     self._run_llm_component(
-                        llm_client,
                         "technical",
                         feature_item.symbol,
-                        bundle.decision_at,
-                        feature_item.technical,
-                        evidence[1],
+                        llm_results,
                     ),
                     sentiment_result,
                 )
@@ -1458,6 +1461,7 @@ class BuiltinDailyBackend:
                     "positive_factors": item.positive_factors,
                     "negative_factors": item.negative_factors,
                     "risk_flags": item.risk_flags,
+                    "summary": component_summary(item.component, item.score, item.confidence),
                     "evidence": [
                         {
                             "source": evidence.source,
@@ -1489,6 +1493,14 @@ class BuiltinDailyBackend:
                     "advice_eligible": advice_eligible,
                     "recommendation": None if advice_eligible else "NO_BUY",
                     "exclusion_reasons": reasons,
+                    "plain_language_summary": symbol_summary(
+                        total_score=score.total_score,
+                        fundamental_score=score.fundamental_score,
+                        technical_score=score.technical_score,
+                        sentiment_score=score.sentiment_score,
+                        advice_eligible=advice_eligible,
+                        reasons=reasons,
+                    ),
                 }
             )
         return rows
@@ -1744,30 +1756,80 @@ class BuiltinDailyBackend:
 
     def _run_llm_component(
         self,
-        client: StructuredLLMClient,
         component: Literal["fundamental", "technical", "sentiment"],
         symbol: str,
-        decision_at: datetime,
-        features: FrozenModel,
-        evidence: EvidenceRef,
+        results: dict[tuple[str, str], AgentComponentResult],
     ) -> AgentComponentResult:
-        if evidence.available_at > decision_at:
-            raise ValueError("component request cannot include future evidence")
-        request = AgentRequest(
-            component=component,
-            symbol=symbol,
-            decision_at=decision_at,
-            prompt_version="builtin-llm-v1",
-            features=self._scalar_features(features),
-            evidence=(evidence,),
-        )
-        return _run_async(
-            run_component_agent(
-                client,
-                request,
-                system_instruction=_COMPONENT_SYSTEM_INSTRUCTIONS[component],
+        return results[(symbol, component)]
+
+    def _run_llm_components(
+        self,
+        client: StructuredLLMClient,
+        decision_at: datetime,
+        feature_items: Sequence[SymbolFeatureSet],
+        bundle: CanonicalDailyBundle,
+    ) -> dict[tuple[str, str], AgentComponentResult]:
+        requests: list[
+            tuple[str, Literal["fundamental", "technical", "sentiment"], FrozenModel, EvidenceRef]
+        ] = []
+        for feature_item in feature_items:
+            evidence = self._evidence_for_symbol(bundle, feature_item.symbol)
+            quality = bundle.data_quality[feature_item.symbol]
+            if not quality.get("fundamental_placeholder"):
+                requests.append(
+                    (feature_item.symbol, "fundamental", feature_item.fundamental, evidence[0])
+                )
+            requests.append(
+                (feature_item.symbol, "technical", feature_item.technical, evidence[1])
+            )
+            if not quality.get("sentiment_placeholder"):
+                requests.append(
+                    (feature_item.symbol, "sentiment", feature_item.sentiment, evidence[2])
+                )
+        return _run_async(self._run_llm_components_async(client, decision_at, requests))
+
+    async def _run_llm_components_async(
+        self,
+        client: StructuredLLMClient,
+        decision_at: datetime,
+        components: Sequence[
+            tuple[str, Literal["fundamental", "technical", "sentiment"], FrozenModel, EvidenceRef]
+        ],
+    ) -> dict[tuple[str, str], AgentComponentResult]:
+        for _, _, _, evidence in components:
+            if evidence.available_at > decision_at:
+                raise ValueError("component request cannot include future evidence")
+        semaphore = asyncio.Semaphore(self._settings.llm_agent_max_concurrency)
+
+        async def run_one(
+            symbol: str,
+            component: Literal["fundamental", "technical", "sentiment"],
+            features: FrozenModel,
+            evidence: EvidenceRef,
+        ) -> tuple[tuple[str, str], AgentComponentResult]:
+            request = AgentRequest(
+                component=component,
+                symbol=symbol,
+                decision_at=decision_at,
+                prompt_version="builtin-llm-v2",
+                features=self._scalar_features(features),
+                evidence=(evidence,),
+            )
+            async with semaphore:
+                result = await run_component_agent(
+                    client,
+                    request,
+                    system_instruction=_COMPONENT_SYSTEM_INSTRUCTIONS[component],
+                )
+            return (symbol, component), result
+
+        completed = await asyncio.gather(
+            *(
+                run_one(symbol, component, features, evidence)
+                for symbol, component, features, evidence in components
             )
         )
+        return dict(completed)
 
     @staticmethod
     def _scalar_features(features: FrozenModel) -> dict[str, float | int | str | bool | None]:
@@ -1798,7 +1860,7 @@ class BuiltinDailyBackend:
             score=score,
             confidence=max(0.0, min(1.0, confidence)),
             evidence=(evidence,),
-            positive_factors=("builtin deterministic feature mapping",),
+            positive_factors=("系统根据已冻结特征完成确定性映射",),
             risk_flags=(),
             model_provider="builtin",
             model_name="builtin-deterministic",

@@ -74,7 +74,7 @@
     <div class="symbol-head">
       <h3>{{ row.name }}（{{ row.symbol }}）</h3>
       <span class="tag {{ '' if row.advice_eligible else 'blocked' }}">{{ '正式可建议' if row.advice_eligible else ('风险禁买' if row.research_status == 'RISK_BLOCKED' else '数据受限') }}</span>
-      <span class="tag {{ 'blocked' if row.recommendation == 'NO_BUY' else '' }}">{{ row.recommendation or '尚未生成建议' }}</span>
+      <span class="tag {{ 'blocked' if row.recommendation == 'NO_BUY' else '' }}">{{ '暂不买入' if row.recommendation == 'NO_BUY' else '可查看模拟方案' }}</span>
     </div>
     <div class="score-cards">
       <div><span>最终分</span><strong>{{ "%.2f"|format(row.score.total_score) }}</strong></div>
@@ -86,19 +86,18 @@
       <div><span>风险乘数</span><strong>{{ "%.2f"|format(row.score.event_risk_multiplier) }}</strong></div>
       <div><span>数据截止</span><strong>{{ row.score.decision_at }}</strong></div>
     </div>
+    <p class="info"><strong>给家人看的总结：</strong>{{ row.plain_language_summary }}</p>
     <div class="component-grid">
       {% for key, label in [('fundamental', '基本面'), ('technical', '技术面'), ('sentiment', '情绪面')] %}
       {% set component = row.components.get(key, {}) %}
       <section><h4>{{ label }}结论</h4>
         <p>得分 {{ component.get('score', '—') }}；置信度 {{ component.get('confidence', '—') }}</p>
-        {% if component.get('positive_factors') %}<p>积极因素：{{ component.get('positive_factors')|join('；') }}</p>{% endif %}
-        {% if component.get('negative_factors') %}<p>限制因素：{{ component.get('negative_factors')|join('；') }}</p>{% endif %}
-        {% if component.get('risk_flags') %}<p>风险：{{ component.get('risk_flags')|join('；') }}</p>{% endif %}
+        <p>{{ component.get('summary', '该分项依据冻结数据生成，仅用于综合评分。') }}</p>
       </section>
       {% endfor %}
     </div>
     <p><strong>数据完整性：</strong>{{ '通过个股门禁' if row.advice_eligible else '存在限制' }}；<strong>风险等级：</strong>{{ '重大/全局风险' if row.research_status == 'RISK_BLOCKED' else ('受限' if row.research_status == 'FORMAL_WITH_LIMITATIONS' else '常规') }}</p>
-    {% if row.exclusion_reasons %}<p class="warning"><strong>NO_BUY 原因：</strong>{{ row.exclusion_reasons|join('、') }}。不输出虚构买入价、仓位或止损位。</p>{% endif %}
+    {% if row.exclusion_reasons %}<p class="warning"><strong>暂不买入原因：</strong>{{ row.exclusion_reasons|join('、') }}。不输出虚构买入价、仓位或止损位。</p>{% endif %}
     <p class="audit">证据与来源：{% for component in row.components.values() %}{% for evidence in component.get('evidence', []) %}{{ evidence.source }} / {{ evidence.source_record_id }} / available_at={{ evidence.available_at }}{% if not loop.last %}；{% endif %}{% endfor %}{% endfor %}</p>
   </article>
   {% endfor %}

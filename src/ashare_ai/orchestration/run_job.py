@@ -26,13 +26,25 @@ def load_handler(kind: str) -> Callable[[str], Any]:
         from ashare_ai.orchestration.exit_advice_jobs import run_exit_advice_job
 
         return run_exit_advice_job
+    if kind == "personal-archive":
+        from ashare_ai.orchestration.personal_archive_jobs import run_personal_archive_job
+
+        return run_personal_archive_job
     raise ValueError(f"unsupported job kind: {kind}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Execute one leased background job")
     parser.add_argument(
-        "kind", choices=("schedule", "research", "trade-plan", "backtest", "exit-review")
+        "kind",
+        choices=(
+            "schedule",
+            "research",
+            "trade-plan",
+            "backtest",
+            "exit-review",
+            "personal-archive",
+        ),
     )
     parser.add_argument("job_id")
     arguments = parser.parse_args()

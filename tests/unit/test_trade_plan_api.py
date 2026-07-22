@@ -81,6 +81,42 @@ def test_research_settings_are_per_user_and_default_off() -> None:
         assert updated.status_code == 200
         assert updated.json()["auto_enabled"] is True
         assert updated.json()["automatic_total_budget"] == "1000000"
+        reports = updated.json()["automatic_reports"]
+        assert [item["slot"] for item in reports] == ["A", "B"]
+        assert [item["enabled"] for item in reports] == [True, False]
+
+        configured = client.put(
+            "/api/v1/research/settings",
+            json={
+                "automatic_reports": [
+                    {
+                        "slot": "A",
+                        "enabled": True,
+                        "scope": "CUSTOM",
+                        "symbols": ["600519.SH"],
+                        "total_budget": 500000,
+                        "per_symbol_budget": 50000,
+                        "max_stock_price": 2000,
+                    },
+                    {
+                        "slot": "B",
+                        "enabled": True,
+                        "scope": "WATCHLIST",
+                        "symbols": [],
+                        "total_budget": 300000,
+                        "per_symbol_budget": 30000,
+                    },
+                ]
+            },
+        )
+        assert configured.status_code == 200
+        assert configured.json()["auto_enabled"] is True
+        assert configured.json()["automatic_reports"][0]["scope"] == "CUSTOM"
+        invalid = client.put(
+            "/api/v1/research/settings",
+            json={"auto_enabled": False, "automatic_reports": reports},
+        )
+        assert invalid.status_code == 422
     finally:
         app.dependency_overrides.clear()
         session.close()
@@ -320,7 +356,11 @@ def test_report_symbols_include_data_limited_stock_as_no_buy() -> None:
         assert response.status_code == 200
         rows = {item["symbol"]: item for item in response.json()}
         assert rows["600000.SH"]["advice_eligible"] is True
+        assert "综合评分" in rows["600000.SH"]["plain_language_summary"]
+        assert "基本面" in rows["600000.SH"]["component_summaries"]["fundamental"]
         assert rows["600001.SH"]["recommendation"] == "NO_BUY"
+        assert "最新财报期数据不完整" not in rows["600001.SH"]["plain_language_summary"]
+        assert "缺少官方披露信息" in rows["600001.SH"]["plain_language_summary"]
         assert rows["600001.SH"]["exclusion_reasons"] == ["MISSING_OFFICIAL_DISCLOSURE"]
         other_client = _client(session, user_id="other-user")
         assert other_client.get("/api/v1/reports/report-symbols/symbols").status_code == 404

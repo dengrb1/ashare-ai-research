@@ -20,6 +20,7 @@ import { ExitAdvicePage } from './pages/ExitAdvicePage'
 import { AIChatPage } from './pages/AIChatPage'
 import { ThemeProvider } from './context/ThemeContext'
 import { RefreshProvider } from './context/RefreshContext'
+import { PersonalDataPage } from './pages/PersonalDataPage'
 
 function ProtectedApp() {
   const { user, loading } = useAuth()
@@ -38,6 +39,7 @@ function AppRoutes() {
         <Route path="market" element={<MarketPage />} />
         <Route path="search" element={<FinancialSearchPage />} />
         <Route path="assets" element={<AssetsPage />} />
+        <Route path="profile-data" element={<PersonalDataPage />} />
         <Route path="research" element={<ResearchPage />} />
         <Route path="exit-advice" element={<ExitAdvicePage />} />
         <Route path="ai-chat" element={<AIChatPage />} />

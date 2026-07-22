@@ -9,11 +9,16 @@ type PositionDraft = {
   quantity: string
   cost: string
   acquiredOn: string
-  profitTrigger: string
+  exitTriggerPrice: string
   previousSymbol?: string
 }
+const EMPTY_POSITION: PositionDraft = { symbol: '', name: '', quantity: '', cost: '', acquiredOn: '', exitTriggerPrice: '' }
 
-const EMPTY_POSITION: PositionDraft = { symbol: '', name: '', quantity: '', cost: '', acquiredOn: '', profitTrigger: '' }
+function exitTriggerLabel(position: PaperPosition, defaultProfitTrigger: number | null) {
+  if (position.exit_trigger_price != null) return `股价 > ¥ ${formatNumber(Number(position.exit_trigger_price))}`
+  const amount = position.profit_trigger_amount == null ? defaultProfitTrigger : Number(position.profit_trigger_amount)
+  return amount == null ? '未设置触发线' : `浮盈 > ¥ ${formatAmount(amount)}`
+}
 
 export function AssetsPage() {
   const { watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, quotes, assetsLoading, assetsSaving, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings } = useMarket()
@@ -57,16 +62,16 @@ export function AssetsPage() {
 
   function editPosition(position: PaperPosition) {
     setFormError('')
-    setDraft({ symbol: position.symbol, name: position.name, quantity: String(position.quantity), cost: String(position.cost), acquiredOn: position.acquired_on || '', profitTrigger: position.profit_trigger_amount == null ? '' : String(position.profit_trigger_amount), previousSymbol: position.symbol })
+    setDraft({ symbol: position.symbol, name: position.name, quantity: String(position.quantity), cost: String(position.cost), acquiredOn: position.acquired_on || '', exitTriggerPrice: position.exit_trigger_price == null ? '' : String(position.exit_trigger_price), previousSymbol: position.symbol })
   }
 
   async function savePosition() {
     if (!draft) return
-    const position: PaperPosition = { symbol: draft.symbol.trim().toUpperCase(), name: draft.name.trim(), quantity: Number(draft.quantity), cost: Number(draft.cost), acquired_on: draft.acquiredOn || null, profit_trigger_amount: draft.profitTrigger ? Number(draft.profitTrigger) : null }
+    const position: PaperPosition = { symbol: draft.symbol.trim().toUpperCase(), name: draft.name.trim(), quantity: Number(draft.quantity), cost: Number(draft.cost), acquired_on: draft.acquiredOn || null, exit_trigger_price: draft.exitTriggerPrice ? Number(draft.exitTriggerPrice) : null }
     if (!/^\d{6}\.(SH|SZ|BJ)$/.test(position.symbol)) { setFormError('持仓证券代码格式不正确'); return }
     if (!Number.isInteger(position.quantity) || position.quantity <= 0) { setFormError('持仓数量必须是大于 0 的整数'); return }
     if (!Number.isFinite(position.cost) || position.cost <= 0) { setFormError('成本价必须大于 0'); return }
-    if (position.profit_trigger_amount !== null && (!Number.isFinite(Number(position.profit_trigger_amount)) || Number(position.profit_trigger_amount) <= 0)) { setFormError('个股盈利触发金额必须大于 0'); return }
+    if (position.exit_trigger_price !== null && (!Number.isFinite(Number(position.exit_trigger_price)) || Number(position.exit_trigger_price) <= 0)) { setFormError('个股股价触发线必须大于 0'); return }
     setSaving(true); setFormError('')
     try { await upsertPosition(position, draft.previousSymbol); setDraft(null) }
     catch (error) { setFormError(error instanceof Error ? error.message : '持仓保存失败') }
@@ -106,7 +111,7 @@ export function AssetsPage() {
 
   async function persistExitSettings(enabled = exitMonitorEnabled) {
     const amount = profitTriggerDraft.trim() ? Number(profitTriggerDraft) : null
-    if (enabled && (!amount || !Number.isFinite(amount) || amount <= 0)) { setFormError('启用监控前请填写大于 0 的默认盈利触发金额'); return }
+    if (enabled && (!amount || !Number.isFinite(amount) || amount <= 0)) { setFormError('启用监控前请填写大于 0 的默认浮盈触发金额'); return }
     setSaving(true); setFormError('')
     try { await saveExitSettings(enabled, amount) }
     catch (error) { setFormError(error instanceof Error ? error.message : '盈利监控设置保存失败') }
@@ -160,7 +165,7 @@ export function AssetsPage() {
     <ErrorNotice message={formError} />
     <Panel title="AI 盈利退出监控" eyebrow="EXIT MONITOR" className="exit-monitor-panel" action={<span className={`monitor-state ${exitMonitorEnabled ? 'enabled' : ''}`}><i />{exitMonitorEnabled ? '监控中' : '已暂停'}</span>}>
       <div className="exit-monitor-form">
-        <label className="exit-trigger-field">默认盈利触发金额（元）<input type="number" min="0.01" step="0.01" value={profitTriggerDraft} disabled={busy} onChange={(event) => setProfitTriggerDraft(event.target.value)} /><small>严格超过该金额后才会触发研究</small></label>
+        <label className="exit-trigger-field">默认浮盈触发金额（元）<input type="number" min="0.01" step="0.01" value={profitTriggerDraft} disabled={busy} onChange={(event) => setProfitTriggerDraft(event.target.value)} /><small>未设个股股价线时，严格超过该浮盈才触发</small></label>
         <label className="exit-monitor-toggle"><input type="checkbox" checked={exitMonitorEnabled} disabled={busy} onChange={(event) => void persistExitSettings(event.target.checked)} /><span className="toggle-control" aria-hidden="true" /><span><strong>盘中每 5 分钟自动检查</strong><small>仅在 A 股交易时段运行</small></span></label>
         <button className="primary" disabled={busy} onClick={() => void persistExitSettings()}>保存监控设置</button>
       </div>
@@ -179,11 +184,11 @@ export function AssetsPage() {
           <label>持仓数量<input type="number" min="1" step="1" value={draft.quantity} onChange={(event) => setDraft({ ...draft, quantity: event.target.value })} /></label>
           <label>成本价<input type="number" min="0.001" step="0.001" value={draft.cost} onChange={(event) => setDraft({ ...draft, cost: event.target.value })} /></label>
           <label>买入日期<input type="date" value={draft.acquiredOn} onChange={(event) => setDraft({ ...draft, acquiredOn: event.target.value })} /></label>
-          <label>个股触发金额（可选）<input type="number" min="0.01" step="0.01" value={draft.profitTrigger} onChange={(event) => setDraft({ ...draft, profitTrigger: event.target.value })} /></label>
+          <label>个股股价触发线（元/股，可选）<input type="number" min="0.001" step="0.001" value={draft.exitTriggerPrice} onChange={(event) => setDraft({ ...draft, exitTriggerPrice: event.target.value })} /></label>
           <div className="row-actions"><button className="primary" disabled={busy} onClick={() => void savePosition()}>保存</button><button className="secondary" disabled={busy} onClick={() => setDraft(null)}>取消</button></div>
         </div>}
         {positions.length ? <div className="table-wrap"><table><thead><tr><th>标的</th><th>持仓 / 成本</th><th>参考价</th><th>市值</th><th>盈亏</th><th>当前仓位</th><th>操作</th></tr></thead><tbody>
-          {positions.map((row) => { const quote = quotes[row.symbol]; const latestPrice = quote?.price; const hasLatestPrice = typeof latestPrice === 'number' && latestPrice > 0; const price = hasLatestPrice ? latestPrice : row.cost; const pnl = (price / row.cost - 1) * 100; const currentWeight = hasAccountTotal ? price * row.quantity / totalAssets * 100 : null; return <tr key={row.symbol}><td><strong>{row.name || quote?.name || row.symbol}</strong><small>{row.symbol}</small></td><td>{row.quantity}<small>¥ {formatNumber(row.cost)} · {row.acquired_on || '未填买入日'}</small></td><td className={hasLatestPrice ? ((quote?.change_pct || 0) >= 0 ? 'price-up' : 'price-down') : ''}>{formatNumber(price)}<small>{hasLatestPrice ? '最新行情' : '成本价估算'}</small></td><td>¥ {formatAmount(price * row.quantity)}</td><td className={pnl >= 0 ? 'price-up' : 'price-down'}>{pnl >= 0 ? '+' : ''}{formatNumber(pnl)}%<small>触发 ¥ {formatAmount(row.profit_trigger_amount == null ? defaultProfitTrigger || undefined : Number(row.profit_trigger_amount))}</small></td><td>{currentWeight === null ? <><span>—</span><small>请先填写账户总资金</small></> : `${formatNumber(currentWeight)}%`}</td><td><div className="row-actions"><button className="secondary" disabled={busy} onClick={() => editPosition(row)}>编辑</button><button className="danger-button" disabled={busy} onClick={() => void deletePosition(row.symbol)}>删除</button></div></td></tr> })}
+          {positions.map((row) => { const quote = quotes[row.symbol]; const latestPrice = quote?.price; const hasLatestPrice = typeof latestPrice === 'number' && latestPrice > 0; const price = hasLatestPrice ? latestPrice : row.cost; const pnl = (price / row.cost - 1) * 100; const currentWeight = hasAccountTotal ? price * row.quantity / totalAssets * 100 : null; return <tr key={row.symbol}><td><strong>{row.name || quote?.name || row.symbol}</strong><small>{row.symbol}</small></td><td>{row.quantity}<small>¥ {formatNumber(row.cost)} · {row.acquired_on || '未填买入日'}</small></td><td className={hasLatestPrice ? ((quote?.change_pct || 0) >= 0 ? 'price-up' : 'price-down') : ''}>{formatNumber(price)}<small>{hasLatestPrice ? '最新行情' : '成本价估算'}</small></td><td>¥ {formatAmount(price * row.quantity)}</td><td className={pnl >= 0 ? 'price-up' : 'price-down'}>{pnl >= 0 ? '+' : ''}{formatNumber(pnl)}%<small>{exitTriggerLabel(row, defaultProfitTrigger)}</small></td><td>{currentWeight === null ? <><span>—</span><small>请先填写账户总资金</small></> : `${formatNumber(currentWeight)}%`}</td><td><div className="row-actions"><button className="secondary" disabled={busy} onClick={() => editPosition(row)}>编辑</button><button className="danger-button" disabled={busy} onClick={() => void deletePosition(row.symbol)}>删除</button></div></td></tr> })}
         </tbody></table></div> : <Empty title="暂无持仓记录" description="点击“新增记录”录入自己的持仓信息" />}
         {availableCash !== null && availableCash < 0 && <div className="warning-box"><strong>已记录持仓市值高于账户总资金</strong><p>这不会阻止保存；请核对账户总资金、持仓数量或参考价格。</p></div>}
       </Panel>

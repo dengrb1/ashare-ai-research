@@ -5,7 +5,7 @@ from ashare_ai.orchestration.redis_queue import RedisLeasedQueue
 
 QUEUE_NAME = "ashare:trade-plan:pending"
 PROCESSING_QUEUE_NAME = "ashare:trade-plan:processing"
-PROMPT_VERSION = "trade-plan-explanation-v1"
+PROMPT_VERSION = "trade-plan-explanation-v2"
 
 
 def enqueue_trade_plan(plan_id: str, redis_url: str | None = None) -> None:
