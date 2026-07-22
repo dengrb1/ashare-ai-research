@@ -104,7 +104,7 @@ def test_trade_plan_worker_reads_committed_raw_snapshot_and_degrades_without_ai(
                 snapshot_ids=[snapshot.snapshot_id],
                 optimizer_version="trade-plan-grid-v1",
                 config_version="first-release-v2",
-                prompt_version="trade-plan-explanation-v1",
+                prompt_version="trade-plan-explanation-v2",
                 model_configuration={"enabled": False},
                 input_hash="a" * 64,
                 active_trade_plan_key="b" * 64,

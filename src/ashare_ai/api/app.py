@@ -141,6 +141,7 @@ from ashare_ai.orchestration.trade_plan_queue import (
     enqueue_trade_plan,
 )
 from ashare_ai.portfolio.user_assets import UNSET_TOTAL_ASSETS, UserAssetService
+from ashare_ai.reports.chinese_summary import component_summary, symbol_summary
 from ashare_ai.search.service import (
     FinancialSearchBusyError,
     FinancialSearchResponse,
@@ -1762,6 +1763,19 @@ def report_symbols(report_id: str, db: DbSession, context: Current) -> list[Repo
                 rank=candidate.rank if candidate else None,
                 prediction_percentile=candidate.prediction_percentile if candidate else None,
                 industry_code=candidate.industry_code if candidate else None,
+                plain_language_summary=symbol_summary(
+                    total_score=score.total_score,
+                    fundamental_score=score.fundamental_score,
+                    technical_score=score.technical_score,
+                    sentiment_score=score.sentiment_score,
+                    advice_eligible=advice_eligible,
+                    reasons=reasons,
+                ),
+                component_summaries={
+                    "fundamental": component_summary("fundamental", score.fundamental_score),
+                    "technical": component_summary("technical", score.technical_score),
+                    "sentiment": component_summary("sentiment", score.sentiment_score),
+                },
             )
         )
     return result

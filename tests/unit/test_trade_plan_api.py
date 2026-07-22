@@ -356,7 +356,11 @@ def test_report_symbols_include_data_limited_stock_as_no_buy() -> None:
         assert response.status_code == 200
         rows = {item["symbol"]: item for item in response.json()}
         assert rows["600000.SH"]["advice_eligible"] is True
+        assert "综合评分" in rows["600000.SH"]["plain_language_summary"]
+        assert "基本面" in rows["600000.SH"]["component_summaries"]["fundamental"]
         assert rows["600001.SH"]["recommendation"] == "NO_BUY"
+        assert "最新财报期数据不完整" not in rows["600001.SH"]["plain_language_summary"]
+        assert "缺少官方披露信息" in rows["600001.SH"]["plain_language_summary"]
         assert rows["600001.SH"]["exclusion_reasons"] == ["MISSING_OFFICIAL_DISCLOSURE"]
         other_client = _client(session, user_id="other-user")
         assert other_client.get("/api/v1/reports/report-symbols/symbols").status_code == 404

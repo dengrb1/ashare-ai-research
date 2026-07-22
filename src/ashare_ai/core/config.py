@@ -88,6 +88,7 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-5.6-sol"
     llm_reasoning_effort: str = "high"
     llm_timeout_seconds: float = Field(default=90.0, gt=0, le=600)
+    llm_agent_max_concurrency: int = Field(default=4, ge=1, le=16)
     model_settings_encryption_keys: str | None = None
     personal_data_encryption_keys: str | None = None
     model_allowed_hosts: str | None = None

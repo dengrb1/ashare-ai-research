@@ -30,6 +30,11 @@ function explanationSection(explanation: Record<string, unknown>, keys: string[]
   return []
 }
 
+function labelCode(value: unknown) {
+  const code = String(value ?? '')
+  return ({ BUY: '买入', NO_BUY: '暂不买入', QUALIFIED: '通过条件' } as Record<string, string>)[code] || REASON_LABELS[code] || code || '—'
+}
+
 const PLAN_ACTIVE = new Set(['PENDING', 'QUEUED', 'RUNNING', 'PROCESSING'])
 
 const REASON_LABELS: Record<string, string> = {
@@ -39,6 +44,7 @@ const REASON_LABELS: Record<string, string> = {
   MISSING_OFFICIAL_DISCLOSURE: '缺少官方披露',
   FUNDAMENTAL_DATA_INCOMPLETE: '基本面数据不完整',
   DISCLOSURE_DATA_INCOMPLETE: '公告或情绪数据不完整',
+  INSUFFICIENT_HISTORY: '历史样本不足，暂不生成方案',
 }
 
 function fallbackReportSymbol(candidate: Candidate): ReportSymbol {
@@ -215,16 +221,18 @@ export function ReportsPage() {
           ['最终分', score.total_score], ['基础分', score.base_total_score], ['基本面', score.fundamental_score], ['技术', score.technical_score], ['情绪', score.sentiment_score], ['质量', score.quality_confidence_score], ['分红加分', score.dividend_bonus], ['风险乘数', score.event_risk_multiplier], ['预测分位', selectedResearch?.prediction_percentile ?? selectedCandidate?.prediction_percentile ?? score.prediction_percentile], ['排名', selectedResearch?.rank ?? selectedCandidate?.rank ?? score.rank],
         ].map(([label, value]) => <div key={String(label)}><span>{label}</span><strong>{typeof value === 'number' ? formatNumber(value) : '—'}</strong></div>)}<div><span>公式版本</span><strong>{score.formula_version || String(lineage?.formula_version || '—')}</strong></div></div> : <Empty title="评分暂不可用" />}
 
-        <div className="snapshot-callout"><span>◇</span><div><strong>确定性方案，AI 仅负责解释</strong><p>方案选择历史样本中风险调整后表现最优的合格参数；模型不可用时 BUY / NO_BUY、数量、限价、仓位和退出规则仍然有效。</p></div></div>
+        {selectedResearch?.plain_language_summary && <div className="snapshot-callout"><span>◇</span><div><strong>给家人看的总结</strong><p>{selectedResearch.plain_language_summary}</p></div></div>}
+
+        <div className="snapshot-callout"><span>◇</span><div><strong>确定性方案，AI 仅负责解释</strong><p>方案选择历史样本中风险调整后表现最优的合格参数；模型不可用时，买入或暂不买入、数量、限价、仓位和退出规则仍然有效。</p></div></div>
         {fused && <div className="warning-box"><strong>全局风控熔断，禁止生成交易方案</strong><p>{run?.reason_message || '本次仅保留正式观察报告。'}</p></div>}
         {!fused && selectedResearch && !selectedResearch.advice_eligible && <div className="warning-box"><strong>NO_BUY · {selectedResearch.research_status === 'RISK_BLOCKED' ? '风险禁买' : '数据受限'}</strong><p>{selectedResearch.exclusion_reasons.map((reason) => REASON_LABELS[reason] || reason).join('；') || '该股票未通过个股建议门禁。'}。不会生成买入价格、仓位或止损位。</p></div>}
         <button className="primary" disabled={fused || planSubmitting || !symbol || Boolean(selectedPlan) || !selectedResearch?.advice_eligible} onClick={() => void submitPlan()}>{planSubmitting ? '正在生成…' : selectedPlan ? (PLAN_ACTIVE.has(selectedPlan.status.toUpperCase()) ? '方案生成中，已复用' : '已展示该股方案') : selectedResearch?.advice_eligible ? '生成购买建议' : 'NO_BUY'}</button>
 
         {selectedPlan && <article className="research-run-card plan-workbench"><div className="research-run-head"><div><strong>{symbol}</strong><code>{selectedPlan.plan_id}</code></div><StatusPill status={selectedPlan.status} /></div>
           {selectedPlan.status.toUpperCase() === 'FAILED' && <div className="failure-box"><strong>方案生成失败</strong><p>{selectedPlan.error_message || '请查看审计事件'}</p></div>}
-          {selectedPlan.status.toUpperCase() === 'SUCCEEDED' && deterministic && <><div className={deterministic.outcome === 'BUY' ? 'success-box' : 'warning-box'}><strong>{deterministic.outcome === 'BUY' ? 'BUY · 满足确定性买入条件' : 'NO_BUY · 当前不满足买入条件'}</strong><p>保留现金 {String(deterministic.retained_cash ?? '—')} 元；条件：{values(deterministic.conditions).join('；') || '详见逐项原因码与约束结果。'}</p></div>
-            <div className="table-wrap"><table><thead><tr><th>动作与条件</th><th>限价有效期</th><th>仓位</th><th>止盈止损</th><th>样本外指标</th></tr></thead><tbody>{(deterministic.symbol_plans || []).map((item) => { const strategy = (item.strategy || {}) as Record<string, unknown>; const metrics = (strategy.validation_metrics || item.validation_metrics || {}) as Record<string, unknown>; return <tr key={String(item.symbol || symbol)}><td>{String(item.action ?? item.outcome ?? '—')}<small>{String(item.reason_code ?? item.reason ?? '—')}</small></td><td>{String(item.limit_price_low ?? '—')}–{String(item.limit_price_high ?? '—')}<small>{String(item.entry_valid_from ?? '—')} 至 {String(item.entry_valid_until ?? '—')}</small></td><td>{String(item.suggested_additional_quantity ?? 0)} 股<small>目标权重 {item.target_weight === undefined ? '—' : `${(Number(item.target_weight) * 100).toFixed(2)}%`}</small></td><td>止盈 {String(item.take_profit_price ?? '—')} · 止损 {String(item.stop_loss_price ?? '—')}<small>最长 {String(item.maximum_holding_sessions ?? '—')} 个交易日</small></td><td>净收益 {metrics.net_return === undefined ? '—' : `${(Number(metrics.net_return) * 100).toFixed(2)}%`}<small>Sharpe {metrics.sharpe === undefined ? '—' : Number(metrics.sharpe).toFixed(2)} · 回撤 {metrics.maximum_drawdown === undefined ? '—' : `${(Number(metrics.maximum_drawdown) * 100).toFixed(2)}%`}</small></td></tr> })}</tbody></table></div>
-            {explanationAvailable ? <div className="ai-explanation"><h3>AI 解释</h3>{[['入场', ['entry_logic', 'entry', 'entry_summary', 'entry_conditions']], ['退出', ['exit_logic', 'exit', 'exit_summary', 'exit_conditions']], ['关键证据', ['key_evidence', 'evidence']], ['风险', ['risks', 'risk_warnings']]].map(([label, keys]) => <section key={String(label)}><strong>{String(label)}</strong><ul>{explanationSection(explanation, keys as string[]).map((item) => <li key={item}>{item}</li>)}</ul></section>)}</div> : <div className="warning-box"><strong>AI 解释不可用</strong><p>确定性结论与全部数值仍有效。</p></div>}</>}
+          {selectedPlan.status.toUpperCase() === 'SUCCEEDED' && deterministic && <><div className={deterministic.outcome === 'BUY' ? 'success-box' : 'warning-box'}><strong>{deterministic.outcome === 'BUY' ? '满足确定性买入条件' : '当前不满足买入条件'}</strong><p>保留现金 {String(deterministic.retained_cash ?? '—')} 元；条件：{values(deterministic.conditions).map(labelCode).join('；') || '详见逐项条件与约束结果。'}</p></div>
+            <div className="table-wrap"><table><thead><tr><th>动作与条件</th><th>限价有效期</th><th>仓位</th><th>止盈止损</th><th>样本外指标</th></tr></thead><tbody>{(deterministic.symbol_plans || []).map((item) => { const strategy = (item.strategy || {}) as Record<string, unknown>; const metrics = (strategy.validation_metrics || item.validation_metrics || {}) as Record<string, unknown>; return <tr key={String(item.symbol || symbol)}><td>{labelCode(item.action ?? item.outcome)}<small>{labelCode(item.reason_code ?? item.reason)}</small></td><td>{String(item.limit_price_low ?? '—')}–{String(item.limit_price_high ?? '—')}<small>{String(item.entry_valid_from ?? '—')} 至 {String(item.entry_valid_until ?? '—')}</small></td><td>{String(item.suggested_additional_quantity ?? 0)} 股<small>目标权重 {item.target_weight === undefined ? '—' : `${(Number(item.target_weight) * 100).toFixed(2)}%`}</small></td><td>止盈 {String(item.take_profit_price ?? '—')} · 止损 {String(item.stop_loss_price ?? '—')}<small>最长 {String(item.maximum_holding_sessions ?? '—')} 个交易日</small></td><td>净收益 {metrics.net_return === undefined ? '—' : `${(Number(metrics.net_return) * 100).toFixed(2)}%`}<small>夏普比率 {metrics.sharpe === undefined ? '—' : Number(metrics.sharpe).toFixed(2)} · 回撤 {metrics.maximum_drawdown === undefined ? '—' : `${(Number(metrics.maximum_drawdown) * 100).toFixed(2)}%`}</small></td></tr> })}</tbody></table></div>
+            {explanationAvailable ? <div className="ai-explanation"><h3>AI 中文说明</h3>{explanationSection(explanation, ['summary']).map((item) => <p key={item}>{item}</p>)}{[['入场', ['entry_logic', 'entry', 'entry_summary', 'entry_conditions']], ['退出', ['exit_logic', 'exit', 'exit_summary', 'exit_conditions']], ['关键证据', ['key_evidence', 'evidence']], ['风险', ['risks', 'risk_warnings']]].map(([label, keys]) => <section key={String(label)}><strong>{String(label)}</strong><ul>{explanationSection(explanation, keys as string[]).map((item) => <li key={item}>{item}</li>)}</ul></section>)}</div> : <div className="warning-box"><strong>AI 说明不可用</strong><p>确定性结论与全部数值仍有效。</p></div>}</>}
         </article>}
       </>}
     </Panel>}

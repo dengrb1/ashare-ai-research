@@ -431,6 +431,8 @@ class ReportSymbolResponse(BaseModel):
     rank: int | None = None
     prediction_percentile: float | None = None
     industry_code: str | None = None
+    plain_language_summary: str | None = None
+    component_summaries: dict[str, str] = Field(default_factory=dict)
 
 
 class PortfolioResponse(OrmResponse):

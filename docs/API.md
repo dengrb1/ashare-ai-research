@@ -464,7 +464,7 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 
 ### `GET /api/v1/reports/{report_id}/symbols`
 
-返回逐股票 `ReportSymbolResponse[]`：`symbol`、`name`、`research_status`（`FORMAL`、`FORMAL_WITH_LIMITATIONS`、`RISK_BLOCKED`）、`advice_eligible`、`recommendation`（不符合资格时固定为 `NO_BUY`）、`exclusion_reasons`、`data_quality`、嵌套 `score`、`rank`、`prediction_percentile`、`industry_code`。
+返回逐股票 `ReportSymbolResponse[]`：`symbol`、`name`、`research_status`（`FORMAL`、`FORMAL_WITH_LIMITATIONS`、`RISK_BLOCKED`）、`advice_eligible`、`recommendation`（不符合资格时固定为 `NO_BUY`）、`exclusion_reasons`、`data_quality`、嵌套 `score`、`rank`、`prediction_percentile`、`industry_code`，以及面向普通投资者的 `plain_language_summary` 和按基本面/技术面/市场情绪拆分的 `component_summaries`。这两个摘要字段只解释既有评分和门禁结果，不改变交易规则。
 
 只有 `advice_eligible=true` 的股票才允许提交 Trade Plan；客户端必须展示门禁原因，不得把 `NO_BUY` 转换成买入提示。
 

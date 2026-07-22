@@ -404,6 +404,8 @@ export interface ReportSymbol {
   rank?: number | null
   prediction_percentile?: number | null
   industry_code?: string | null
+  plain_language_summary?: string | null
+  component_summaries?: Record<string, string>
 }
 
 export interface Portfolio {
