@@ -56,6 +56,25 @@ function params(values: Record<string, string | number | undefined>) {
   return encoded ? `?${encoded}` : ''
 }
 
+type RawQuote = Quote & {
+  change_percent?: number
+  previous_close?: number
+}
+
+function normalizeQuote(row: RawQuote): Quote {
+  return {
+    ...row,
+    price: row.price ?? 0,
+    change_pct: row.change_pct ?? row.change_percent ?? 0,
+    prev_close: row.prev_close ?? row.previous_close,
+    source: row.source || row.status?.source,
+    collected_at: row.collected_at || row.status?.collected_at,
+    cached_at: row.cached_at || row.status?.cached_at,
+    delayed: row.delayed ?? row.status?.delayed,
+    is_delayed: row.is_delayed ?? row.status?.delayed,
+  }
+}
+
 export const api = {
   login: (username: string, password: string) => request<User>('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
   token: (username: string, password: string) => request<TokenPair>('/auth/token', { method: 'POST', body: JSON.stringify({ username, password }) }),
@@ -66,6 +85,7 @@ export const api = {
   assets: () => request<AssetState>('/assets'),
   saveAssets: (payload: AssetState) => request<AssetState>('/assets', { method: 'PUT', body: JSON.stringify(payload) }),
   saveExitMonitorSettings: (payload: Pick<AssetState, 'exit_monitor_enabled' | 'default_profit_trigger' | 'stop_loss_monitor_enabled' | 'buy_monitor_enabled'>, idempotencyKey = crypto.randomUUID()) => request<AssetState>('/assets/exit-monitor', { method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify(payload) }),
+  saveMarketRefreshSettings: (marketRefreshIntervalSeconds: 15 | 30 | 60 | 120, idempotencyKey = crypto.randomUUID()) => request<AssetState>('/assets/market-refresh', { method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ market_refresh_interval_seconds: marketRefreshIntervalSeconds }) }),
   exitAdvice: (limit = 30) => request<ExitAdvice[]>(`/exit-advice${params({ limit })}`),
   submitManualExitAdvice: (symbol: string, idempotencyKey = crypto.randomUUID()) => request<ExitAdvice>('/exit-advice/manual', { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ symbol }) }),
   buyEntryMonitors: (limit = 50) => request<BuyEntryMonitor[]>(`/buy-entry-monitors${params({ limit })}`),
@@ -98,19 +118,10 @@ export const api = {
   personalImport: (archiveId: string) => request<PersonalArchiveJob>(`/me/data-imports/${encodeURIComponent(archiveId)}`),
   applyPersonalImport: (archiveId: string, mergeOptions: Record<string, unknown>, idempotencyKey: string) => request<PersonalArchiveJob>(`/me/data-imports/${encodeURIComponent(archiveId)}/apply`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ merge_options: mergeOptions }) }),
 
+  quote: async (symbol: string, refresh = false) => normalizeQuote(await request<RawQuote>(`/market/quotes/${encodeURIComponent(symbol)}${params({ refresh: refresh ? 'true' : undefined })}`)),
   quotes: async (symbols: string[], refresh = false) => {
-    const rows = await request<Array<Quote & { change_percent?: number; previous_close?: number }>>(`/market/quotes${params({ symbols: symbols.join(','), refresh: refresh ? 'true' : undefined })}`)
-    return rows.map((row) => ({
-      ...row,
-      price: row.price ?? 0,
-      change_pct: row.change_pct ?? row.change_percent ?? 0,
-      prev_close: row.prev_close ?? row.previous_close,
-      source: row.source || row.status?.source,
-      collected_at: row.collected_at || row.status?.collected_at,
-      cached_at: row.cached_at || row.status?.cached_at,
-      delayed: row.delayed ?? row.status?.delayed,
-      is_delayed: row.is_delayed ?? row.status?.delayed,
-    })) as Quote[]
+    const rows = await request<RawQuote[]>(`/market/quotes${params({ symbols: symbols.join(','), refresh: refresh ? 'true' : undefined })}`)
+    return rows.map(normalizeQuote)
   },
   kline: async (symbol: string, period: string, limit = 160, options: KlineQueryOptions | boolean = {}) => {
     const query = typeof options === 'boolean' ? { refresh: options } : options
@@ -132,16 +143,7 @@ export const api = {
     if (!payload || Array.isArray(payload)) return { quotes: [], klines: {}, errors: {} } as MarketPrefetchResponse
     return {
       ...payload,
-      quotes: (payload.quotes || []).map((row) => ({
-        ...row,
-        price: row.price ?? 0,
-        change_pct: row.change_pct ?? (row as Quote & { change_percent?: number }).change_percent ?? 0,
-        prev_close: row.prev_close ?? (row as Quote & { previous_close?: number }).previous_close,
-        source: row.source || row.status?.source,
-        collected_at: row.collected_at || row.status?.collected_at,
-        cached_at: row.cached_at || row.status?.cached_at,
-        delayed: row.delayed ?? row.status?.delayed,
-      })),
+      quotes: (payload.quotes || []).map((row) => normalizeQuote(row as RawQuote)),
       klines: payload.klines || {},
       errors: payload.errors || {},
     }

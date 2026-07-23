@@ -111,7 +111,7 @@ npm run dev
 
 访问 `http://localhost:5173` 登录。主题支持“跟随系统 / 浅色 / 深色”三态并按此顺序循环；没有保存偏好时默认跟随系统，系统配色变化会实时生效。选择保存在 `localStorage`，已有的 `ashare-theme=light/dark` 会继续作为显式覆盖；页面首屏脚本会在 React 启动前同步实际渲染主题和浏览器 `theme-color`，避免主题闪烁。
 
-登录后前端会把“自选股 + 我的持仓”合并去重，在后台调用行情预取接口。报价按 15 秒刷新，后复权日 K 预热和缓存周期为 5 分钟；1/5/15/30/60 分钟线按需分段加载，最新分段最长缓存 30 秒并在页面停留、重新聚焦时自动检查。收盘后最后一根分钟线正常停在当日 15:00；后端会拒绝把上一交易日的数据标记为实时。实时行情缓存始终与研究、评分、报告和回测的不可变快照隔离。
+登录后前端会把“自选股 + 我的持仓”合并去重，在后台调用行情预取接口。报价自动刷新频率按账户保存，可选 15/30/60/120 秒，默认 15 秒；手动刷新会先定向刷新当前选中证券并并行刷新可见 K 线，其他证券再在后台补全。后复权日 K 预热和缓存周期为 5 分钟；1/5/15/30/60 分钟线按需分段加载，最新分段最长缓存 30 秒并在页面停留、重新聚焦时自动检查。收盘后最后一根分钟线正常停在当日 15:00；后端会拒绝把上一交易日的数据标记为实时。实时行情缓存始终与研究、评分、报告和回测的不可变快照隔离。
 自选、我的持仓和账户总资金按登录用户保存到 PostgreSQL，可在“我的持仓”页新增、编辑或删除。账户总资金包括持仓市值和可用现金；当前仓位按最新行情（不可用时按成本价估算）乘以持仓数量后除以账户总资金自动计算。Cookie 只承载认证会话，清除 Cookie 后重新登录同一账户仍会恢复资产数据；部署前仅存在浏览器内存中的自定义数据无法追溯，新表上线后从默认值开始并在首次修改后永久保存。这些手工数据只用于页面记账与行情预取，不会覆盖研究生成的版本化组合，也不会触发真实下单。
 
 持仓页可启用盘中盈利退出监控、止损预警和自选股买入区间监控。交易日 09:30–11:30、13:00–15:00 每分钟合并行情后检查；止损线优先使用手工价格，缺失时以 20 个后复权日 K 的 ATR 推导并限制在成本价下方 5%-10%，历史不足时使用 8%。触发止损时先写入高优先级通知，再排队快速 AI 退出研究；用户也可手动提交某个现有持仓的退出研究。正式评分合格且 Trade Plan 为 `BUY` 的自选股，仅在下一个交易日的有效入场区间首次命中时提示。所有路径只创建通知、研究和模拟方案，不自动买入、卖出或修改持仓。
@@ -219,6 +219,7 @@ docker compose -p ashare-ai -f compose.yaml -f compose.ghcr.yaml up -d
 - `GET /api/v1/app/bootstrap`
 - `GET|PUT /api/v1/assets`
 - `PUT /api/v1/assets/exit-monitor`
+- `PUT /api/v1/assets/market-refresh`
 - `GET /api/v1/exit-advice`
 - `GET /api/v1/exit-advice/{advice_id}`
 - `POST /api/v1/exit-advice/manual`
@@ -245,6 +246,7 @@ docker compose -p ashare-ai -f compose.yaml -f compose.ghcr.yaml up -d
 - `GET|POST /api/v1/admin/users`
 - `PATCH /api/v1/admin/users/{user_id}`
 - `GET /api/v1/market/quotes?symbols=600000.SH,000001.SZ`
+- `GET /api/v1/market/quotes/{symbol}`
 - `GET /api/v1/market/klines/{symbol}?period=1m|5m|15m|30m|60m|day`
 - `POST /api/v1/market/prefetch`
 - `GET /api/v1/market/status`

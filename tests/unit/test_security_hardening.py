@@ -54,7 +54,10 @@ def test_production_configuration_fails_closed_and_accepts_hardened_values() -> 
             object_store_secret_key="a-strong-object-secret",
         ).validate_production_security()
     with pytest.raises(ValueError, match="PERSONAL_DATA_ENCRYPTION_KEYS"):
-        _production_settings(personal_data_encryption_keys=None).validate_production_security()
+        _production_settings(
+            personal_data_encryption_keys=None,
+            model_settings_encryption_keys=None,
+        ).validate_production_security()
 
 
 def test_production_model_gateway_requires_https_and_an_explicit_host_allowlist() -> None:

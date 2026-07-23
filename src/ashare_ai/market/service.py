@@ -875,6 +875,97 @@ class MarketDataService:
                 if claimed:
                     self._release_refresh(redis_client, key, refresh_token)
 
+    def quote(self, symbol: str, *, force_refresh: bool = False) -> dict[str, Any]:
+        """Fetch one display quote through the low-latency provider before full snapshots.
+
+        The regular bulk endpoint intentionally coalesces requests through AKShare's
+        all-market snapshot.  That is efficient for background work but makes a
+        user's currently selected security wait for unrelated symbols.  A separate
+        per-symbol cache therefore uses the targeted fallback path (Sina by
+        default) first and only falls back to the full-market source when needed.
+        """
+
+        normalized = normalize_symbol(symbol)
+        key = f"quote:{normalized}"
+        now = self.clock()
+        cached = self._get(key, now)
+
+        def cached_item(record: dict[str, Any], *, cache_hit: bool = False) -> dict[str, Any]:
+            item = dict(record["item"])
+            status: dict[str, Any] = (
+                dict(item["status"]) if isinstance(item.get("status"), dict) else {}
+            )
+            return {**item, "status": {**status, "cache_hit": cache_hit}}
+
+        if not force_refresh and cached is not None and self._fresh(cached, now):
+            return cached_item(cached, cache_hit=True)
+        with self._lock(key):
+            now = self.clock()
+            cached = self._get(key, now)
+            if not force_refresh and cached is not None and self._fresh(cached, now):
+                return cached_item(cached, cache_hit=True)
+            redis_client, refresh_token, claimed = self._claim_refresh(key)
+            if not claimed:
+                deadline = time.monotonic() + self.settings.market_timeout_seconds
+                while time.monotonic() < deadline:
+                    shared = self._get_shared(key)
+                    if shared is not None and self._fresh(shared, self.clock()):
+                        return cached_item(shared, cache_hit=True)
+                    time.sleep(0.05)
+            errors: list[str] = []
+            try:
+                for provider in (*self.fallbacks, self.primary):
+                    try:
+                        collected = self.clock()
+                        rows = self._call(provider.quotes, [normalized])
+                        item = next(
+                            (
+                                row
+                                for row in rows
+                                if isinstance(row.get("symbol"), str)
+                                and row["symbol"] == normalized
+                            ),
+                            None,
+                        )
+                        if item is None:
+                            raise RuntimeError("provider returned no requested quote")
+                        cached_at = self.clock()
+                        value = {
+                            **item,
+                            "status": self._status(
+                                provider.source,
+                                collected.isoformat(),
+                                cached_at.isoformat(),
+                                delayed=(
+                                    provider is not self.primary
+                                    and getattr(provider, "delayed", True)
+                                ),
+                            ),
+                        }
+                        record = {
+                            "cached_at": cached_at.isoformat(),
+                            "cache_seconds": self.settings.market_cache_seconds,
+                            "item": value,
+                        }
+                        self._set(key, record)
+                        return cached_item(record)
+                    except Exception as exc:
+                        errors.append(f"{provider.source}: {exc}")
+                if cached is not None and self._usable_stale(cached, now):
+                    stale = cached_item(cached)
+                    status = dict(stale["status"])
+                    stale["status"] = {
+                        **status,
+                        "delayed": True,
+                        "stale": True,
+                        "message": "; ".join(errors) or "upstream unavailable",
+                    }
+                    return stale
+                raise RuntimeError("market quote unavailable")
+            finally:
+                if claimed:
+                    self._release_refresh(redis_client, key, refresh_token)
+
     def klines(
         self,
         symbol: str,

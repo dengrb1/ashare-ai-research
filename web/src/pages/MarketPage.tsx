@@ -11,7 +11,7 @@ const DAILY_REFRESH_MS = 5 * 60 * 1000
 const INTRADAY_REFRESH_MS = 30 * 1000
 
 export function MarketPage() {
-  const { watchlist, quotes, addWatch, removeWatch, source, delayed, updatedAt, refresh, getKline, loadKline } = useMarket()
+  const { watchlist, quotes, addWatch, removeWatch, source, delayed, updatedAt, refreshSymbol, refreshRemaining, getKline, loadKline } = useMarket()
   const [symbol, setSymbol] = useState(watchlist[0] || '600519.SH')
   const [search, setSearch] = useState('')
   const [period, setPeriod] = useState('day')
@@ -40,19 +40,23 @@ export function MarketPage() {
     refresh: refreshChunk,
   }), [loadKline, period, range, symbol])
 
-  const forceRefresh = useMemo(() => async () => {
+  const forceRefresh = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
-      await refresh(true)
-      if (!initialChunk) return
-      const next = await loadWindow(initialChunk, true)
-      setEntry(next)
-      setError(next.error || '')
+      const klineWork = initialChunk ? loadWindow(initialChunk, true) : Promise.resolve(undefined)
+      const [, next] = await Promise.all([refreshSymbol(symbol, true), klineWork])
+      if (next) {
+        setEntry(next)
+        setError(next.error || '')
+      }
+      // The selected quote and visible K-line are ready before unrelated symbols
+      // use the expensive all-market snapshot in the background.
+      void refreshRemaining(symbol, true)
     } finally {
       setLoading(false)
     }
-  }, [initialChunk, loadWindow, refresh])
+  }, [initialChunk, loadWindow, refreshRemaining, refreshSymbol, symbol])
   usePageRefresh(forceRefresh)
 
   useEffect(() => {

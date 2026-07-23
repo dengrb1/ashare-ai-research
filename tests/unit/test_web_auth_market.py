@@ -185,6 +185,15 @@ class EmptyFallback:
         return []
 
 
+class TargetedRealtimeProvider(QuoteProvider):
+    source = "sina"
+    delayed = False
+
+    def quotes(self, symbols):
+        self.calls += 1
+        return [{"symbol": symbol, "price": 21.8} for symbol in symbols]
+
+
 class PrefetchProvider(QuoteProvider):
     def __init__(self, failing_symbol: str | None = None) -> None:
         super().__init__()
@@ -557,6 +566,31 @@ def test_quote_cache_older_than_stale_limit_is_not_reused() -> None:
     provider.fail = True
     with pytest.raises(RuntimeError, match="market data missing"):
         service.quotes(["600000.SH"])
+
+
+def test_focused_quote_prefers_targeted_realtime_provider_and_uses_its_own_cache() -> None:
+    primary = QuoteProvider()
+    realtime = TargetedRealtimeProvider()
+    current = [datetime(2026, 7, 15, 2, tzinfo=UTC)]
+    service = MarketDataService(
+        primary=primary,
+        fallback=realtime,
+        settings=Settings(market_cache_seconds=15, market_timeout_seconds=1),
+        clock=lambda: current[0],
+        redis_client=None,
+    )
+
+    first = service.quote("600000.SH")
+    cached = service.quote("600000.SH")
+    refreshed = service.quote("600000.SH", force_refresh=True)
+
+    assert first["price"] == 21.8
+    assert first["status"]["source"] == "sina"
+    assert first["status"]["delayed"] is False
+    assert cached["status"]["cache_hit"] is True
+    assert refreshed["status"]["cache_hit"] is False
+    assert realtime.calls == 2
+    assert primary.calls == 0
 
 
 def test_concurrent_disjoint_quote_requests_are_coalesced() -> None:

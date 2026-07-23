@@ -86,6 +86,7 @@ def test_native_bearer_refresh_rotation_revoke_expiry_and_disable() -> None:
             "profit_exit_monitor": True,
             "stop_loss_monitor": True,
             "buy_entry_monitor": True,
+            "market_refresh_interval_setting": True,
             "notifications": True,
             "chat_context_metrics": True,
             "persistent_ai_chat": True,
@@ -98,6 +99,9 @@ def test_native_bearer_refresh_rotation_revoke_expiry_and_disable() -> None:
         )
         assert bootstrap_body["capabilities"]["endpoints"]["exit_monitor_settings"] == (
             "/api/v1/assets/exit-monitor"
+        )
+        assert bootstrap_body["capabilities"]["endpoints"]["market_refresh_settings"] == (
+            "/api/v1/assets/market-refresh"
         )
         assert bootstrap_body["capabilities"]["endpoints"]["research_run"] == (
             "/api/v1/research/runs/{run_id}"
@@ -118,6 +122,13 @@ def test_native_bearer_refresh_rotation_revoke_expiry_and_disable() -> None:
             headers={**headers, "Idempotency-Key": "native-exit-monitor-invalid"},
             json={"exit_monitor_enabled": True, "default_profit_trigger": -1},
         ).status_code == 422
+        refresh_settings = client.put(
+            "/api/v1/assets/market-refresh",
+            headers={**headers, "Idempotency-Key": "native-refresh-60"},
+            json={"market_refresh_interval_seconds": 60},
+        )
+        assert refresh_settings.status_code == 200
+        assert refresh_settings.json()["market_refresh_interval_seconds"] == 60
 
         session.add(
             JobRun(

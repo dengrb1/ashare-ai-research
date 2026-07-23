@@ -165,13 +165,14 @@ describe('market prefetch and client cache', () => {
     })
   })
 
-  it('loads the initial quote batch before deferring K-line prefetch', async () => {
+  it('loads the focused quote before deferring K-line prefetch and background quotes', async () => {
     let resolveQuotes: (response: Response) => void
     const quotes = new Promise<Response>((resolve) => { resolveQuotes = resolve })
     const mockFetch = vi.fn((input: RequestInfo | URL, _init?: RequestInit) => {
       const url = String(input)
       if (url.endsWith('/assets')) return Promise.resolve(jsonResponse({ watchlist: ['600519.SH'], positions: [{ symbol: '000001.SZ', name: '平安银行', quantity: 100, cost: 10 }] }))
-      if (url.includes('/market/quotes')) return quotes
+      if (url.includes('/market/quotes/')) return quotes
+      if (url.includes('/market/quotes')) return Promise.resolve(jsonResponse([]))
       if (url.endsWith('/market/prefetch')) return Promise.resolve(jsonResponse({ quotes: [], klines: {}, errors: {} }))
       throw new Error(`unexpected request ${url}`)
     })
@@ -181,17 +182,17 @@ describe('market prefetch and client cache', () => {
     await waitFor(() => expect(mockFetch.mock.calls.filter(([url]) => String(url).includes('/market/quotes')).length).toBe(1))
     expect(mockFetch.mock.calls.some(([url]) => String(url).endsWith('/market/prefetch'))).toBe(false)
 
-    resolveQuotes!(jsonResponse([
-      { symbol: '600519.SH', name: '贵州茅台', price: 1000, change_pct: 1 },
-      { symbol: '000001.SZ', name: '平安银行', price: 10, change_pct: 0 },
-    ]))
+    resolveQuotes!(jsonResponse({
+      symbol: '600519.SH', name: '贵州茅台', price: 1000, change_pct: 1,
+      status: { source: 'fixture', collected_at: '2026-07-20T00:00:00Z', cached_at: '2026-07-20T00:00:00Z', delayed: false, stale: false },
+    }))
     await waitFor(() => expect(mockFetch.mock.calls.some(([url]) => String(url).endsWith('/market/prefetch'))).toBe(true))
 
     const prefetch = mockFetch.mock.calls.find(([url]) => String(url).endsWith('/market/prefetch'))
     expect(JSON.parse(String(prefetch?.[1]?.body))).toMatchObject({
       symbols: ['000001.SZ', '600519.SH'], include_quotes: false,
     })
-    expect(mockFetch.mock.calls.filter(([url]) => String(url).includes('/market/quotes'))).toHaveLength(1)
+    expect(mockFetch.mock.calls.filter(([url]) => String(url).includes('/market/quotes'))).toHaveLength(2)
   })
 
   it('serves a fresh prefetched daily K-line without another request', async () => {

@@ -9,6 +9,8 @@ import type { AIChatAttachment, AIChatMessage, AIChatThread } from '../types'
 type LiveReply = { messageId: string; content: string; status: 'PENDING' | 'STREAMING' | 'FAILED' | 'CANCELLED' }
 type ChatStage = 'retrieval' | 'market' | 'news' | 'generation'
 type StageState = { status: string; cacheHit?: boolean }
+type MentionOption = { symbol: string; name: string }
+type MentionMatch = { query: string; start: number; end: number }
 
 function splitGraphemes(value: string) {
   if (typeof Intl.Segmenter === 'function') {
@@ -30,6 +32,33 @@ function safeHref(value?: string) {
     const parsed = new URL(value)
     return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.href : null
   } catch { return null }
+}
+
+function currentMention(value: string, caret: number): MentionMatch | null {
+  const beforeCaret = value.slice(0, caret)
+  const match = /(?:^|\s)@([^\s@]*)$/u.exec(beforeCaret)
+  if (!match) return null
+  const query = match[1]
+  return { query, start: caret - query.length - 1, end: caret }
+}
+
+function mentionCandidates(options: MentionOption[], query: string) {
+  const normalized = query.trim().toLocaleLowerCase('zh-CN')
+  const score = (item: MentionOption) => {
+    const name = item.name.toLocaleLowerCase('zh-CN')
+    const symbol = item.symbol.toLocaleLowerCase('zh-CN')
+    if (!normalized) return 0
+    if (name === normalized || symbol === normalized) return 0
+    if (name.startsWith(normalized) || symbol.startsWith(normalized)) return 1
+    if (name.includes(normalized) || symbol.includes(normalized)) return 2
+    return 3
+  }
+  return options
+    .map((item, index) => ({ item, index, score: score(item) }))
+    .filter((entry) => entry.score < 3)
+    .sort((left, right) => left.score - right.score || left.index - right.index || left.item.symbol.localeCompare(right.item.symbol))
+    .slice(0, 6)
+    .map((entry) => entry.item)
 }
 
 export function SafeMarkdown({ content }: { content: string }) {
@@ -55,6 +84,9 @@ export function AIChatPage() {
   const [effort, setEffort] = useState('medium')
   const [webSearch, setWebSearch] = useState(true)
   const [draft, setDraft] = useState('')
+  const [mentionCaret, setMentionCaret] = useState(0)
+  const [mentionMenuOpen, setMentionMenuOpen] = useState(false)
+  const [activeMentionIndex, setActiveMentionIndex] = useState(0)
   const [liveReply, setLiveReply] = useState<LiveReply | null>(null)
   const [attachments, setAttachments] = useState<AIChatAttachment[]>([])
   const [busy, setBusy] = useState(false)
@@ -66,6 +98,7 @@ export function AIChatPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const abort = useRef<AbortController | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
+  const composer = useRef<HTMLTextAreaElement>(null)
   const messagesEnd = useRef<HTMLDivElement>(null)
   const queue = useRef<string[]>([])
   const liveContent = useRef('')
@@ -75,8 +108,13 @@ export function AIChatPage() {
     const values = new Map<string, string>()
     positions.forEach((item) => values.set(item.symbol, item.name || quotes[item.symbol]?.name || item.symbol))
     watchlist.forEach((symbol) => values.set(symbol, quotes[symbol]?.name || positions.find((item) => item.symbol === symbol)?.name || symbol))
-    return Array.from(values, ([symbol, name]) => ({ symbol, name })).slice(0, 20)
+    return Array.from(values, ([symbol, name]) => ({ symbol, name }))
   }, [positions, watchlist, quotes])
+  const activeMention = useMemo(() => currentMention(draft, mentionCaret), [draft, mentionCaret])
+  const matchedMentionOptions = useMemo(
+    () => mentionMenuOpen && activeMention ? mentionCandidates(mentionOptions, activeMention.query) : [],
+    [activeMention, mentionMenuOpen, mentionOptions],
+  )
   const [stages, setStages] = useState<Partial<Record<ChatStage, StageState>>>({})
   const [streamingMode, setStreamingMode] = useState<'STREAMING' | 'DEGRADED' | 'CACHED' | null>(null)
   const [dataStatus, setDataStatus] = useState<Record<string, unknown> | null>(null)
@@ -101,6 +139,7 @@ export function AIChatPage() {
   }, [thread?.thread_id])
   useEffect(() => { messagesEnd.current?.scrollIntoView({ block: 'end', behavior: 'smooth' }) }, [messages, liveReply?.content])
   useEffect(() => () => { if (animation.current !== null) cancelAnimationFrame(animation.current) }, [])
+  useEffect(() => { setActiveMentionIndex(0) }, [activeMention?.query, matchedMentionOptions.length])
 
   function tickQueue() {
     const take = Math.max(1, Math.min(4, Math.ceil(queue.current.length / 24)))
@@ -117,6 +156,19 @@ export function AIChatPage() {
     animation.current = null
     liveContent.current += queue.current.splice(0).join('')
     setLiveReply((current) => current ? { ...current, content: liveContent.current, status: 'STREAMING' } : current)
+  }
+
+  function insertMention(item: MentionOption) {
+    if (!activeMention) return
+    const next = `${draft.slice(0, activeMention.start)}@${item.name} ${draft.slice(activeMention.end)}`
+    const nextCaret = activeMention.start + item.name.length + 2
+    setDraft(next)
+    setMentionCaret(nextCaret)
+    setMentionMenuOpen(false)
+    window.requestAnimationFrame(() => {
+      composer.current?.focus()
+      composer.current?.setSelectionRange(nextCaret, nextCaret)
+    })
   }
 
   async function createThread() {
@@ -211,10 +263,19 @@ export function AIChatPage() {
       {streamingMode === 'DEGRADED' && <div className="warning-box chat-degraded"><strong>流式已降级</strong><p>当前模型网关返回一次性结果；本次状态已记录并通知管理员。</p></div>}
       {dataStatus && <details className="chat-data-status"><summary>查看本次上下文数据状态</summary><pre>{JSON.stringify(dataStatus, null, 2)}</pre></details>}
       <div className="chat-messages">{messages.map((item) => <article key={item.message_id} className={`${item.role} ${item.status?.toLowerCase() || ''}`}><header><strong>{item.role === 'user' ? '你' : 'AI 研究助手'}</strong><small>{item.cache_hit ? '缓存命中 · ' : ''}{item.streaming_mode === 'DEGRADED' ? '一次性回复 · ' : ''}{item.status && !['COMPLETED'].includes(item.status) ? `${item.status === 'CANCELLED' ? '未完成' : '回复失败'} · ` : ''}{formatTime(item.created_at)}</small></header><div className="markdown-content"><SafeMarkdown content={item.content} /></div>{Boolean(item.attachment_ids?.length) && <div className="message-images">{item.attachment_ids?.map((id) => <AttachmentImage id={id} key={id} />)}</div>}{item.sources.length > 0 && <details><summary>查看 {item.sources.length} 个数据来源</summary><ul>{item.sources.map((source, index) => { const href = typeof source.uri === 'string' ? safeHref(source.uri) : null; return <li key={index}>{href ? <a href={href} target="_blank" rel="noreferrer noopener">{String(source.title || source.uri)}</a> : String(source.symbol || source.source || '系统数据')}</li> })}</ul></details>}</article>)}{liveReply && <article className={`assistant streaming ${liveReply.status.toLowerCase()}`}><header><strong>AI 研究助手</strong><small>{liveReply.status === 'PENDING' ? 'AI 正在回复…' : '正在生成…'}</small></header><div className="markdown-content"><SafeMarkdown content={liveReply.content} /></div><i className="stream-cursor" /></article>}<div ref={messagesEnd} /></div>
-      <div className="mention-strip"><span>@ 股票：</span>{mentionOptions.map((item) => <button key={item.symbol} title={item.symbol} onClick={() => setDraft((current) => `${current}${current ? ' ' : ''}@${item.name} `)}>@{item.name}</button>)}<small>也可直接输入任意 @名称、@六码或标准代码；服务端会按主数据精确解析。</small></div>
       {attachments.length > 0 && <div className="pending-images">{attachments.map((item) => <div key={item.attachment_id}><AttachmentImage id={item.attachment_id} /><button aria-label="移除图片" onClick={() => setAttachments((current) => current.filter((entry) => entry.attachment_id !== item.attachment_id))}>×</button><small>{formatTime(item.expires_at)} 销毁</small></div>)}</div>}
       <div className="image-retention-warning">图片将在上传 7 天后自动销毁，请自行保存原图。到期后历史对话仅保留占位和已有 AI 分析。</div>
-      <div className="chat-composer"><textarea rows={4} value={draft} placeholder="例如：@海尔智家 结合我的持仓、最新研究和联网信息分析后续风险" onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send() } }} /><div><span><input ref={fileInput} hidden type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => void selectFiles(Array.from(event.target.files || []))} /><button className="secondary" disabled={busy || uploading || attachments.length >= 4} onClick={() => fileInput.current?.click()}>{uploading ? '上传中…' : '添加图片'}</button></span>{busy ? <button className="secondary" onClick={() => abort.current?.abort()}>停止生成</button> : <button className="primary" disabled={(!draft.trim() && !attachments.length) || !model || uploading} onClick={() => void send()}>发送</button>}</div></div>
+      <div className="chat-composer"><div className="mention-composer"><textarea ref={composer} rows={4} value={draft} placeholder="例如：输入 @ 后继续输入股票名称，结合我的持仓、最新研究和联网信息分析后续风险" onChange={(event) => { setDraft(event.target.value); setMentionCaret(event.target.selectionStart); setMentionMenuOpen(true) }} onSelect={(event) => setMentionCaret(event.currentTarget.selectionStart)} onKeyDown={(event) => {
+        if (matchedMentionOptions.length) {
+          if (event.key === 'ArrowDown') { event.preventDefault(); setActiveMentionIndex((index) => (index + 1) % matchedMentionOptions.length); return }
+          if (event.key === 'ArrowUp') { event.preventDefault(); setActiveMentionIndex((index) => (index - 1 + matchedMentionOptions.length) % matchedMentionOptions.length); return }
+          if (event.key === 'Escape') { event.preventDefault(); setMentionMenuOpen(false); return }
+          if (event.key === 'Enter' || event.key === 'Tab') { event.preventDefault(); insertMention(matchedMentionOptions[activeMentionIndex]); return }
+        }
+        if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send() }
+      }} />
+        {matchedMentionOptions.length > 0 && <div className="mention-menu" role="listbox" aria-label="匹配的股票">{matchedMentionOptions.map((item, index) => <button className={index === activeMentionIndex ? 'active' : ''} type="button" role="option" aria-selected={index === activeMentionIndex} key={item.symbol} onMouseDown={(event) => event.preventDefault()} onClick={() => insertMention(item)}><span><strong>{item.name}</strong><small>{item.symbol}</small></span><em>{index === 0 ? '最佳匹配' : '自选 / 持仓'}</em></button>)}</div>}
+      </div><small className="mention-help">输入 <code>@</code> 后按名称或代码搜索；候选优先来自持仓和自选。也可直接输入任意已收录 A 股的 <code>@6位代码</code> 或标准代码。</small><div><span><input ref={fileInput} hidden type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => void selectFiles(Array.from(event.target.files || []))} /><button className="secondary" disabled={busy || uploading || attachments.length >= 4} onClick={() => fileInput.current?.click()}>{uploading ? '上传中…' : '添加图片'}</button></span>{busy ? <button className="secondary" onClick={() => abort.current?.abort()}>停止生成</button> : <button className="primary" disabled={(!draft.trim() && !attachments.length) || !model || uploading} onClick={() => void send()}>发送</button>}</div></div>
     </Panel>
   </div>
 }

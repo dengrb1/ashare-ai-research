@@ -84,7 +84,9 @@ it('calculates current allocation from the latest quote and recalculates when qu
   const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     if (url.endsWith('/assets') && (!init?.method || init.method === 'GET')) return jsonResponse(initial)
+    if (url.includes('/market/quotes/')) return jsonResponse({ symbol: '600519.SH', name: '贵州茅台', price, change_pct: 1, status: { source: 'fixture', collected_at: '2026-07-20T00:00:00Z', cached_at: '2026-07-20T00:00:00Z', delayed: false, stale: false } })
     if (url.includes('/market/quotes')) return jsonResponse([{ symbol: '600519.SH', name: '贵州茅台', price, change_pct: 1 }])
+    if (url.includes('/buy-entry-monitors')) return jsonResponse([])
     if (url.endsWith('/market/prefetch')) return jsonResponse({ quotes: [], klines: {}, errors: {} })
     throw new Error(`unexpected request ${url}`)
   })

@@ -95,6 +95,7 @@ from ashare_ai.api.schemas import (
     ManualExitAdviceRequest,
     MarketPrefetchRequest,
     MarketPrefetchResponse,
+    MarketRefreshSettingsRequest,
     ModelListResponse,
     ModelProbeResponse,
     ModelSettingsRequest,
@@ -656,6 +657,7 @@ def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
                 "profit_exit_monitor": True,
                 "stop_loss_monitor": True,
                 "buy_entry_monitor": True,
+                "market_refresh_interval_setting": True,
                 "notifications": True,
                 "chat_context_metrics": True,
                 "persistent_ai_chat": True,
@@ -666,6 +668,7 @@ def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
             endpoints={
                 "assets": "/api/v1/assets",
                 "exit_monitor_settings": "/api/v1/assets/exit-monitor",
+                "market_refresh_settings": "/api/v1/assets/market-refresh",
                 "research_runs": "/api/v1/research/runs",
                 "research_run": "/api/v1/research/runs/{run_id}",
                 "research_settings": "/api/v1/research/settings",
@@ -723,6 +726,12 @@ def update_asset_state(
             bool(payload.buy_monitor_enabled)
             if "buy_monitor_enabled" in payload.model_fields_set
             else bool(previous.get("buy_monitor_enabled", True))
+        ),
+        (
+            int(payload.market_refresh_interval_seconds)
+            if "market_refresh_interval_seconds" in payload.model_fields_set
+            and payload.market_refresh_interval_seconds is not None
+            else None
         ),
     )
     return AssetStateResponse.model_validate(state)
@@ -793,6 +802,63 @@ def update_exit_monitor_settings(
         if winner is not None and winner.resource_type == "EXIT_MONITOR_SETTINGS":
             return AssetStateResponse.model_validate(service.get(context.user.user_id))
         raise HTTPException(status_code=409, detail="exit monitor update conflicted") from exc
+    return AssetStateResponse.model_validate(state)
+
+
+@app.put("/api/v1/assets/market-refresh", response_model=AssetStateResponse)
+def update_market_refresh_settings(
+    payload: MarketRefreshSettingsRequest,
+    db: DbSession,
+    context: Writer,
+    idempotency_key: IdempotencyKey = None,
+) -> AssetStateResponse:
+    """Persist only live-market polling settings, without replacing asset records."""
+
+    if idempotency_key is None:
+        raise HTTPException(status_code=400, detail="Idempotency-Key is required")
+    route = "/api/v1/assets/market-refresh"
+    fingerprint = _idempotency_fingerprint(
+        context.user.user_id, route, idempotency_key, payload.model_dump(mode="json")
+    )
+    replay = _find_idempotency(
+        db, user_id=context.user.user_id, route=route, fingerprint=fingerprint
+    )
+    service = UserAssetService(db)
+    if replay is not None:
+        if replay.resource_type != "MARKET_REFRESH_SETTINGS":
+            raise HTTPException(status_code=409, detail="idempotent resource is unavailable")
+        return AssetStateResponse.model_validate(service.get(context.user.user_id))
+    previous = service.get(context.user.user_id)
+    state = service.save(
+        context.user.user_id,
+        previous["watchlist"],
+        previous["positions"],
+        UNSET_TOTAL_ASSETS,
+        bool(previous.get("exit_monitor_enabled", False)),
+        previous.get("default_profit_trigger"),
+        bool(previous.get("stop_loss_monitor_enabled", True)),
+        bool(previous.get("buy_monitor_enabled", True)),
+        int(payload.market_refresh_interval_seconds),
+        commit=False,
+    )
+    _remember_idempotency(
+        db,
+        user_id=context.user.user_id,
+        route=route,
+        fingerprint=fingerprint,
+        resource_type="MARKET_REFRESH_SETTINGS",
+        resource_id=context.user.user_id,
+    )
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        winner = _find_idempotency(
+            db, user_id=context.user.user_id, route=route, fingerprint=fingerprint
+        )
+        if winner is not None and winner.resource_type == "MARKET_REFRESH_SETTINGS":
+            return AssetStateResponse.model_validate(service.get(context.user.user_id))
+        raise HTTPException(status_code=409, detail="market refresh update conflicted") from exc
     return AssetStateResponse.model_validate(state)
 
 
@@ -3136,6 +3202,17 @@ def retry_backtest(backtest_id: str, db: DbSession, context: Writer) -> Backtest
         db.commit()
         raise HTTPException(status_code=503, detail="backtest queue unavailable") from exc
     return _backtest_response(db, row)
+
+
+@app.get("/api/v1/market/quotes/{symbol}", response_model=QuoteResponse)
+def market_quote(symbol: str, _: Current, refresh: bool = False) -> QuoteResponse:
+    try:
+        row = get_market_data_service().quote(symbol, force_refresh=refresh)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="market quote unavailable") from exc
+    return QuoteResponse.model_validate(row)
 
 
 @app.get("/api/v1/market/quotes", response_model=list[QuoteResponse])

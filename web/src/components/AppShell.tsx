@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
-import { useMarket } from '../context/MarketContext'
+import { MARKET_REFRESH_INTERVAL_OPTIONS, useMarket } from '../context/MarketContext'
 import { formatTime } from './Ui'
 import { ThemeToggle } from '../context/ThemeContext'
 import { useRefreshControl } from '../context/RefreshContext'
@@ -53,7 +53,7 @@ export function titleForPathname(pathname: string): [string, string] {
 
 export function AppShell() {
   const { user, logout } = useAuth()
-  const { delayed, source, updatedAt } = useMarket()
+  const { delayed, source, updatedAt, marketRefreshIntervalSeconds, saveMarketRefreshInterval, assetsSaving } = useMarket()
   const location = useLocation()
   const [title, subtitle] = titleForPathname(location.pathname)
   const isAdmin = user?.role?.toLowerCase() === 'admin'
@@ -108,7 +108,7 @@ export function AppShell() {
       </nav>
       <div className="sidebar-foot">
         <div className={`feed-state ${delayed ? 'delayed' : ''}`}><i />{delayed ? '行情非实时' : `${source} 行情正常`}</div>
-        <small>{updatedAt ? `更新 ${formatTime(updatedAt)}` : '按活跃标的 15 秒刷新'}</small>
+        <small>{updatedAt ? `更新 ${formatTime(updatedAt)}` : `按活跃标的 ${marketRefreshIntervalSeconds} 秒刷新`}</small>
       </div>
     </aside>
     <div className="workspace">
@@ -117,6 +117,11 @@ export function AppShell() {
         <div className="topbar-title"><h1>{title}</h1><p>{subtitle}</p></div>
         <div className="top-actions">
           <button className="refresh-button" onClick={() => void refresh()} disabled={!available || busy} title="刷新当前页面">{busy ? '刷新中' : '↻ 刷新'}</button>
+          <label className="market-refresh-interval">自动刷新
+            <select aria-label="自动刷新间隔" value={marketRefreshIntervalSeconds} disabled={assetsSaving} onChange={(event) => void saveMarketRefreshInterval(Number(event.target.value) as typeof marketRefreshIntervalSeconds).catch(() => undefined)}>
+              {MARKET_REFRESH_INTERVAL_OPTIONS.map((seconds) => <option value={seconds} key={seconds}>{seconds} 秒</option>)}
+            </select>
+          </label>
           <NotificationBell />
           <ThemeToggle compact />
           <div className="market-clock"><span>上海时间</span><strong>{shanghaiClock}</strong></div>

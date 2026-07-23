@@ -84,6 +84,31 @@ def test_user_can_persist_editable_watchlist_and_simulated_positions() -> None:
         assert reloaded["watchlist"] == updated.json()["watchlist"]
         assert reloaded["positions"] == updated.json()["positions"]
 
+        missing_key = client.put(
+            "/api/v1/assets/market-refresh",
+            json={"market_refresh_interval_seconds": 30},
+        )
+        assert missing_key.status_code == 400
+        refresh_settings = client.put(
+            "/api/v1/assets/market-refresh",
+            headers={"Idempotency-Key": "asset-refresh-30"},
+            json={"market_refresh_interval_seconds": 30},
+        )
+        assert refresh_settings.status_code == 200
+        assert refresh_settings.json()["market_refresh_interval_seconds"] == 30
+        assert refresh_settings.json()["watchlist"] == updated.json()["watchlist"]
+        assert session.get(UserAssetState, "asset-user").market_refresh_interval_seconds == 30  # type: ignore[union-attr]
+        assert client.put(
+            "/api/v1/assets/market-refresh",
+            headers={"Idempotency-Key": "asset-refresh-30"},
+            json={"market_refresh_interval_seconds": 30},
+        ).status_code == 200
+        assert client.put(
+            "/api/v1/assets/market-refresh",
+            headers={"Idempotency-Key": "asset-refresh-invalid"},
+            json={"market_refresh_interval_seconds": 20},
+        ).status_code == 422
+
         legacy_overallocation = client.put(
             "/api/v1/assets",
             json={

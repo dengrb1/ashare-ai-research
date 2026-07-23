@@ -184,6 +184,7 @@ class AssetStateRequest(BaseModel):
     )
     stop_loss_monitor_enabled: bool | None = None
     buy_monitor_enabled: bool | None = None
+    market_refresh_interval_seconds: Literal[15, 30, 60, 120] | None = None
 
     @field_validator("watchlist", mode="before")
     @classmethod
@@ -221,6 +222,7 @@ class AssetStateResponse(BaseModel):
     default_profit_trigger: Decimal | None = None
     stop_loss_monitor_enabled: bool = True
     buy_monitor_enabled: bool = True
+    market_refresh_interval_seconds: Literal[15, 30, 60, 120] = 15
     updated_at: datetime | None = None
 
 
@@ -233,6 +235,12 @@ class ExitMonitorSettingsRequest(BaseModel):
     )
     stop_loss_monitor_enabled: bool | None = None
     buy_monitor_enabled: bool | None = None
+
+
+class MarketRefreshSettingsRequest(BaseModel):
+    """Per-account live-market refresh cadence for the interactive Web/App clients."""
+
+    market_refresh_interval_seconds: Literal[15, 30, 60, 120]
 
 
 class ExitAdviceResponse(_SanitizedErrorResponse):

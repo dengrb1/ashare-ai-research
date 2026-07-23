@@ -114,6 +114,7 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | App 初始化 | GET | `/api/v1/app/bootstrap` | 登录 |
 | 用户资产 | GET/PUT | `/api/v1/assets` | 登录/写入 |
 | 退出监控设置 | PUT | `/api/v1/assets/exit-monitor` | 写入、幂等 |
+| 行情刷新设置 | PUT | `/api/v1/assets/market-refresh` | 写入、幂等 |
 | 卖出建议 | GET | `/api/v1/exit-advice` | 登录 |
 | 卖出建议 | GET | `/api/v1/exit-advice/{advice_id}` | 登录 |
 | 卖出研究 | POST | `/api/v1/exit-advice/manual` | 写入、幂等、202 |
@@ -168,6 +169,7 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 回测 | GET | `/api/v1/backtests/{backtest_id}` | 登录 |
 | 回测 | POST | `/api/v1/backtests/{backtest_id}/retry` | 写入 |
 | 行情 | GET | `/api/v1/market/quotes` | 登录 |
+| 行情 | GET | `/api/v1/market/quotes/{symbol}` | 登录 |
 | 行情 | GET | `/api/v1/market/klines/{symbol}` | 登录 |
 | 行情 | POST | `/api/v1/market/prefetch` | 写入 |
 | 行情 | GET | `/api/v1/market/status` | 登录 |
@@ -257,11 +259,14 @@ Web 登录。请求体为 `LoginRequest`：
 | `default_profit_trigger` | decimal/null | 全局人民币浮盈触发金额；启用监控时应提供 |
 | `stop_loss_monitor_enabled` | boolean | 默认 `true`；交易日每分钟检查持仓止损预警 |
 | `buy_monitor_enabled` | boolean | 默认 `true`；正式 BUY Trade Plan 的有效入场区间监控 |
+| `market_refresh_interval_seconds` | integer | 账户级行情自动刷新间隔，只允许 `15`、`30`、`60` 或 `120`，默认 `15` |
 
 `AssetStateResponse` 在此基础上增加 `updated_at`；`GET /assets` 返回当前用户数据，`PUT /assets` 整体替换当前用户自选股、模拟持仓和可选总资产。
 
 `PUT /api/v1/assets/exit-monitor` 只接受 `exit_monitor_enabled`、
 `default_profit_trigger`、`stop_loss_monitor_enabled` 和 `buy_monitor_enabled`，不会修改自选股、模拟持仓或总资产。该写入必须携带 `Idempotency-Key`；手机客户端调整监控设置时应优先使用该窄接口，避免用旧缓存整体覆盖资产数据。
+
+`PUT /api/v1/assets/market-refresh` 请求 `{"market_refresh_interval_seconds":30}`，必须携带 `Idempotency-Key`。它只更新当前账户的行情自动刷新频率，不会覆盖自选、持仓、总资产或监控设置；同一键和同一请求返回已保存的 `AssetStateResponse`。
 
 `GET /api/v1/app/bootstrap` 返回：
 
@@ -269,7 +274,7 @@ Web 登录。请求体为 `LoginRequest`：
 {
   "server_time": "2026-07-19T12:00:00Z",
   "user": {"user_id":"<USER_ID>","username":"admin","role":"ADMIN","enabled":true,"created_at":"<DATETIME>","updated_at":"<DATETIME>"},
-  "assets": {"watchlist":[],"positions":[],"total_assets":null,"updated_at":null},
+  "assets": {"watchlist":[],"positions":[],"total_assets":null,"market_refresh_interval_seconds":15,"updated_at":null},
   "capabilities": {
     "api_version":"v1",
     "authentication":"BEARER_REFRESH",
@@ -278,8 +283,8 @@ Web 登录。请求体为 `LoginRequest`：
     "max_research_symbols":100,
     "max_trade_plan_symbols":15,
     "portfolio_target_count":15,
-    "features": {"watchlist_research_selection":true,"formal_watchlist_reports":true,"report_symbol_eligibility":true,"trade_plan_generation":true,"research_cancellation":true,"idempotency_key":true,"paper_portfolio_only":true,"profit_exit_monitor":true,"stop_loss_monitor":true,"buy_entry_monitor":true,"notifications":true,"chat_context_metrics":true,"persistent_ai_chat":true,"chat_images_seven_day_retention":true,"personal_archive_export_import":true,"searxng_web_research":true},
-    "endpoints": {"assets":"/api/v1/assets","exit_monitor_settings":"/api/v1/assets/exit-monitor","research_runs":"/api/v1/research/runs","research_run":"/api/v1/research/runs/{run_id}","research_settings":"/api/v1/research/settings","exit_advice":"/api/v1/exit-advice","manual_exit_advice":"/api/v1/exit-advice/manual","buy_entry_monitors":"/api/v1/buy-entry-monitors","notifications":"/api/v1/notifications","notification_summary":"/api/v1/notifications/summary","security_resolve":"/api/v1/securities/resolve","chat_metrics":"/api/v1/ai/chat/metrics","ai_chat_threads":"/api/v1/ai/chat/threads","ai_chat_thread_index":"/api/v1/ai/chat/thread-index","personal_data_exports":"/api/v1/me/data-exports","personal_data_imports":"/api/v1/me/data-imports"}
+    "features": {"watchlist_research_selection":true,"formal_watchlist_reports":true,"report_symbol_eligibility":true,"trade_plan_generation":true,"research_cancellation":true,"idempotency_key":true,"paper_portfolio_only":true,"profit_exit_monitor":true,"stop_loss_monitor":true,"buy_entry_monitor":true,"market_refresh_interval_setting":true,"notifications":true,"chat_context_metrics":true,"persistent_ai_chat":true,"chat_images_seven_day_retention":true,"personal_archive_export_import":true,"searxng_web_research":true},
+    "endpoints": {"assets":"/api/v1/assets","exit_monitor_settings":"/api/v1/assets/exit-monitor","market_refresh_settings":"/api/v1/assets/market-refresh","research_runs":"/api/v1/research/runs","research_run":"/api/v1/research/runs/{run_id}","research_settings":"/api/v1/research/settings","exit_advice":"/api/v1/exit-advice","manual_exit_advice":"/api/v1/exit-advice/manual","buy_entry_monitors":"/api/v1/buy-entry-monitors","notifications":"/api/v1/notifications","notification_summary":"/api/v1/notifications/summary","security_resolve":"/api/v1/securities/resolve","chat_metrics":"/api/v1/ai/chat/metrics","ai_chat_threads":"/api/v1/ai/chat/threads","ai_chat_thread_index":"/api/v1/ai/chat/thread-index","personal_data_exports":"/api/v1/me/data-exports","personal_data_imports":"/api/v1/me/data-imports"}
   }
 }
 ```
@@ -294,7 +299,7 @@ Web 登录。请求体为 `LoginRequest`：
 
 `POST /api/v1/exit-advice/manual` 请求 `{"symbol":"600519.SH"}`，必须携带 `Idempotency-Key`。服务端验证当前用户确有该持仓、行情新鲜且证券/规则数据可用，成功返回 `202 ExitAdviceResponse`，并额外返回 `status_url`；相同键和请求返回首次资源与 `200`。错误只返回稳定原因码，例如 `POSITION_NOT_FOUND`、`QUOTE_STALE` 或 `TRADING_RULE_UNAVAILABLE`。
 
-`GET /api/v1/buy-entry-monitors` 按 `updated_at desc, monitor_id desc` 返回当前用户的监控资源；`PUT /api/v1/buy-entry-monitors` 请求 `{"symbol":"600519.SH","enabled":true}` 且要求 `Idempotency-Key`。启用时标的必须在用户自选中。系统仅把已完成正式研究、评分合格且 Trade Plan 结果为 `BUY` 的次交易日入场区间转为监控；首次进入区间时通知用户并关联模拟方案，不会买入。
+`GET /api/v1/buy-entry-monitors` 按 `updated_at desc, monitor_id desc` 返回当前用户的监控资源；`PUT /api/v1/buy-entry-monitors` 请求 `{"symbol":"600519.SH","enabled":true}` 且要求 `Idempotency-Key`。启用时标的必须在用户自选中。系统仅把已完成正式研究、评分合格且 Trade Plan 结果为 `BUY` 的次交易日入场区间转为监控；首次进入区间时通知用户并关联模拟方案，不会买入。资产页会显示有效日、入场区间和触发/到期状态。
 
 通知接口全部按用户隔离。`GET /notifications` 使用稳定的 URL-safe `cursor`，`limit` 范围 1-200，支持 `unread_only=true`；响应为 `{items,next_cursor}`。`GET /notifications/summary` 只返回未读计数、高风险未读计数和最多 5 条未读摘要，适合可见页面轮询。两个已读写接口均要求 `Idempotency-Key`。已读通知保留 90 天，未读保留 180 天，由后台分批清理。
 
@@ -609,9 +614,13 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 | `stale` | boolean | 当前通常与 `delayed` 同步 |
 | `message` | string/null | 上游或缓存说明 |
 
+### `GET /api/v1/market/quotes/{symbol}`
+
+返回一个 `QuoteResponse`。可选 `refresh=true|false` 强制刷新；该端点优先使用能按标的定向请求的实时供应商，并使用独立的短缓存。它适合当前选中证券，不会等待全市场批量快照。无效代码返回 `422`，所有上游和可用缓存均失败时返回 `503`。
+
 ### `GET /api/v1/market/quotes`
 
-必填查询参数 `symbols`，使用逗号分隔，例如 `600519.SH,000001.SZ`；可选 `refresh=true|false` 强制刷新。返回 `QuoteResponse[]`，每项包含 `symbol`、`name`、`price`、`change`、`change_percent`、`open`、`high`、`low`、`previous_close`、`volume`、`amount` 和 `status`。单个数值可能为 `null`。
+必填查询参数 `symbols`，使用逗号分隔，例如 `600519.SH,000001.SZ`；可选 `refresh=true|false` 强制刷新。返回 `QuoteResponse[]`，每项包含 `symbol`、`name`、`price`、`change`、`change_percent`、`open`、`high`、`low`、`previous_close`、`volume`、`amount` 和 `status`。单个数值可能为 `null`。它适合后台批量刷新；Web 会先调用单标的端点，再在后台调用此端点补全其余证券。
 
 ### `GET /api/v1/market/klines/{symbol}`
 

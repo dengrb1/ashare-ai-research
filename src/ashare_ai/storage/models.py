@@ -138,6 +138,9 @@ class UserAssetState(Base):
         Boolean, nullable=False, default=True
     )
     buy_monitor_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    market_refresh_interval_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=15
+    )
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 

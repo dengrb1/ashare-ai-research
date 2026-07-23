@@ -52,6 +52,7 @@ class UserAssetService:
                 "default_profit_trigger": None,
                 "stop_loss_monitor_enabled": True,
                 "buy_monitor_enabled": True,
+                "market_refresh_interval_seconds": 15,
                 "updated_at": None,
             }
         return {
@@ -66,6 +67,7 @@ class UserAssetService:
             ),
             "stop_loss_monitor_enabled": row.stop_loss_monitor_enabled,
             "buy_monitor_enabled": row.buy_monitor_enabled,
+            "market_refresh_interval_seconds": row.market_refresh_interval_seconds,
             "updated_at": row.updated_at,
         }
 
@@ -79,6 +81,7 @@ class UserAssetService:
         default_profit_trigger: float | None = None,
         stop_loss_monitor_enabled: bool | None = None,
         buy_monitor_enabled: bool | None = None,
+        market_refresh_interval_seconds: int | None = None,
         *,
         commit: bool = True,
     ) -> dict[str, Any]:
@@ -103,6 +106,8 @@ class UserAssetService:
             row.stop_loss_monitor_enabled = stop_loss_monitor_enabled
         if buy_monitor_enabled is not None:
             row.buy_monitor_enabled = buy_monitor_enabled
+        if market_refresh_interval_seconds is not None:
+            row.market_refresh_interval_seconds = market_refresh_interval_seconds
         row.updated_at = now
         if commit:
             self.session.commit()

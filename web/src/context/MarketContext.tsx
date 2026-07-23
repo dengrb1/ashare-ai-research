@@ -7,6 +7,8 @@ import type { KlineBar, KlineLoadOptions, KlinePayload, KlineRange, MarketDataSt
 const PREFETCH_INTERVAL_MS = 5 * 60 * 1000
 const DAILY_CACHE_MS = 5 * 60 * 1000
 const INTRADAY_CACHE_MS = 30 * 1000
+export const MARKET_REFRESH_INTERVAL_OPTIONS = [15, 30, 60, 120] as const
+type MarketRefreshIntervalSeconds = (typeof MARKET_REFRESH_INTERVAL_OPTIONS)[number]
 
 export interface KlineCacheEntry {
   symbol: string
@@ -31,6 +33,7 @@ interface MarketValue {
   defaultProfitTrigger: number | null
   stopLossMonitorEnabled: boolean
   buyMonitorEnabled: boolean
+  marketRefreshIntervalSeconds: MarketRefreshIntervalSeconds
   assetsLoading: boolean
   assetsSaving: boolean
   quotesLoading: boolean
@@ -46,8 +49,11 @@ interface MarketValue {
   removePosition: (symbol: string) => Promise<void>
   saveTotalAssets: (totalAssets: number | null) => Promise<void>
   saveExitSettings: (enabled: boolean, amount: number | null, stopLossEnabled?: boolean, buyMonitorEnabled?: boolean) => Promise<void>
+  saveMarketRefreshInterval: (seconds: MarketRefreshIntervalSeconds) => Promise<void>
   subscribe: (symbols: string[]) => () => void
   refresh: (force?: boolean) => Promise<void>
+  refreshSymbol: (symbol: string, force?: boolean) => Promise<void>
+  refreshRemaining: (excludedSymbol?: string, force?: boolean) => Promise<void>
   prefetch: () => Promise<void>
   getKline: (symbol: string, period: string, request?: number | { range: KlineRange }) => KlineCacheEntry | undefined
   loadKline: (symbol: string, period: string, request?: number | KlineLoadOptions, force?: boolean) => Promise<KlineCacheEntry>
@@ -103,6 +109,7 @@ export function MarketProvider({ children }: { children: ReactNode }) {
   const [defaultProfitTrigger, setDefaultProfitTrigger] = useState<number | null>(null)
   const [stopLossMonitorEnabled, setStopLossMonitorEnabled] = useState(true)
   const [buyMonitorEnabled, setBuyMonitorEnabled] = useState(true)
+  const [marketRefreshIntervalSeconds, setMarketRefreshIntervalSeconds] = useState<MarketRefreshIntervalSeconds>(15)
   const [assetsLoading, setAssetsLoading] = useState(true)
   const [assetsSaving, setAssetsSaving] = useState(false)
   const [quotesLoading, setQuotesLoading] = useState(true)
@@ -115,10 +122,13 @@ export function MarketProvider({ children }: { children: ReactNode }) {
   const klineInflight = useRef(new Map<string, Promise<KlineCacheEntry>>())
   const assetMutation = useRef(false)
   const prefetchInflight = useRef<Promise<void> | null>(null)
+  const focusedQuoteInflight = useRef(new Map<string, Promise<void>>())
+  const bulkQuoteInflight = useRef<Promise<void> | null>(null)
+  const quoteLoadCount = useRef(0)
   const [klineVersion, setKlineVersion] = useState(0)
   const prefetchSymbols = useMemo(() => marketPrefetchSymbols(watchlist, positions), [watchlist, positions])
   const activeSymbols = useMemo(
-    () => Array.from(new Set([...prefetchSymbols, ...subscribers.current.keys()])).sort(),
+    () => Array.from(new Set([...subscribers.current.keys(), ...prefetchSymbols])),
     [prefetchSymbols, subscriptionVersion],
   )
 
@@ -133,6 +143,7 @@ export function MarketProvider({ children }: { children: ReactNode }) {
       setDefaultProfitTrigger(state.default_profit_trigger == null ? null : Number(state.default_profit_trigger))
       setStopLossMonitorEnabled(state.stop_loss_monitor_enabled !== false)
       setBuyMonitorEnabled(state.buy_monitor_enabled !== false)
+      setMarketRefreshIntervalSeconds(state.market_refresh_interval_seconds ?? 15)
     }).catch((error) => {
       if (!active) return
       setMeta((current) => ({ ...current, error: error instanceof Error ? error.message : '自选与持仓加载失败' }))
@@ -155,21 +166,68 @@ export function MarketProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  const beginQuoteLoad = useCallback(() => {
+    quoteLoadCount.current += 1
+    setQuotesLoading(true)
+  }, [])
+
+  const endQuoteLoad = useCallback(() => {
+    quoteLoadCount.current = Math.max(0, quoteLoadCount.current - 1)
+    if (quoteLoadCount.current === 0) setQuotesLoading(false)
+  }, [])
+
+  const reportQuoteError = useCallback((error: unknown) => {
+    setMeta((current) => ({
+      ...current,
+      delayed: true,
+      error: error instanceof Error ? error.message : '行情服务暂不可用',
+    }))
+  }, [])
+
+  const refreshSymbol = useCallback(async (symbol: string, force = false) => {
+    const normalized = symbol.trim().toUpperCase()
+    if (!normalized) return
+    const key = `${normalized}:${force ? 'force' : 'cached'}`
+    const existing = focusedQuoteInflight.current.get(key)
+    if (existing) return existing
+    beginQuoteLoad()
+    const work = api.quote(normalized, force)
+      .then((row) => { mergeQuotes([row]) })
+      .catch(reportQuoteError)
+      .finally(() => {
+        focusedQuoteInflight.current.delete(key)
+        endQuoteLoad()
+      })
+    focusedQuoteInflight.current.set(key, work)
+    return work
+  }, [beginQuoteLoad, endQuoteLoad, mergeQuotes, reportQuoteError])
+
+  const refreshRemaining = useCallback(async (excludedSymbol?: string, force = false) => {
+    const excluded = excludedSymbol?.trim().toUpperCase()
+    const symbols = activeSymbols.filter((symbol) => symbol !== excluded)
+    if (!symbols.length) return
+    if (bulkQuoteInflight.current) return bulkQuoteInflight.current
+    beginQuoteLoad()
+    const work = api.quotes(symbols, force)
+      .then(mergeQuotes)
+      .catch(reportQuoteError)
+      .finally(() => {
+        bulkQuoteInflight.current = null
+        endQuoteLoad()
+      })
+    bulkQuoteInflight.current = work
+    return work
+  }, [activeSymbols.join(','), beginQuoteLoad, endQuoteLoad, mergeQuotes, reportQuoteError])
+
   const refresh = useCallback(async (force = false) => {
     if (!activeSymbols.length) {
       setQuotesLoading(false)
       return
     }
-    setQuotesLoading(true)
-    try {
-      const rows = await api.quotes(activeSymbols, force)
-      mergeQuotes(rows)
-    } catch (error) {
-      setMeta((current) => ({ ...current, delayed: true, error: error instanceof Error ? error.message : '行情服务暂不可用' }))
-    } finally {
-      setQuotesLoading(false)
-    }
-  }, [activeSymbols.join(','), mergeQuotes])
+    const prioritySymbol = activeSymbols[0]
+    await refreshSymbol(prioritySymbol, force)
+    void refreshRemaining(prioritySymbol, force)
+  }, [activeSymbols.join(','), refreshRemaining, refreshSymbol])
 
   const prefetch = useCallback(async () => {
     if (!prefetchSymbols.length) return
@@ -206,13 +264,13 @@ export function MarketProvider({ children }: { children: ReactNode }) {
         if (active) void prefetch()
       })
     })
-    const timer = window.setInterval(() => void refresh(), 15_000)
+    const timer = window.setInterval(() => void refresh(), marketRefreshIntervalSeconds * 1_000)
     return () => {
       active = false
       cancelIdle()
       window.clearInterval(timer)
     }
-  }, [assetsLoading, prefetch, refresh])
+  }, [assetsLoading, marketRefreshIntervalSeconds, prefetch, refresh])
 
   useEffect(() => {
     if (assetsLoading || !prefetchSymbols.length) return
@@ -236,7 +294,7 @@ export function MarketProvider({ children }: { children: ReactNode }) {
 
   const saveAssets = useCallback(async (nextWatchlist: string[], nextPositions: PaperPosition[], nextTotalAssets = totalAssets, nextExitEnabled = exitMonitorEnabled, nextProfitTrigger = defaultProfitTrigger, nextStopLossEnabled = stopLossMonitorEnabled, nextBuyMonitorEnabled = buyMonitorEnabled) => {
     try {
-      const saved = await api.saveAssets({ watchlist: nextWatchlist, positions: nextPositions, total_assets: nextTotalAssets, exit_monitor_enabled: nextExitEnabled, default_profit_trigger: nextProfitTrigger, stop_loss_monitor_enabled: nextStopLossEnabled, buy_monitor_enabled: nextBuyMonitorEnabled })
+      const saved = await api.saveAssets({ watchlist: nextWatchlist, positions: nextPositions, total_assets: nextTotalAssets, exit_monitor_enabled: nextExitEnabled, default_profit_trigger: nextProfitTrigger, stop_loss_monitor_enabled: nextStopLossEnabled, buy_monitor_enabled: nextBuyMonitorEnabled, market_refresh_interval_seconds: marketRefreshIntervalSeconds })
       setWatchlist(saved.watchlist)
       setPositions(saved.positions)
       setTotalAssets(saved.total_assets ?? null)
@@ -244,11 +302,12 @@ export function MarketProvider({ children }: { children: ReactNode }) {
       setDefaultProfitTrigger(saved.default_profit_trigger == null ? null : Number(saved.default_profit_trigger))
       setStopLossMonitorEnabled(saved.stop_loss_monitor_enabled !== false)
       setBuyMonitorEnabled(saved.buy_monitor_enabled !== false)
+      setMarketRefreshIntervalSeconds(saved.market_refresh_interval_seconds ?? 15)
     } catch (error) {
       setMeta((current) => ({ ...current, error: error instanceof Error ? error.message : '自选与持仓保存失败' }))
       throw error
     }
-  }, [buyMonitorEnabled, defaultProfitTrigger, exitMonitorEnabled, stopLossMonitorEnabled, totalAssets])
+  }, [buyMonitorEnabled, defaultProfitTrigger, exitMonitorEnabled, marketRefreshIntervalSeconds, stopLossMonitorEnabled, totalAssets])
 
   const beginAssetMutation = useCallback(() => {
     if (assetMutation.current) throw new Error('自选与持仓正在保存，请稍候')
@@ -329,10 +388,30 @@ export function MarketProvider({ children }: { children: ReactNode }) {
       )
       setStopLossMonitorEnabled(saved.stop_loss_monitor_enabled ?? true)
       setBuyMonitorEnabled(saved.buy_monitor_enabled ?? true)
+      setMarketRefreshIntervalSeconds(saved.market_refresh_interval_seconds ?? 15)
     }
     catch (error) { setExitMonitorEnabled(previousEnabled); setDefaultProfitTrigger(previousAmount); setStopLossMonitorEnabled(previousStopLoss); setBuyMonitorEnabled(previousBuyMonitor); throw error }
     finally { endAssetMutation() }
   }, [beginAssetMutation, buyMonitorEnabled, defaultProfitTrigger, endAssetMutation, exitMonitorEnabled, stopLossMonitorEnabled])
+
+  const saveMarketRefreshInterval = useCallback(async (seconds: MarketRefreshIntervalSeconds) => {
+    if (!MARKET_REFRESH_INTERVAL_OPTIONS.includes(seconds)) {
+      throw new Error('不支持的自动刷新间隔')
+    }
+    beginAssetMutation()
+    const previous = marketRefreshIntervalSeconds
+    setMarketRefreshIntervalSeconds(seconds)
+    try {
+      const saved = await api.saveMarketRefreshSettings(seconds)
+      setMarketRefreshIntervalSeconds(saved.market_refresh_interval_seconds ?? 15)
+    } catch (error) {
+      setMarketRefreshIntervalSeconds(previous)
+      setMeta((current) => ({ ...current, error: error instanceof Error ? error.message : '自动刷新设置保存失败' }))
+      throw error
+    } finally {
+      endAssetMutation()
+    }
+  }, [beginAssetMutation, endAssetMutation, marketRefreshIntervalSeconds])
 
   const getKline = useCallback((symbol: string, period: string, request: number | { range: KlineRange } = 160) => {
     const entry = typeof request === 'number'
@@ -447,7 +526,7 @@ export function MarketProvider({ children }: { children: ReactNode }) {
     return work
   }, [])
 
-  const value = useMemo(() => ({ quotes, watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, stopLossMonitorEnabled, buyMonitorEnabled, assetsLoading, assetsSaving, quotesLoading, ...meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings, subscribe, refresh, prefetch, getKline, loadKline }), [quotes, watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, stopLossMonitorEnabled, buyMonitorEnabled, assetsLoading, assetsSaving, quotesLoading, meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings, subscribe, refresh, prefetch, getKline, loadKline])
+  const value = useMemo(() => ({ quotes, watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, stopLossMonitorEnabled, buyMonitorEnabled, marketRefreshIntervalSeconds, assetsLoading, assetsSaving, quotesLoading, ...meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings, saveMarketRefreshInterval, subscribe, refresh, refreshSymbol, refreshRemaining, prefetch, getKline, loadKline }), [quotes, watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, stopLossMonitorEnabled, buyMonitorEnabled, marketRefreshIntervalSeconds, assetsLoading, assetsSaving, quotesLoading, meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings, saveMarketRefreshInterval, subscribe, refresh, refreshSymbol, refreshRemaining, prefetch, getKline, loadKline])
   return <MarketContext.Provider value={value}>{children}</MarketContext.Provider>
 }
 

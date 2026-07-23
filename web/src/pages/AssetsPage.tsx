@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
 import { Empty, ErrorNotice, formatAmount, formatNumber, Loading, Panel } from '../components/Ui'
 import { useMarket, useQuoteSubscription } from '../context/MarketContext'
-import type { PaperPosition } from '../types'
+import type { BuyEntryMonitor, PaperPosition } from '../types'
 
 type PositionDraft = {
   symbol: string
@@ -29,6 +29,10 @@ function stopLossLabel(position: PaperPosition) {
   return position.stop_loss_mode === 'FALLBACK_8PCT' ? '自动止损 · 成本价下 8%' : '自动止损 · ATR20'
 }
 
+function buyMonitorStatusLabel(status: string) {
+  return ({ ACTIVE: '等待入场区间', TRIGGERED: '已触发提醒', EXPIRED: '已到期', CANCELLED: '已取消', FAILED: '数据异常' } as Record<string, string>)[status] || status
+}
+
 export function AssetsPage() {
   const { watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, stopLossMonitorEnabled, buyMonitorEnabled, quotes, assetsLoading, assetsSaving, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings } = useMarket()
   const [watchSymbol, setWatchSymbol] = useState('')
@@ -40,6 +44,8 @@ export function AssetsPage() {
   const [dragOverSymbol, setDragOverSymbol] = useState('')
   const [formError, setFormError] = useState('')
   const [manualExitSymbol, setManualExitSymbol] = useState('')
+  const [buyEntryMonitors, setBuyEntryMonitors] = useState<BuyEntryMonitor[]>([])
+  const [buyEntryMonitorError, setBuyEntryMonitorError] = useState('')
   useQuoteSubscription(positions.map((row) => row.symbol))
 
   useEffect(() => {
@@ -47,6 +53,16 @@ export function AssetsPage() {
   }, [totalAssets])
 
   useEffect(() => { setProfitTriggerDraft(defaultProfitTrigger === null ? '' : String(defaultProfitTrigger)) }, [defaultProfitTrigger])
+
+  useEffect(() => {
+    let active = true
+    void api.buyEntryMonitors().then((rows) => {
+      if (active) setBuyEntryMonitors(rows)
+    }).catch((error) => {
+      if (active) setBuyEntryMonitorError(error instanceof Error ? error.message : '买入区间状态加载失败')
+    })
+    return () => { active = false }
+  }, [])
 
   const totals = useMemo(() => positions.reduce((acc, row) => {
     const latestPrice = quotes[row.symbol]?.price
@@ -186,12 +202,31 @@ export function AssetsPage() {
     <Panel title="AI 退出风险与买入监控" eyebrow="PAPER MONITORING" className="exit-monitor-panel" action={<span className={`monitor-state ${exitMonitorEnabled || stopLossMonitorEnabled || buyMonitorEnabled ? 'enabled' : ''}`}><i />{exitMonitorEnabled || stopLossMonitorEnabled || buyMonitorEnabled ? '监控中' : '已暂停'}</span>}>
       <div className="exit-monitor-form">
         <label className="exit-trigger-field">默认浮盈触发金额（元）<input type="number" min="0.01" step="0.01" value={profitTriggerDraft} disabled={busy} onChange={(event) => setProfitTriggerDraft(event.target.value)} /><small>未设个股股价线时，严格超过该浮盈才触发</small></label>
-        <label className="exit-monitor-toggle"><input type="checkbox" checked={exitMonitorEnabled} disabled={busy} onChange={(event) => void persistExitSettings(event.target.checked)} /><span className="toggle-control" aria-hidden="true" /><span><strong>浮盈退出监控</strong><small>交易日每分钟检查，仅生成模拟退出研究</small></span></label>
-        <label className="exit-monitor-toggle"><input type="checkbox" checked={stopLossMonitorEnabled} disabled={busy} onChange={(event) => void persistExitSettings(exitMonitorEnabled, event.target.checked)} /><span className="toggle-control" aria-hidden="true" /><span><strong>止损预警</strong><small>默认开启；以 ATR20 推导止损，绝不自动卖出</small></span></label>
-        <label className="exit-monitor-toggle"><input type="checkbox" checked={buyMonitorEnabled} disabled={busy} onChange={(event) => void persistExitSettings(exitMonitorEnabled, stopLossMonitorEnabled, event.target.checked)} /><span className="toggle-control" aria-hidden="true" /><span><strong>自选股买入区间监控</strong><small>仅对正式 BUY Trade Plan 的次交易日入场区间提醒</small></span></label>
-        <button className="primary" disabled={busy} onClick={() => void persistExitSettings()}>保存监控设置</button>
+        <div className="exit-monitor-switches">
+          <label className="exit-monitor-toggle"><input type="checkbox" checked={exitMonitorEnabled} disabled={busy} onChange={(event) => void persistExitSettings(event.target.checked)} /><span className="toggle-control" aria-hidden="true" /><span><strong>浮盈退出监控</strong><small>交易日每分钟检查，仅生成模拟退出研究</small></span></label>
+          <label className="exit-monitor-toggle"><input type="checkbox" checked={stopLossMonitorEnabled} disabled={busy} onChange={(event) => void persistExitSettings(exitMonitorEnabled, event.target.checked)} /><span className="toggle-control" aria-hidden="true" /><span><strong>止损预警</strong><small>默认开启；以 ATR20 推导止损，绝不自动卖出</small></span></label>
+          <label className="exit-monitor-toggle"><input type="checkbox" checked={buyMonitorEnabled} disabled={busy} onChange={(event) => void persistExitSettings(exitMonitorEnabled, stopLossMonitorEnabled, event.target.checked)} /><span className="toggle-control" aria-hidden="true" /><span><strong>自选股买入区间监控</strong><small>仅对正式 BUY Trade Plan 的次交易日入场区间提醒</small></span></label>
+        </div>
+        <div className="exit-monitor-actions"><button className="primary" disabled={busy} onClick={() => void persistExitSettings()}>保存监控设置</button></div>
       </div>
       <p className="exit-monitor-note"><span>i</span>所有监控都只创建通知和模拟研究；不会修改持仓、不会自动下单。止损价缺失时按后复权 ATR20 推导，并约束在成本价下方 5%–10%。</p>
+      <details className="buy-monitor-guide">
+        <summary>自选股买入区间监控怎么用？</summary>
+        <ol>
+          <li>把目标证券加入“我的自选”，并开启上方的“自选股买入区间监控”。</li>
+          <li>完成正式研究；只有评分合格且 Trade Plan 明确为 <code>BUY</code> 的标的才会生成监控。</li>
+          <li>系统仅在该计划的下一交易日、首次进入建议入场区间时发送通知；它不会自动买入、卖出或改动持仓。</li>
+        </ol>
+      </details>
+      <section className="buy-monitor-status" aria-labelledby="buy-monitor-status-title">
+        <div><strong id="buy-monitor-status-title">当前买入区间状态</strong><small>{buyMonitorEnabled ? '只展示由正式 BUY Trade Plan 生成的提醒' : '总开关已关闭，不会生成新的买入区间提醒'}</small></div>
+        {buyEntryMonitorError ? <p className="form-hint">{buyEntryMonitorError}</p> : buyEntryMonitors.length ? <div className="buy-monitor-list">
+          {buyEntryMonitors.map((item) => <article key={item.monitor_id}>
+            <div><strong>{item.symbol}</strong><small>{buyMonitorStatusLabel(item.status)} · 有效日 {item.effective_date}</small></div>
+            <div><strong>¥ {formatNumber(Number(item.entry_low))} — ¥ {formatNumber(Number(item.entry_high))}</strong><small>{item.triggered_at ? `已于 ${new Date(item.triggered_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })} 通知` : `到期 ${new Date(item.expires_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}`}</small></div>
+          </article>)}
+        </div> : <p className="form-hint">尚无有效入场区间。开启后，等待正式研究完成并生成符合条件的 BUY Trade Plan。</p>}
+      </section>
     </Panel>
     <div className="split-grid assets-grid">
       <Panel title="我的持仓" eyebrow="HOLDINGS" action={<button className="secondary" disabled={busy} onClick={() => setDraft({ ...EMPTY_POSITION })}>新增记录</button>}>

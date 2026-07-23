@@ -28,6 +28,23 @@ describe('API security and market adapters', () => {
     expect(init?.method).toBe('POST')
   })
 
+  it('uses the focused quote endpoint and persists refresh settings through the narrow API', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({ symbol: '600519.SH', price: 21.8, status: { source: 'sina', collected_at: '2026-07-20T00:00:00Z', cached_at: '2026-07-20T00:00:00Z', delayed: false, stale: false } }))
+      .mockResolvedValueOnce(jsonResponse({ watchlist: [], positions: [], market_refresh_interval_seconds: 30 }))
+
+    const quote = await api.quote('600519.SH', true)
+    await api.saveMarketRefreshSettings(30)
+
+    expect(quote.price).toBe(21.8)
+    expect(String(vi.mocked(fetch).mock.calls[0][0])).toContain('/market/quotes/600519.SH?refresh=true')
+    expect(String(vi.mocked(fetch).mock.calls[1][0])).toContain('/assets/market-refresh')
+    const init = vi.mocked(fetch).mock.calls[1][1]
+    expect(init?.method).toBe('PUT')
+    expect(new Headers(init?.headers).get('Idempotency-Key')).toBeTruthy()
+    expect(JSON.parse(String(init?.body))).toEqual({ market_refresh_interval_seconds: 30 })
+  })
+
   it('targets single-score lineage and research cancellation endpoints', async () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(jsonResponse({ symbol: '600000.SH', total_score: 80 }))

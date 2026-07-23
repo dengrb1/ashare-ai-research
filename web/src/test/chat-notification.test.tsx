@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('../context/MarketContext', () => ({
-  useMarket: () => ({ positions: [], watchlist: [], quotes: {} }),
+  useMarket: () => ({ positions: [{ symbol: '600519.SH', name: '贵州茅台', quantity: 100, cost: 1400 }], watchlist: ['600519.SH', '000001.SZ'], quotes: { '000001.SZ': { name: '平安银行', price: 10, change_pct: 0 } } }),
 }))
 
 vi.mock('../api', async (importOriginal) => {
@@ -119,7 +119,7 @@ describe('chat safety and observability', () => {
       ])
 
     render(<AIChatPage />)
-    const composer = await screen.findByPlaceholderText(/例如：@海尔智家/)
+    const composer = await screen.findByPlaceholderText(/输入 @ 后继续输入股票名称/)
     await userEvent.type(composer, '请分析 @600519.SH')
     await userEvent.click(screen.getByRole('button', { name: '发送' }))
 
@@ -128,6 +128,17 @@ describe('chat safety and observability', () => {
     expect(screen.getByText('生成：已降级')).toBeInTheDocument()
     expect(await screen.findByText('模拟回复')).toBeInTheDocument()
     expect(streamAIChat).toHaveBeenCalledOnce()
+  })
+
+  it('matches personal stocks after @ and inserts the selected stock name', async () => {
+    render(<AIChatPage />)
+    const composer = await screen.findByPlaceholderText(/输入 @ 后继续输入股票名称/)
+    await userEvent.type(composer, '分析 @茅')
+    const option = await screen.findByRole('option', { name: /贵州茅台/ })
+    await userEvent.click(option)
+
+    expect(composer).toHaveValue('分析 @贵州茅台 ')
+    expect(screen.getByText(/候选优先来自持仓和自选/)).toBeInTheDocument()
   })
 
   it('shows a high-risk unread badge and marks all notifications read', async () => {
