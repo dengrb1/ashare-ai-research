@@ -33,6 +33,7 @@ interface MarketValue {
   buyMonitorEnabled: boolean
   assetsLoading: boolean
   assetsSaving: boolean
+  quotesLoading: boolean
   delayed: boolean
   source: string
   updatedAt?: string
@@ -81,6 +82,19 @@ function entryFromPayload(payload: KlinePayload, fallbackPeriod: string, now = D
   }
 }
 
+function scheduleWhenIdle(callback: () => void) {
+  const browser = window as Window & {
+    requestIdleCallback?: (work: () => void, options?: { timeout: number }) => number
+    cancelIdleCallback?: (handle: number) => void
+  }
+  if (typeof browser.requestIdleCallback === 'function') {
+    const handle = browser.requestIdleCallback(callback, { timeout: 1_500 })
+    return () => browser.cancelIdleCallback?.(handle)
+  }
+  const handle = window.setTimeout(callback, 0)
+  return () => window.clearTimeout(handle)
+}
+
 export function MarketProvider({ children }: { children: ReactNode }) {
   const [watchlist, setWatchlist] = useState<string[]>([])
   const [positions, setPositions] = useState<PaperPosition[]>([])
@@ -91,6 +105,7 @@ export function MarketProvider({ children }: { children: ReactNode }) {
   const [buyMonitorEnabled, setBuyMonitorEnabled] = useState(true)
   const [assetsLoading, setAssetsLoading] = useState(true)
   const [assetsSaving, setAssetsSaving] = useState(false)
+  const [quotesLoading, setQuotesLoading] = useState(true)
   const [quotes, setQuotes] = useState<Record<string, Quote>>({})
   const [meta, setMeta] = useState<{ delayed: boolean; source: string; updatedAt?: string; error?: string }>({ delayed: false, source: 'AKShare' })
   const subscribers = useRef(new Map<string, number>())
@@ -101,8 +116,11 @@ export function MarketProvider({ children }: { children: ReactNode }) {
   const assetMutation = useRef(false)
   const prefetchInflight = useRef<Promise<void> | null>(null)
   const [klineVersion, setKlineVersion] = useState(0)
-  const activeSymbols = useMemo(() => Array.from(new Set([...watchlist, ...subscribers.current.keys()])).sort(), [watchlist, subscriptionVersion])
   const prefetchSymbols = useMemo(() => marketPrefetchSymbols(watchlist, positions), [watchlist, positions])
+  const activeSymbols = useMemo(
+    () => Array.from(new Set([...prefetchSymbols, ...subscribers.current.keys()])).sort(),
+    [prefetchSymbols, subscriptionVersion],
+  )
 
   useEffect(() => {
     let active = true
@@ -138,12 +156,18 @@ export function MarketProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const refresh = useCallback(async (force = false) => {
-    if (!activeSymbols.length) return
+    if (!activeSymbols.length) {
+      setQuotesLoading(false)
+      return
+    }
+    setQuotesLoading(true)
     try {
       const rows = await api.quotes(activeSymbols, force)
       mergeQuotes(rows)
     } catch (error) {
       setMeta((current) => ({ ...current, delayed: true, error: error instanceof Error ? error.message : '行情服务暂不可用' }))
+    } finally {
+      setQuotesLoading(false)
     }
   }, [activeSymbols.join(','), mergeQuotes])
 
@@ -152,8 +176,7 @@ export function MarketProvider({ children }: { children: ReactNode }) {
     if (prefetchInflight.current) return prefetchInflight.current
     const work = (async () => {
       try {
-        const payload = await api.prefetchMarket(prefetchSymbols, ['day'], 160)
-        mergeQuotes(payload.quotes || [])
+        const payload = await api.prefetchMarket(prefetchSymbols, ['day'], 160, false)
         let changed = false
         Object.entries(payload.klines || {}).forEach(([symbol, periods]) => {
           const daily = periods.day
@@ -171,20 +194,31 @@ export function MarketProvider({ children }: { children: ReactNode }) {
     })().finally(() => { prefetchInflight.current = null })
     prefetchInflight.current = work
     return work
-  }, [prefetchSymbols.join(','), mergeQuotes])
+  }, [prefetchSymbols.join(',')])
 
   useEffect(() => {
-    void refresh()
-    if (!activeSymbols.length) return
+    if (assetsLoading) return
+    let active = true
+    let cancelIdle = () => {}
+    void refresh().then(() => {
+      if (!active) return
+      cancelIdle = scheduleWhenIdle(() => {
+        if (active) void prefetch()
+      })
+    })
     const timer = window.setInterval(() => void refresh(), 15_000)
-    return () => window.clearInterval(timer)
-  }, [refresh, activeSymbols.length])
+    return () => {
+      active = false
+      cancelIdle()
+      window.clearInterval(timer)
+    }
+  }, [assetsLoading, prefetch, refresh])
 
   useEffect(() => {
-    void prefetch()
+    if (assetsLoading || !prefetchSymbols.length) return
     const timer = window.setInterval(() => void prefetch(), PREFETCH_INTERVAL_MS)
     return () => window.clearInterval(timer)
-  }, [prefetch])
+  }, [assetsLoading, prefetch, prefetchSymbols.length])
 
   const subscribe = useCallback((symbols: string[]) => {
     const normalized = symbols.filter(Boolean)
@@ -413,7 +447,7 @@ export function MarketProvider({ children }: { children: ReactNode }) {
     return work
   }, [])
 
-  const value = useMemo(() => ({ quotes, watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, stopLossMonitorEnabled, buyMonitorEnabled, assetsLoading, assetsSaving, ...meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings, subscribe, refresh, prefetch, getKline, loadKline }), [quotes, watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, stopLossMonitorEnabled, buyMonitorEnabled, assetsLoading, assetsSaving, meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings, subscribe, refresh, prefetch, getKline, loadKline])
+  const value = useMemo(() => ({ quotes, watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, stopLossMonitorEnabled, buyMonitorEnabled, assetsLoading, assetsSaving, quotesLoading, ...meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings, subscribe, refresh, prefetch, getKline, loadKline }), [quotes, watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, stopLossMonitorEnabled, buyMonitorEnabled, assetsLoading, assetsSaving, quotesLoading, meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings, subscribe, refresh, prefetch, getKline, loadKline])
   return <MarketContext.Provider value={value}>{children}</MarketContext.Provider>
 }
 

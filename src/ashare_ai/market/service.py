@@ -1057,8 +1057,9 @@ class MarketDataService:
         *,
         periods: list[str] | None = None,
         limit: int = 160,
+        include_quotes: bool = True,
     ) -> dict[str, Any]:
-        """Warm quote and K-line caches without coupling live data to PIT snapshots."""
+        """Warm selected live-data caches without coupling them to PIT snapshots."""
 
         normalized = sorted(set(normalize_symbol(item) for item in symbols if item.strip()))
         if not normalized:
@@ -1078,22 +1079,23 @@ class MarketDataService:
         quotes: list[dict[str, Any]] = []
         klines: dict[str, dict[str, dict[str, Any]]] = {}
         errors: dict[str, str] = {}
-        task_count = 1 + len(normalized) * len(requested_periods)
+        task_count = len(normalized) * len(requested_periods) + int(include_quotes)
         max_workers = min(self.settings.market_prefetch_max_workers, task_count)
         with ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="market-prefetch",
         ) as pool:
-            quote_future = pool.submit(self.quotes, normalized)
+            quote_future = pool.submit(self.quotes, normalized) if include_quotes else None
             kline_futures = {
                 pool.submit(self.klines, symbol, period, limit=limit): (symbol, period)
                 for symbol in normalized
                 for period in requested_periods
             }
-            try:
-                quotes = quote_future.result()
-            except Exception as exc:
-                errors["quotes"] = str(exc)
+            if quote_future is not None:
+                try:
+                    quotes = quote_future.result()
+                except Exception as exc:
+                    errors["quotes"] = str(exc)
             for future, (symbol, period) in kline_futures.items():
                 try:
                     value = future.result()

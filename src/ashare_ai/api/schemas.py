@@ -893,6 +893,7 @@ class MarketPrefetchRequest(BaseModel):
     symbols: list[str] = Field(min_length=1, max_length=500)
     periods: list[str] = Field(default_factory=lambda: ["day"], min_length=1, max_length=5)
     limit: int = Field(default=160, ge=1, le=5000)
+    include_quotes: bool = True
 
     @field_validator("periods")
     @classmethod

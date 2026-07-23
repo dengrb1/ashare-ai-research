@@ -124,10 +124,10 @@ export const api = {
     })}`)
     return { ...payload, bars: (payload.bars || []).map((bar) => ({ ...bar, time: bar.time || bar.timestamp })) }
   },
-  prefetchMarket: async (symbols: string[], periods = ['day'], limit = 160) => {
+  prefetchMarket: async (symbols: string[], periods = ['day'], limit = 160, includeQuotes = true) => {
     const payload = await request<MarketPrefetchResponse>('/market/prefetch', {
       method: 'POST',
-      body: JSON.stringify({ symbols, periods, limit }),
+      body: JSON.stringify({ symbols, periods, limit, include_quotes: includeQuotes }),
     })
     if (!payload || Array.isArray(payload)) return { quotes: [], klines: {}, errors: {} } as MarketPrefetchResponse
     return {

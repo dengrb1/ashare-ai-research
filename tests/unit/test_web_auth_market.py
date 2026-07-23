@@ -790,6 +790,25 @@ def test_prefetch_normalizes_symbols_limits_concurrency_and_isolates_failures() 
         service.prefetch(["600519.SH"], periods=["5m"])
 
 
+def test_prefetch_without_quotes_warms_daily_klines_only() -> None:
+    provider = PrefetchProvider()
+    service = MarketDataService(
+        primary=provider,
+        fallback=EmptyFallback(),
+        settings=Settings(market_timeout_seconds=1),
+        clock=lambda: datetime(2026, 7, 14, 2, tzinfo=UTC),
+        redis_client=None,
+    )
+
+    payload = service.prefetch(
+        ["600519.SH", "000001.SZ"], periods=["day"], limit=160, include_quotes=False
+    )
+
+    assert payload["quotes"] == []
+    assert set(payload["klines"]) == {"000001.SZ", "600519.SH"}
+    assert provider.calls == 0
+
+
 def test_daily_kline_uses_independent_five_minute_cache() -> None:
     provider = PrefetchProvider()
     current = [datetime(2026, 7, 15, 2, tzinfo=UTC)]
@@ -857,7 +876,7 @@ def test_prefetch_api_requires_auth_csrf_and_returns_indexed_results(monkeypatch
     session, _, _ = _database()
 
     class StubMarket:
-        def prefetch(self, symbols, *, periods, limit):
+        def prefetch(self, symbols, *, periods, limit, include_quotes):
             if len(set(symbols)) > 50:
                 raise ValueError("prefetch supports at most 50 symbols")
             if any(symbol == "INVALID" for symbol in symbols):
@@ -865,6 +884,7 @@ def test_prefetch_api_requires_auth_csrf_and_returns_indexed_results(monkeypatch
             assert symbols == ["600519.SH"]
             assert periods == ["day"]
             assert limit == 160
+            assert include_quotes is False
             status = {
                 "source": "fixture",
                 "collected_at": "2026-07-16T01:00:00Z",
@@ -918,7 +938,12 @@ def test_prefetch_api_requires_auth_csrf_and_returns_indexed_results(monkeypatch
         csrf = client.cookies.get("ashare_csrf")
         response = client.post(
             "/api/v1/market/prefetch",
-            json={"symbols": ["600519.SH"], "periods": ["day"], "limit": 160},
+            json={
+                "symbols": ["600519.SH"],
+                "periods": ["day"],
+                "limit": 160,
+                "include_quotes": False,
+            },
             headers={"x-csrf-token": csrf},
         )
         assert response.status_code == 200

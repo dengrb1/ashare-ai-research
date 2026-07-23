@@ -12,6 +12,27 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+it('keeps the holdings panel stable while assets are loading', async () => {
+  let resolveAssets: (response: Response) => void
+  const assets = new Promise<Response>((resolve) => { resolveAssets = resolve })
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url.endsWith('/assets')) return assets
+    if (url.endsWith('/runs')) return Promise.resolve(jsonResponse([]))
+    if (url.includes('/market/quotes')) return Promise.resolve(jsonResponse([]))
+    if (url.endsWith('/market/prefetch')) return Promise.resolve(jsonResponse({ quotes: [], klines: {}, errors: {} }))
+    throw new Error(`unexpected request ${url}`)
+  }))
+
+  render(<MarketProvider><DashboardPage /></MarketProvider>)
+  expect(screen.getByRole('status', { name: '持仓数据加载中' })).toBeInTheDocument()
+  expect(screen.queryByText('暂无模拟持仓')).not.toBeInTheDocument()
+
+  resolveAssets!(jsonResponse({ watchlist: [], positions: [] }))
+  await waitFor(() => expect(screen.queryByRole('status', { name: '持仓数据加载中' })).not.toBeInTheDocument())
+  expect(screen.getByText('暂无模拟持仓')).toBeInTheDocument()
+})
+
 it('shows total and per-position PnL with an explicit cost-price fallback', async () => {
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input)

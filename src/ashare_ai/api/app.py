@@ -3185,6 +3185,7 @@ def market_prefetch(request: MarketPrefetchRequest, _: Writer) -> MarketPrefetch
             request.symbols,
             periods=request.periods,
             limit=request.limit,
+            include_quotes=request.include_quotes,
         )
         return MarketPrefetchResponse.model_validate(payload)
     except ValueError as exc:

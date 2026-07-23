@@ -635,10 +635,10 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 请求体：
 
 ```json
-{"symbols":["600519.SH","000001.SZ"],"periods":["day"],"limit":160}
+{"symbols":["600519.SH","000001.SZ"],"periods":["day"],"limit":160,"include_quotes":true}
 ```
 
-`symbols` 至少 1 个，去重后最多 50 个；`periods` 当前只能为 `day` 或 `daily`，服务端会规范为 `day`；`limit` 范围 1–5000。返回 `quotes`、`klines` 和按代码记录的 `errors`。单只股票失败不会丢弃其他成功结果。
+`symbols` 至少 1 个，去重后最多 50 个；`periods` 当前只能为 `day` 或 `daily`，服务端会规范为 `day`；`limit` 范围 1–5000。`include_quotes` 默认为 `true`；设为 `false` 时仅预热 K 线并返回空的 `quotes`，可避免与已在进行的报价读取重复。返回 `quotes`、`klines` 和按代码记录的 `errors`。单只股票失败不会丢弃其他成功结果。
 
 ### `GET /api/v1/market/status`
 
