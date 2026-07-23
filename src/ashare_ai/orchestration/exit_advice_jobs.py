@@ -13,7 +13,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ashare_ai.agents.model_settings import ModelConfigurationService
-from ashare_ai.agents.openai_compatible import OpenAICompatibleStructuredLLMClient
+from ashare_ai.agents.openai_compatible import (
+    OpenAICompatibleError,
+    OpenAICompatibleStructuredLLMClient,
+)
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.hashing import canonical_json, sha256_bytes, stable_hash
 from ashare_ai.core.time import SHANGHAI
@@ -543,7 +546,8 @@ def execute_exit_advice(advice_id: str) -> dict[str, Any]:
         )
         if runtime is None:
             row.status = "UNAVAILABLE"
-            row.error_message = "AI模型未配置"
+            row.error_message = "MODEL_UNAVAILABLE"
+            row.result = {"failure_code": "MODEL_UNAVAILABLE", "paper_trade_only": True}
             row.completed_at = now
             NotificationService(session).create(
                 user_id=row.user_id,
@@ -752,25 +756,61 @@ def _validate_sell_ladder(
 def run_exit_advice_job(advice_id: str) -> dict[str, Any]:
     try:
         return execute_exit_advice(advice_id)
-    except Exception as exc:
+    except OpenAICompatibleError:
         with SessionLocal() as session:
             row = session.get(ExitAdviceRow, advice_id)
             if row is not None:
-                row.status = "FAILED"
-                row.error_message = type(exc).__name__
-                row.completed_at = datetime.now(UTC)
-                NotificationService(session).create(
-                    user_id=row.user_id,
-                    notification_type="EXIT_ADVICE_FAILED",
-                    severity="WARNING",
-                    title=f"{row.symbol} 模拟退出研究失败",
-                    body="未生成退出建议；持仓没有被修改或自动卖出。",
-                    resource_type="EXIT_ADVICE",
-                    resource_id=row.advice_id,
-                    dedupe_key=f"exit-failed:{row.advice_id}",
+                _record_exit_failure(
+                    session,
+                    row,
+                    status="UNAVAILABLE",
+                    failure_code="MODEL_UNAVAILABLE",
+                    notification_type="EXIT_ADVICE_UNAVAILABLE",
+                    title=f"{row.symbol} 模拟退出研究暂不可用",
                 )
-                session.commit()
-        raise
+        return {}
+    except Exception:
+        with SessionLocal() as session:
+            row = session.get(ExitAdviceRow, advice_id)
+            if row is not None:
+                _record_exit_failure(
+                    session,
+                    row,
+                    status="FAILED",
+                    failure_code="PROCESSING_FAILED",
+                    notification_type="EXIT_ADVICE_FAILED",
+                    title=f"{row.symbol} 模拟退出研究失败",
+                )
+        return {}
+
+
+def _record_exit_failure(
+    session: Session,
+    row: ExitAdviceRow,
+    *,
+    status: Literal["FAILED", "UNAVAILABLE"],
+    failure_code: str,
+    notification_type: str,
+    title: str,
+) -> None:
+    """Persist only stable public failure codes; provider details never leave the worker."""
+
+    row.status = status
+    row.error_message = failure_code
+    row.result = {"failure_code": failure_code, "paper_trade_only": True}
+    row.completed_at = datetime.now(UTC)
+    NotificationService(session).create(
+        user_id=row.user_id,
+        notification_type=notification_type,
+        severity="WARNING",
+        title=title,
+        body="未生成退出研究；持仓没有被修改或自动卖出。",
+        resource_type="EXIT_ADVICE",
+        resource_id=row.advice_id,
+        payload={"failure_code": failure_code},
+        dedupe_key=f"exit-failure:{row.advice_id}:{failure_code}",
+    )
+    session.commit()
 
 
 def consume_exit_advice_queue() -> None:

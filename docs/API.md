@@ -474,7 +474,7 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 
 ### `GET /api/v1/candidates/{trading_date}`
 
-返回按研究结果排序的 `CandidateResponse[]`，字段为：`symbol`、`trading_date`、`decision_at`、`rank`、`total_score`、`base_total_score`、`dividend_bonus`、`prediction_percentile`、`industry_code`、`event_risk_multiplier`、`style_exposures`、`evidence_hash`。
+返回按研究结果排序的 `CandidateResponse[]`，字段为：`symbol`、可空 `name`、`trading_date`、`decision_at`、`rank`、`total_score`、`base_total_score`、`dividend_bonus`、`prediction_percentile`、`industry_code`、`event_risk_multiplier`、`style_exposures`、`evidence_hash`。`name` 仅来自该研究运行 `decision_at` 时可用且生效的证券主数据；缺失时为 `null`，客户端应回退展示标准证券代码。
 
 ### `GET /api/v1/portfolios/{trading_date}`
 

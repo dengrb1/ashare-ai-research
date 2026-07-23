@@ -40,11 +40,22 @@ def symbol_summary(
     advice_eligible: bool,
     reasons: Sequence[str],
 ) -> str:
-    scores = (
-        f"综合评分 {total_score:.2f} 分，其中基本面 {fundamental_score:.2f} 分、"
-        f"技术面 {technical_score:.2f} 分、市场情绪 {sentiment_score:.2f} 分。"
-    )
+    del total_score
+    dimensions = {
+        "基本面": fundamental_score,
+        "技术面": technical_score,
+        "市场情绪": sentiment_score,
+    }
+    strongest = max(dimensions, key=dimensions.__getitem__)
+    weakest = min(dimensions, key=dimensions.__getitem__)
+    dimension_note = f"从本次研究维度看，{strongest}相对更有支撑，{weakest}相对需要继续观察。"
     if advice_eligible:
-        return f"{scores} 数据门禁已通过，可以查看模拟交易方案；这不代表收益承诺。"
+        return (
+            f"{dimension_note} 数据门禁已通过，当前没有使模拟买入建议失效的风险结论，"
+            "可以查看基于冻结数据和规则校验的模拟方案；仅用于模拟研究，不构成收益承诺。"
+        )
     details = "；".join(reason_label(reason) for reason in reasons) or "未通过个股建议门禁"
-    return f"{scores} 当前暂不生成买入建议，原因是：{details}。"
+    return (
+        f"{dimension_note} 当前数据门禁或风险结论不支持生成买入建议，主要原因是：{details}。"
+        "仅用于模拟研究，不构成收益承诺。"
+    )

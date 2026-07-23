@@ -12,7 +12,10 @@ from ashare_ai.agents.chat_context import ChatContextService, resolve_security_m
 from ashare_ai.search.news import NewsSearchResult
 from ashare_ai.storage.models import (
     Base,
+    CandidateRow,
     JobRun,
+    ReportRow,
+    ScoreRow,
     SecurityMaster,
     SnapshotManifestRow,
     UserAccount,
@@ -125,9 +128,7 @@ class _Market:
             for symbol in symbols
         ]
 
-    def klines(
-        self, symbol: str, period: str, *, limit: int, end: datetime
-    ) -> dict[str, object]:
+    def klines(self, symbol: str, period: str, *, limit: int, end: datetime) -> dict[str, object]:
         assert period == "day"
         assert limit == 30
         assert end.tzinfo is not None
@@ -223,9 +224,7 @@ def test_live_context_contains_market_kline_news_and_reuses_user_cache() -> None
     assert market.quote_calls == market.kline_calls == news.calls == 1
 
 
-def test_historical_bars_require_a_committed_user_manifest_before_decision(
-    monkeypatch
-) -> None:
+def test_historical_bars_require_a_committed_user_manifest_before_decision(monkeypatch) -> None:
     engine = _engine()
     Base.metadata.create_all(engine)
     decision_at = datetime(2026, 7, 20, 8, tzinfo=UTC)
@@ -321,3 +320,182 @@ def test_historical_bars_require_a_committed_user_manifest_before_decision(
     assert available["status"]["state"] == "AVAILABLE"
     assert available["bars"][0]["close"] == 31.0
     assert calls == ["read"]
+
+
+def test_published_research_context_uses_user_owned_pit_report_metadata() -> None:
+    engine = _engine()
+    Base.metadata.create_all(engine)
+    decision_at = datetime(2026, 7, 20, 8, tzinfo=UTC)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                UserAccount(
+                    user_id="research-user",
+                    username="research-user",
+                    password_hash="hash",
+                    role="USER",
+                    enabled=True,
+                    session_version=1,
+                    created_at=decision_at - timedelta(days=2),
+                    updated_at=decision_at - timedelta(days=2),
+                ),
+                UserAccount(
+                    user_id="other-user",
+                    username="other-user",
+                    password_hash="hash",
+                    role="USER",
+                    enabled=True,
+                    session_version=1,
+                    created_at=decision_at - timedelta(days=2),
+                    updated_at=decision_at - timedelta(days=2),
+                ),
+            ]
+        )
+        run = JobRun(
+            run_id="published-run",
+            user_id="research-user",
+            run_type="DAILY",
+            trading_date=date(2026, 7, 18),
+            decision_at=decision_at - timedelta(days=2),
+            status="SUCCEEDED",
+            idempotency_key="published-key",
+            manifest={"data_quality_gate": {"formal_eligible_symbols": ["002138.SZ"]}},
+            input_hash="a" * 64,
+            started_at=decision_at - timedelta(days=2),
+            completed_at=decision_at - timedelta(days=1),
+        )
+        future_run = JobRun(
+            run_id="future-run",
+            user_id="research-user",
+            run_type="DAILY",
+            trading_date=date(2026, 7, 21),
+            decision_at=decision_at + timedelta(days=1),
+            status="SUCCEEDED",
+            idempotency_key="future-key",
+            manifest={"data_quality_gate": {"formal_eligible_symbols": ["002138.SZ"]}},
+            input_hash="b" * 64,
+            started_at=decision_at + timedelta(days=1),
+            completed_at=decision_at + timedelta(days=1, minutes=1),
+        )
+        other_run = JobRun(
+            run_id="other-run",
+            user_id="other-user",
+            run_type="DAILY",
+            trading_date=date(2026, 7, 19),
+            decision_at=decision_at - timedelta(days=1),
+            status="SUCCEEDED",
+            idempotency_key="other-key",
+            manifest={"data_quality_gate": {"formal_eligible_symbols": ["002138.SZ"]}},
+            input_hash="c" * 64,
+            started_at=decision_at - timedelta(days=1),
+            completed_at=decision_at - timedelta(hours=12),
+        )
+        session.add_all(
+            [
+                run,
+                future_run,
+                other_run,
+                ReportRow(
+                    report_id="published-report",
+                    run_id=run.run_id,
+                    trading_date=run.trading_date,
+                    report_type="DAILY_RESEARCH",
+                    object_uri="file:///published.html",
+                    content_sha256="d" * 64,
+                    created_at=decision_at - timedelta(hours=20),
+                ),
+                ReportRow(
+                    report_id="future-report",
+                    run_id=future_run.run_id,
+                    trading_date=future_run.trading_date,
+                    report_type="DAILY_RESEARCH",
+                    object_uri="file:///future.html",
+                    content_sha256="e" * 64,
+                    created_at=decision_at + timedelta(days=1, minutes=2),
+                ),
+                ReportRow(
+                    report_id="other-report",
+                    run_id=other_run.run_id,
+                    trading_date=other_run.trading_date,
+                    report_type="DAILY_RESEARCH",
+                    object_uri="file:///other.html",
+                    content_sha256="f" * 64,
+                    created_at=decision_at - timedelta(hours=11),
+                ),
+            ]
+        )
+        for run_id, score in ((run.run_id, 82), (future_run.run_id, 99), (other_run.run_id, 91)):
+            session.add(
+                ScoreRow(
+                    run_id=run_id,
+                    symbol="002138.SZ",
+                    trading_date=date(2026, 7, 18),
+                    decision_at=decision_at - timedelta(days=2),
+                    fundamental_score=score,
+                    technical_score=70,
+                    sentiment_score=55,
+                    quality_confidence_score=80,
+                    base_total_score=score,
+                    dividend_bonus=0,
+                    event_risk_multiplier=1,
+                    total_score=score,
+                    formula_version="fixture",
+                    agent_bundle_sha256="1" * 64,
+                    evidence_bundle_sha256="2" * 64,
+                    feature_snapshot_id="fixture",
+                )
+            )
+        session.add(
+            CandidateRow(
+                run_id=run.run_id,
+                symbol="002138.SZ",
+                trading_date=run.trading_date,
+                decision_at=run.decision_at,
+                rank=2,
+                total_score=82,
+                prediction_percentile=0.9,
+                industry_code="ELECTRONICS",
+                event_risk_multiplier=1,
+                style_exposures={},
+                evidence_hash="3" * 64,
+            )
+        )
+        session.commit()
+
+    service = ChatContextService(
+        market=object(),
+        news=object(),
+        session_factory=lambda: Session(engine),  # type: ignore[arg-type]
+    )
+    mentioned = service.build(
+        user_id="research-user",
+        refs=[{"symbol": "002138.SZ", "name": "顺络电子"}],
+        requested_decision_at=decision_at,
+        web_search=False,
+        model_configuration_sha256="a" * 64,
+    )
+    entry = mentioned.context["latest_published_research"]["002138.SZ"]
+    assert entry["ranking"]["rank"] == 2
+    assert entry["gate"]["advice_eligible"] is True
+    assert entry["report"]["report_id"] == "published-report"
+    assert "82" not in entry["brief"]["summary"]
+    assert (
+        mentioned.data_status["latest_published_research"]["symbols"]["002138.SZ"]["state"]
+        == "AVAILABLE"
+    )
+
+    overview = service.build(
+        user_id="research-user",
+        refs=[],
+        requested_decision_at=decision_at,
+        web_search=False,
+        model_configuration_sha256="a" * 64,
+    )
+    assert (
+        overview.context["latest_published_research"]["market_summary"]["report"]["report_id"]
+        == "published-report"
+    )
+    assert (
+        overview.context["latest_published_research"]["candidate_overview"][0]["symbol"]
+        == "002138.SZ"
+    )

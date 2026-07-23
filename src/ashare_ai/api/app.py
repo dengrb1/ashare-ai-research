@@ -22,7 +22,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -183,6 +183,7 @@ from ashare_ai.storage.models import (
     PortfolioRow,
     ReportRow,
     ScoreRow,
+    SecurityMaster,
     SnapshotManifestRow,
     TradePlanRow,
     UserAccount,
@@ -292,6 +293,8 @@ def _remember_idempotency(
             created_at=datetime.now(UTC),
         )
     )
+
+
 SearchService = Annotated[FinancialSearchService, Depends(get_financial_search_service)]
 
 
@@ -326,6 +329,34 @@ def _result_access(context: AuthContext) -> dict[str, Any]:
         "user_id": context.user.user_id,
         "include_all_users": context.user.role == "ADMIN",
     }
+
+
+def _security_names_at(db: Session, symbols: set[str], decision_at: datetime) -> dict[str, str]:
+    """Return the latest point-in-time short name for every requested symbol."""
+
+    if not symbols:
+        return {}
+    rows = db.scalars(
+        select(SecurityMaster)
+        .where(
+            SecurityMaster.symbol.in_(symbols),
+            SecurityMaster.available_at <= decision_at,
+            SecurityMaster.effective_from <= decision_at.astimezone(SHANGHAI).date(),
+            or_(
+                SecurityMaster.effective_to.is_(None),
+                SecurityMaster.effective_to >= decision_at.astimezone(SHANGHAI).date(),
+            ),
+        )
+        .order_by(
+            SecurityMaster.symbol,
+            SecurityMaster.available_at.desc(),
+            SecurityMaster.fetched_at.desc(),
+        )
+    ).all()
+    names: dict[str, str] = {}
+    for row in rows:
+        names.setdefault(row.symbol, row.short_name)
+    return names
 
 
 def _manual_research_date(requested_date: date, now: datetime) -> date:
@@ -979,9 +1010,7 @@ def buy_entry_monitor_list(
     limit: int = Query(default=50, ge=1, le=200),
     before: datetime | None = None,
 ) -> list[BuyEntryMonitorResponse]:
-    statement = select(BuyEntryMonitorRow).where(
-        BuyEntryMonitorRow.user_id == context.user.user_id
-    )
+    statement = select(BuyEntryMonitorRow).where(BuyEntryMonitorRow.user_id == context.user.user_id)
     if before is not None:
         statement = statement.where(BuyEntryMonitorRow.updated_at < before)
     rows = db.scalars(
@@ -1202,10 +1231,7 @@ def resolve_security(
 
 @app.get("/api/v1/ai/chat/metrics", response_model=list[AIChatMetricResponse])
 def ai_chat_metrics(db: DbSession, context: Current) -> list[AIChatMetricResponse]:
-    return [
-        AIChatMetricResponse(**item)
-        for item in chat_metric_summary(db, context.user.user_id)
-    ]
+    return [AIChatMetricResponse(**item) for item in chat_metric_summary(db, context.user.user_id)]
 
 
 @app.get("/api/v1/ai/chat/threads", response_model=list[AIChatThreadResponse])
@@ -1271,9 +1297,7 @@ def create_ai_chat_thread(
     return AIChatThreadResponse.model_validate(row)
 
 
-@app.patch(
-    "/api/v1/ai/chat/threads/{thread_id}", response_model=AIChatThreadResponse
-)
+@app.patch("/api/v1/ai/chat/threads/{thread_id}", response_model=AIChatThreadResponse)
 def patch_ai_chat_thread(
     thread_id: str,
     payload: AIChatThreadPatchRequest,
@@ -1304,9 +1328,7 @@ def delete_ai_chat_thread(thread_id: str, db: DbSession, context: Writer) -> Res
 def bulk_delete_ai_chat_threads(
     payload: AIChatBulkDeleteRequest, db: DbSession, context: Writer
 ) -> dict[str, int]:
-    deleted = ChatThreadService(db).bulk_delete(
-        context.user.user_id, payload.thread_ids
-    )
+    deleted = ChatThreadService(db).bulk_delete(context.user.user_id, payload.thread_ids)
     return {"deleted": deleted}
 
 
@@ -1332,9 +1354,9 @@ def ai_chat_messages(
     statement = select(AIChatMessage).where(AIChatMessage.thread_id == thread_id)
     if before is not None:
         statement = statement.where(AIChatMessage.created_at < before)
-    rows = list(
-        db.scalars(statement.order_by(AIChatMessage.created_at.desc()).limit(limit)).all()
-    )[::-1]
+    rows = list(db.scalars(statement.order_by(AIChatMessage.created_at.desc()).limit(limit)).all())[
+        ::-1
+    ]
     return [AIChatMessageResponse.model_validate(row) for row in rows]
 
 
@@ -1385,9 +1407,7 @@ async def upload_ai_chat_attachments(
 
 
 @app.get("/api/v1/ai/chat/attachments/{attachment_id}/content")
-def ai_chat_attachment_content(
-    attachment_id: str, db: DbSession, context: Current
-) -> Response:
+def ai_chat_attachment_content(attachment_id: str, db: DbSession, context: Current) -> Response:
     service = AttachmentService(db)
     row = service.get_owned(context.user.user_id, attachment_id)
     if row is None:
@@ -1463,9 +1483,7 @@ def create_personal_data_export(
     return PersonalArchiveJobResponse.model_validate(row)
 
 
-@app.get(
-    "/api/v1/me/data-exports/{export_id}", response_model=PersonalArchiveJobResponse
-)
+@app.get("/api/v1/me/data-exports/{export_id}", response_model=PersonalArchiveJobResponse)
 def personal_data_export_status(
     export_id: str, db: DbSession, context: Current
 ) -> PersonalArchiveJobResponse:
@@ -1475,9 +1493,7 @@ def personal_data_export_status(
 
 
 @app.get("/api/v1/me/data-exports/{export_id}/download")
-def download_personal_data_export(
-    export_id: str, db: DbSession, context: Current
-) -> Response:
+def download_personal_data_export(export_id: str, db: DbSession, context: Current) -> Response:
     row = _owned_archive_job(db, context.user.user_id, export_id)
     if row.expires_at <= datetime.now(UTC):
         raise HTTPException(status_code=410, detail="personal archive expired")
@@ -1497,12 +1513,8 @@ def download_personal_data_export(
     )
 
 
-@app.delete(
-    "/api/v1/me/data-exports/{export_id}", status_code=status.HTTP_204_NO_CONTENT
-)
-def delete_personal_data_export(
-    export_id: str, db: DbSession, context: Writer
-) -> Response:
+@app.delete("/api/v1/me/data-exports/{export_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_personal_data_export(export_id: str, db: DbSession, context: Writer) -> Response:
     row = db.scalar(
         select(PersonalArchiveJob)
         .where(
@@ -1539,17 +1551,13 @@ async def upload_personal_data_import(
     archive_id = str(uuid4())
     try:
         encrypted_secret = wrap_job_secret(passphrase, archive_id)
-        path = private_archive_target_path(
-            context.user.user_id, archive_id, "source.ashare"
-        )
+        path = private_archive_target_path(context.user.user_id, archive_id, "source.ashare")
         total = 0
         with path.open("wb") as handle:
             while chunk := await archive.read(1024 * 1024):
                 total += len(chunk)
                 if total > MAX_ARCHIVE_BYTES:
-                    raise PersonalArchiveError(
-                        "档案超过大小上限", code="ARCHIVE_TOO_LARGE"
-                    )
+                    raise PersonalArchiveError("档案超过大小上限", code="ARCHIVE_TOO_LARGE")
                 handle.write(chunk)
         if total == 0:
             raise PersonalArchiveError("档案为空", code="ARCHIVE_FORMAT_INVALID")
@@ -1588,9 +1596,7 @@ async def upload_personal_data_import(
     return PersonalArchiveJobResponse.model_validate(row)
 
 
-@app.get(
-    "/api/v1/me/data-imports/{import_id}", response_model=PersonalArchiveJobResponse
-)
+@app.get("/api/v1/me/data-imports/{import_id}", response_model=PersonalArchiveJobResponse)
 def personal_data_import_status(
     import_id: str, db: DbSession, context: Current
 ) -> PersonalArchiveJobResponse:
@@ -2027,6 +2033,12 @@ def candidates(
     trading_date: date, db: DbSession, context: Current, run_id: str | None = None
 ) -> list[CandidateResponse]:
     rows = QueryRepository(db).candidates(trading_date, run_id=run_id, **_result_access(context))
+    run = db.get(JobRun, rows[0].run_id) if rows else None
+    names = (
+        _security_names_at(db, {row.symbol for row in rows}, run.decision_at)
+        if run is not None
+        else {}
+    )
     scores = (
         {
             (item.run_id, item.symbol): item
@@ -2044,6 +2056,7 @@ def candidates(
         CandidateResponse.model_validate(
             {
                 **{column.name: getattr(row, column.name) for column in row.__table__.columns},
+                "name": names.get(row.symbol),
                 "base_total_score": (
                     scores[(row.run_id, row.symbol)].base_total_score
                     if (row.run_id, row.symbol) in scores
@@ -2184,6 +2197,7 @@ def report_symbols(report_id: str, db: DbSession, context: Current) -> list[Repo
     )
     quality = manifest.get("symbol_data_quality")
     quality = quality if isinstance(quality, dict) else {}
+    names = _security_names_at(db, {score.symbol for score in scores}, run.decision_at)
     global_fused = run.status == "FUSED"
     result: list[ReportSymbolResponse] = []
     for score in scores:
@@ -2213,6 +2227,7 @@ def report_symbols(report_id: str, db: DbSession, context: Current) -> list[Repo
         result.append(
             ReportSymbolResponse(
                 symbol=score.symbol,
+                name=names.get(score.symbol),
                 research_status=status_value,
                 advice_eligible=advice_eligible,
                 recommendation=None if advice_eligible else "NO_BUY",
@@ -2761,9 +2776,7 @@ def submit_research(
         {
             **{column.name: getattr(run, column.name) for column in run.__table__.columns},
             "data_readiness_state": (
-                "WAITING_FOR_BENCHMARKS"
-                if run.status == "DATA_READINESS_WAITING"
-                else None
+                "WAITING_FOR_BENCHMARKS" if run.status == "DATA_READINESS_WAITING" else None
             ),
             "next_retry_at": (dict(run.manifest).get("data_readiness_wait") or {}).get(
                 "next_retry_at"

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -18,10 +18,36 @@ from ashare_ai.storage.models import (
     JobRun,
     ReportRow,
     ScoreRow,
+    SecurityMaster,
     SnapshotManifestRow,
     TradePlanRow,
     UserAccount,
 )
+
+
+def _master(*, symbol: str, name: str, available_at: datetime, source: str) -> SecurityMaster:
+    code, exchange = symbol.split(".", 1)
+    return SecurityMaster(
+        symbol=symbol,
+        trading_date=available_at.date(),
+        exchange=exchange,
+        board="MAIN",
+        short_name=name,
+        list_date=date(2010, 1, 1),
+        effective_from=date(2010, 1, 1),
+        effective_to=None,
+        is_st=False,
+        is_suspended=False,
+        source=source,
+        source_record_id=f"{source}-{symbol}",
+        available_at=available_at,
+        fetched_at=available_at,
+        payload_sha256=(code * 11)[:64].ljust(64, "0"),
+        schema_version="1",
+        adapter_version="fixture",
+        ingestion_run_id="fixture-run",
+        availability_basis="PUBLISHED",
+    )
 
 
 def _client(session: Session, user_id: str = "user-1") -> TestClient:
@@ -348,26 +374,62 @@ def test_report_symbols_include_data_limited_stock_as_no_buy() -> None:
         style_exposures={},
         evidence_hash="e" * 64,
     )
-    session.add_all([run, report, *scores, candidate])
+    session.add_all(
+        [
+            run,
+            report,
+            *scores,
+            candidate,
+            _master(
+                symbol="600000.SH",
+                name="浦发银行",
+                available_at=now - timedelta(minutes=1),
+                source="current",
+            ),
+            _master(
+                symbol="600000.SH",
+                name="未来名称",
+                available_at=now + timedelta(minutes=1),
+                source="future",
+            ),
+        ]
+    )
     session.commit()
     client = _client(session)
     try:
         response = client.get("/api/v1/reports/report-symbols/symbols")
         assert response.status_code == 200
         rows = {item["symbol"]: item for item in response.json()}
+        candidates = client.get(
+            f"/api/v1/candidates/{run.trading_date.isoformat()}", params={"run_id": run.run_id}
+        )
+        assert candidates.status_code == 200
+        assert candidates.json()[0]["name"] == "浦发银行"
         assert rows["600000.SH"]["advice_eligible"] is True
-        assert "综合评分" in rows["600000.SH"]["plain_language_summary"]
+        assert rows["600000.SH"]["name"] == "浦发银行"
+        assert "综合评分" not in rows["600000.SH"]["plain_language_summary"]
+        assert "仅用于模拟研究" in rows["600000.SH"]["plain_language_summary"]
         assert "基本面" in rows["600000.SH"]["component_summaries"]["fundamental"]
         assert rows["600001.SH"]["recommendation"] == "NO_BUY"
+        assert rows["600001.SH"]["name"] is None
         assert "最新财报期数据不完整" not in rows["600001.SH"]["plain_language_summary"]
         assert "缺少官方披露信息" in rows["600001.SH"]["plain_language_summary"]
         assert rows["600001.SH"]["exclusion_reasons"] == ["MISSING_OFFICIAL_DISCLOSURE"]
         other_client = _client(session, user_id="other-user")
+        assert (
+            other_client.get(
+                f"/api/v1/candidates/{run.trading_date.isoformat()}", params={"run_id": run.run_id}
+            ).json()
+            == []
+        )
         assert other_client.get("/api/v1/reports/report-symbols/symbols").status_code == 404
-        assert other_client.post(
-            "/api/v1/reports/report-symbols/trade-plans",
-            json={"symbols": ["600000.SH"]},
-        ).status_code == 404
+        assert (
+            other_client.post(
+                "/api/v1/reports/report-symbols/trade-plans",
+                json={"symbols": ["600000.SH"]},
+            ).status_code
+            == 404
+        )
     finally:
         app.dependency_overrides.clear()
         session.close()

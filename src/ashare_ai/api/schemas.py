@@ -533,6 +533,7 @@ class ScoreResponse(OrmResponse):
 
 class CandidateResponse(OrmResponse):
     symbol: str
+    name: str | None = None
     trading_date: date
     decision_at: datetime
     rank: int

@@ -430,6 +430,7 @@ export interface Score {
 
 export interface Candidate {
   symbol: string
+  name?: string | null
   rank: number
   total_score: number
   base_total_score?: number | null

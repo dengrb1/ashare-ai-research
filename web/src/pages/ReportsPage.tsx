@@ -221,7 +221,7 @@ export function ReportsPage() {
           ['最终分', score.total_score], ['基础分', score.base_total_score], ['基本面', score.fundamental_score], ['技术', score.technical_score], ['情绪', score.sentiment_score], ['质量', score.quality_confidence_score], ['分红加分', score.dividend_bonus], ['风险乘数', score.event_risk_multiplier], ['预测分位', selectedResearch?.prediction_percentile ?? selectedCandidate?.prediction_percentile ?? score.prediction_percentile], ['排名', selectedResearch?.rank ?? selectedCandidate?.rank ?? score.rank],
         ].map(([label, value]) => <div key={String(label)}><span>{label}</span><strong>{typeof value === 'number' ? formatNumber(value) : '—'}</strong></div>)}<div><span>公式版本</span><strong>{score.formula_version || String(lineage?.formula_version || '—')}</strong></div></div> : <Empty title="评分暂不可用" />}
 
-        {selectedResearch?.plain_language_summary && <div className="snapshot-callout"><span>◇</span><div><strong>给家人看的总结</strong><p>{selectedResearch.plain_language_summary}</p></div></div>}
+        {selectedResearch?.plain_language_summary && <div className="snapshot-callout"><span>◇</span><div><strong>省流版</strong><p>{selectedResearch.plain_language_summary}</p></div></div>}
 
         <div className="snapshot-callout"><span>◇</span><div><strong>确定性方案，AI 仅负责解释</strong><p>方案选择历史样本中风险调整后表现最优的合格参数；模型不可用时，买入或暂不买入、数量、限价、仓位和退出规则仍然有效。</p></div></div>
         {fused && <div className="warning-box"><strong>全局风控熔断，禁止生成交易方案</strong><p>{run?.reason_message || '本次仅保留正式观察报告。'}</p></div>}

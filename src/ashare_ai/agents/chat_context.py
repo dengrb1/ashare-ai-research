@@ -14,16 +14,19 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 
 from ashare_ai.core.config import Settings, get_settings
 from ashare_ai.core.hashing import stable_hash
 from ashare_ai.market.service import get_market_data_service
 from ashare_ai.portfolio.user_assets import UserAssetService
+from ashare_ai.reports.chinese_summary import symbol_summary
 from ashare_ai.search.news import NewsSearchService
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import (
+    CandidateRow,
     JobRun,
+    ReportRow,
     ScoreRow,
     SecurityMaster,
     SnapshotManifestRow,
@@ -215,10 +218,12 @@ class ChatContextService:
         requested = requested_decision_at.astimezone(UTC) if requested_decision_at else None
         symbols = [item["symbol"] for item in refs]
         asset_version = self._asset_version(user_id)
+        research_version = self._published_research_version(user_id)
         cache_key = stable_hash(
             {
                 "user_id": user_id,
                 "asset_updated_at": asset_version,
+                "published_research_at": research_version,
                 "symbols": refs,
                 "decision_at": (
                     requested.isoformat() if requested else _live_bucket(self.cache_seconds)
@@ -283,6 +288,22 @@ class ChatContextService:
             row = session.get(UserAssetState, user_id)
             return row.updated_at.astimezone(UTC).isoformat() if row and row.updated_at else None
 
+    def _published_research_version(self, user_id: str) -> str | None:
+        with self.session_factory() as session:
+            row = session.scalar(
+                select(ReportRow.created_at)
+                .join(JobRun, JobRun.run_id == ReportRow.run_id)
+                .where(
+                    JobRun.user_id == user_id,
+                    JobRun.status.in_(("SUCCEEDED", "FUSED")),
+                    JobRun.completed_at.is_not(None),
+                    ReportRow.report_type == "DAILY_RESEARCH",
+                )
+                .order_by(ReportRow.created_at.desc())
+                .limit(1)
+            )
+            return row.astimezone(UTC).isoformat() if row else None
+
     def _build_uncached(
         self,
         *,
@@ -307,8 +328,14 @@ class ChatContextService:
             "daily_bars": {},
             "news": {},
         }
+        latest_research, research_status, research_sources = self._latest_published_research(
+            user_id=user_id,
+            symbols=symbols,
+            decision_at=provisional,
+        )
+        statuses["latest_published_research"] = research_status
         news_items: dict[str, list[dict[str, Any]]] = {}
-        sources: list[dict[str, Any]] = []
+        sources: list[dict[str, Any]] = research_sources
         market_cache_hit = False
         news_cache_hit = False
         future_count = (1 if symbols and not historical else 0) + len(symbols)
@@ -360,9 +387,7 @@ class ChatContextService:
                     quote = quote_by_symbol.get(symbol)
                     if quote is None:
                         statuses["quotes"][symbol] = {
-                            "state": (
-                                "UNAVAILABLE" if quote_upstream_unavailable else "MISSING"
-                            ),
+                            "state": ("UNAVAILABLE" if quote_upstream_unavailable else "MISSING"),
                             "reason_code": (
                                 "QUOTE_UPSTREAM_UNAVAILABLE"
                                 if quote_upstream_unavailable
@@ -413,9 +438,7 @@ class ChatContextService:
                     status = payload.get("status", {}) if isinstance(payload, dict) else {}
                     bars[symbol] = list(raw_bars)[-30:] if isinstance(raw_bars, list) else []
                     source = (
-                        status.get("source", "market")
-                        if isinstance(status, dict)
-                        else "market"
+                        status.get("source", "market") if isinstance(status, dict) else "market"
                     )
                     available_at = (
                         status.get("available_at", status.get("collected_at"))
@@ -510,6 +533,7 @@ class ChatContextService:
             "quotes": quotes,
             "daily_bars": bars,
             "latest_formal_scores": scores,
+            "latest_published_research": latest_research,
             "news": news_items,
             "decision_at": decision_at.isoformat(),
             "historical": historical,
@@ -596,6 +620,273 @@ class ChatContextService:
                 score_status[symbol] = {"state": "AVAILABLE", "reason_code": "OK"}
         return scores, score_status, positions, position_status
 
+    def _latest_published_research(
+        self,
+        *,
+        user_id: str,
+        symbols: list[str],
+        decision_at: datetime,
+    ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+        """Read bounded published-report metadata without opening report HTML."""
+
+        with self.session_factory() as session:
+            if symbols:
+                rows: dict[str, Any] = {}
+                statuses: dict[str, Any] = {}
+                sources: list[dict[str, Any]] = []
+                for symbol in symbols:
+                    item = session.execute(
+                        select(ScoreRow, CandidateRow, JobRun, ReportRow)
+                        .join(JobRun, JobRun.run_id == ScoreRow.run_id)
+                        .join(ReportRow, ReportRow.run_id == JobRun.run_id)
+                        .outerjoin(
+                            CandidateRow,
+                            and_(
+                                CandidateRow.run_id == ScoreRow.run_id,
+                                CandidateRow.symbol == ScoreRow.symbol,
+                            ),
+                        )
+                        .where(
+                            ScoreRow.symbol == symbol,
+                            JobRun.user_id == user_id,
+                            JobRun.status.in_(("SUCCEEDED", "FUSED")),
+                            JobRun.decision_at <= decision_at,
+                            ScoreRow.decision_at <= decision_at,
+                            JobRun.completed_at.is_not(None),
+                            JobRun.completed_at <= decision_at,
+                            ReportRow.created_at <= decision_at,
+                            ReportRow.report_type == "DAILY_RESEARCH",
+                        )
+                        .order_by(
+                            JobRun.trading_date.desc(),
+                            JobRun.completed_at.desc(),
+                            ReportRow.created_at.desc(),
+                        )
+                        .limit(1)
+                    ).first()
+                    if item is None:
+                        statuses[symbol] = {
+                            "state": "MISSING",
+                            "reason_code": "PUBLISHED_RESEARCH_NOT_FOUND",
+                        }
+                        continue
+                    score, candidate, run, report = item
+                    entry = self._published_symbol_research_entry(score, candidate, run, report)
+                    rows[symbol] = entry
+                    statuses[symbol] = {
+                        "state": "AVAILABLE",
+                        "reason_code": "OK",
+                        "report_id": report.report_id,
+                    }
+                    sources.append(self._report_source(report, run, symbol))
+                return (
+                    rows,
+                    {
+                        "state": "AVAILABLE" if rows else "MISSING",
+                        "reason_code": "OK" if rows else "PUBLISHED_RESEARCH_NOT_FOUND",
+                        "symbols": statuses,
+                    },
+                    sources,
+                )
+
+            item = session.execute(
+                select(ReportRow, JobRun)
+                .join(JobRun, JobRun.run_id == ReportRow.run_id)
+                .where(
+                    JobRun.user_id == user_id,
+                    JobRun.status.in_(("SUCCEEDED", "FUSED")),
+                    JobRun.decision_at <= decision_at,
+                    JobRun.completed_at.is_not(None),
+                    JobRun.completed_at <= decision_at,
+                    ReportRow.created_at <= decision_at,
+                    ReportRow.report_type == "DAILY_RESEARCH",
+                )
+                .order_by(
+                    JobRun.trading_date.desc(),
+                    JobRun.completed_at.desc(),
+                    ReportRow.created_at.desc(),
+                )
+                .limit(1)
+            ).first()
+            if item is None:
+                return (
+                    {},
+                    {"state": "MISSING", "reason_code": "PUBLISHED_RESEARCH_NOT_FOUND"},
+                    [],
+                )
+            report, run = item
+            candidates = list(
+                session.scalars(
+                    select(CandidateRow)
+                    .where(CandidateRow.run_id == run.run_id)
+                    .order_by(CandidateRow.rank)
+                    .limit(3)
+                ).all()
+            )
+            names = self._security_names(
+                session, [row.symbol for row in candidates], run.decision_at
+            )
+            manifest = dict(run.manifest or {})
+            gate = manifest.get("data_quality_gate")
+            gate = gate if isinstance(gate, dict) else {}
+            risk = manifest.get("risk_outcome")
+            risk = risk if isinstance(risk, dict) else {}
+            return (
+                {
+                    "market_summary": {
+                        "trading_date": run.trading_date.isoformat(),
+                        "run_status": run.status,
+                        "formal_eligible_count": len(gate.get("formal_eligible_symbols", [])),
+                        "excluded_count": len(
+                            gate.get("excluded_symbols", {})
+                            if isinstance(gate.get("excluded_symbols"), dict)
+                            else {}
+                        ),
+                        "risk": {
+                            "reason_code": risk.get("reason_code"),
+                            "reason_message": risk.get("reason_message"),
+                        },
+                        "report": self._report_reference(report, run),
+                    },
+                    "candidate_overview": [
+                        {
+                            "symbol": row.symbol,
+                            "name": names.get(row.symbol),
+                            "rank": row.rank,
+                            "industry_code": row.industry_code,
+                            "prediction_percentile": row.prediction_percentile,
+                        }
+                        for row in candidates
+                    ],
+                },
+                {"state": "AVAILABLE", "reason_code": "OK", "report_id": report.report_id},
+                [self._report_source(report, run)],
+            )
+
+    @staticmethod
+    def _security_names(session: Any, symbols: list[str], decision_at: datetime) -> dict[str, str]:
+        if not symbols:
+            return {}
+        rows = session.scalars(
+            select(SecurityMaster)
+            .where(
+                SecurityMaster.symbol.in_(symbols),
+                SecurityMaster.available_at <= decision_at,
+                SecurityMaster.effective_from <= decision_at.date(),
+                or_(
+                    SecurityMaster.effective_to.is_(None),
+                    SecurityMaster.effective_to >= decision_at.date(),
+                ),
+            )
+            .order_by(
+                SecurityMaster.symbol,
+                SecurityMaster.available_at.desc(),
+                SecurityMaster.fetched_at.desc(),
+            )
+        ).all()
+        names: dict[str, str] = {}
+        for row in rows:
+            names.setdefault(row.symbol, row.short_name)
+        return names
+
+    @staticmethod
+    def _report_reference(report: ReportRow, run: JobRun) -> dict[str, str]:
+        return {
+            "report_id": report.report_id,
+            "trading_date": run.trading_date.isoformat(),
+            "decision_at": run.decision_at.isoformat(),
+            "uri": f"/api/v1/reports/{report.report_id}/symbols",
+        }
+
+    def _report_source(
+        self, report: ReportRow, run: JobRun, symbol: str | None = None
+    ) -> dict[str, Any]:
+        source = {
+            "source": "published_research",
+            "title": f"{run.trading_date.isoformat()} 已发布研究报告",
+            "uri": f"/api/v1/reports/{report.report_id}/symbols",
+            "available_at": report.created_at.isoformat(),
+        }
+        if symbol is not None:
+            source["symbol"] = symbol
+        return source
+
+    def _published_symbol_research_entry(
+        self,
+        score: ScoreRow,
+        candidate: CandidateRow | None,
+        run: JobRun,
+        report: ReportRow,
+    ) -> dict[str, Any]:
+        manifest = dict(run.manifest or {})
+        gate = manifest.get("data_quality_gate")
+        gate = gate if isinstance(gate, dict) else {}
+        declared = "formal_eligible_symbols" in gate
+        eligible = {str(item) for item in gate.get("formal_eligible_symbols", [])}
+        raw_excluded = gate.get("excluded_symbols")
+        excluded = raw_excluded if isinstance(raw_excluded, dict) else {}
+        reasons = [str(item) for item in excluded.get(score.symbol, [])]
+        global_fused = run.status == "FUSED"
+        if global_fused:
+            risk = manifest.get("risk_outcome")
+            risk = risk if isinstance(risk, dict) else {}
+            reasons = list(
+                dict.fromkeys([*reasons, str(risk.get("reason_code") or "GLOBAL_RISK_FUSE_ACTIVE")])
+            )
+        elif score.event_risk_multiplier <= 0:
+            reasons = list(dict.fromkeys([*reasons, "CRITICAL_EVENT_RISK"]))
+        advice_eligible = (
+            not global_fused
+            and (score.symbol in eligible if declared else candidate is not None)
+            and score.event_risk_multiplier > 0
+            and candidate is not None
+        )
+        dimensions = {
+            "fundamental": score.fundamental_score,
+            "technical": score.technical_score,
+            "sentiment": score.sentiment_score,
+        }
+        return {
+            "ranking": {
+                "rank": candidate.rank if candidate else None,
+                "prediction_percentile": candidate.prediction_percentile if candidate else None,
+            },
+            "gate": {
+                "research_status": (
+                    "FORMAL"
+                    if advice_eligible
+                    else "RISK_BLOCKED"
+                    if global_fused or score.event_risk_multiplier <= 0
+                    else "FORMAL_WITH_LIMITATIONS"
+                ),
+                "advice_eligible": advice_eligible,
+                "exclusion_reasons": reasons,
+            },
+            "risk": {
+                "event_risk_multiplier": score.event_risk_multiplier,
+                "conclusion": (
+                    "GLOBAL_FUSED"
+                    if global_fused
+                    else "CRITICAL_EVENT_RISK"
+                    if score.event_risk_multiplier <= 0
+                    else "NORMAL"
+                ),
+            },
+            "brief": {
+                "summary": symbol_summary(
+                    total_score=score.total_score,
+                    fundamental_score=score.fundamental_score,
+                    technical_score=score.technical_score,
+                    sentiment_score=score.sentiment_score,
+                    advice_eligible=advice_eligible,
+                    reasons=reasons,
+                ),
+                "strongest_dimension": max(dimensions, key=dimensions.__getitem__),
+                "weakest_dimension": min(dimensions, key=dimensions.__getitem__),
+            },
+            "report": self._report_reference(report, run),
+        }
+
     def _historical_daily_bars(
         self,
         *,
@@ -650,9 +941,7 @@ class ChatContextService:
         try:
             from ashare_ai.orchestration.builtin_backtest import read_backtest_bundle
 
-            bundle = read_backtest_bundle(
-                {snapshot_id: snapshot_uri}, {snapshot_id: expected_hash}
-            )
+            bundle = read_backtest_bundle({snapshot_id: snapshot_uri}, {snapshot_id: expected_hash})
         except Exception:
             return {
                 "bars": [],
@@ -705,6 +994,10 @@ class ChatContextService:
             "quotes": {},
             "daily_bars": {},
             "news": {},
+            "latest_published_research": {
+                "state": "UNAVAILABLE",
+                "reason_code": "CONTEXT_SINGLEFLIGHT_TIMEOUT",
+            },
         }
         return ChatContextResult(
             context={
@@ -713,6 +1006,7 @@ class ChatContextService:
                 "quotes": {},
                 "daily_bars": {},
                 "latest_formal_scores": {},
+                "latest_published_research": {},
                 "news": {},
                 "decision_at": decision_at.isoformat(),
                 "historical": requested_decision_at is not None,

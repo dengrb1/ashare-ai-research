@@ -86,7 +86,7 @@
       <div><span>风险乘数</span><strong>{{ "%.2f"|format(row.score.event_risk_multiplier) }}</strong></div>
       <div><span>数据截止</span><strong>{{ row.score.decision_at }}</strong></div>
     </div>
-    <p class="info"><strong>给家人看的总结：</strong>{{ row.plain_language_summary }}</p>
+    <p class="info"><strong>省流版：</strong>{{ row.plain_language_summary }}</p>
     <div class="component-grid">
       {% for key, label in [('fundamental', '基本面'), ('technical', '技术面'), ('sentiment', '情绪面')] %}
       {% set component = row.components.get(key, {}) %}

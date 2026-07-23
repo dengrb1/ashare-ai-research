@@ -141,6 +141,15 @@ describe('chat safety and observability', () => {
     expect(screen.getByText(/候选优先来自持仓和自选/)).toBeInTheDocument()
   })
 
+  it('prefills a quick question without sending it', async () => {
+    render(<AIChatPage />)
+    const composer = await screen.findByPlaceholderText(/输入 @ 后继续输入股票名称/)
+    await userEvent.click(screen.getByRole('button', { name: '生成个股省流版' }))
+
+    expect(composer).toHaveValue('请生成 @股票名称或代码 的省流版，并说明是否适合继续查看模拟方案。')
+    expect(streamAIChat).not.toHaveBeenCalled()
+  })
+
   it('shows a high-risk unread badge and marks all notifications read', async () => {
     render(<NotificationBell />)
     const bell = await screen.findByRole('button', { name: '通知中心，1 条未读' })

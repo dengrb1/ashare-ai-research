@@ -12,6 +12,13 @@ type StageState = { status: string; cacheHit?: boolean }
 type MentionOption = { symbol: string; name: string }
 type MentionMatch = { query: string; start: number; end: number }
 
+const QUICK_QUESTIONS = [
+  ['解读最新系统研究报告', '请解读最新系统研究报告，概括市场状态、候选概览和风险结论。'],
+  ['生成个股省流版', '请生成 @股票名称或代码 的省流版，并说明是否适合继续查看模拟方案。'],
+  ['分析持仓风险', '请结合我的持仓、最新系统研究和风险结论，分析当前持仓风险。'],
+  ['比较候选股票', '请比较 @股票A 和 @股票B 的最新系统研究结论、门禁和主要风险。'],
+] as const
+
 function splitGraphemes(value: string) {
   if (typeof Intl.Segmenter === 'function') {
     return Array.from(new Intl.Segmenter('zh-CN', { granularity: 'grapheme' }).segment(value), (item) => item.segment)
@@ -171,6 +178,14 @@ export function AIChatPage() {
     })
   }
 
+  function useQuickQuestion(value: string) {
+    setDraft(value); setMentionCaret(value.length); setMentionMenuOpen(false)
+    window.requestAnimationFrame(() => {
+      composer.current?.focus()
+      composer.current?.setSelectionRange(value.length, value.length)
+    })
+  }
+
   async function createThread() {
     const created = await api.createAIChatThread()
     await loadThreads(created.thread_id); setThread(created); setMessages([]); setAttachments([])
@@ -265,7 +280,7 @@ export function AIChatPage() {
       <div className="chat-messages">{messages.map((item) => <article key={item.message_id} className={`${item.role} ${item.status?.toLowerCase() || ''}`}><header><strong>{item.role === 'user' ? '你' : 'AI 研究助手'}</strong><small>{item.cache_hit ? '缓存命中 · ' : ''}{item.streaming_mode === 'DEGRADED' ? '一次性回复 · ' : ''}{item.status && !['COMPLETED'].includes(item.status) ? `${item.status === 'CANCELLED' ? '未完成' : '回复失败'} · ` : ''}{formatTime(item.created_at)}</small></header><div className="markdown-content"><SafeMarkdown content={item.content} /></div>{Boolean(item.attachment_ids?.length) && <div className="message-images">{item.attachment_ids?.map((id) => <AttachmentImage id={id} key={id} />)}</div>}{item.sources.length > 0 && <details><summary>查看 {item.sources.length} 个数据来源</summary><ul>{item.sources.map((source, index) => { const href = typeof source.uri === 'string' ? safeHref(source.uri) : null; return <li key={index}>{href ? <a href={href} target="_blank" rel="noreferrer noopener">{String(source.title || source.uri)}</a> : String(source.symbol || source.source || '系统数据')}</li> })}</ul></details>}</article>)}{liveReply && <article className={`assistant streaming ${liveReply.status.toLowerCase()}`}><header><strong>AI 研究助手</strong><small>{liveReply.status === 'PENDING' ? 'AI 正在回复…' : '正在生成…'}</small></header><div className="markdown-content"><SafeMarkdown content={liveReply.content} /></div><i className="stream-cursor" /></article>}<div ref={messagesEnd} /></div>
       {attachments.length > 0 && <div className="pending-images">{attachments.map((item) => <div key={item.attachment_id}><AttachmentImage id={item.attachment_id} /><button aria-label="移除图片" onClick={() => setAttachments((current) => current.filter((entry) => entry.attachment_id !== item.attachment_id))}>×</button><small>{formatTime(item.expires_at)} 销毁</small></div>)}</div>}
       <div className="image-retention-warning">图片将在上传 7 天后自动销毁，请自行保存原图。到期后历史对话仅保留占位和已有 AI 分析。</div>
-      <div className="chat-composer"><div className="mention-composer"><textarea ref={composer} rows={4} value={draft} placeholder="例如：输入 @ 后继续输入股票名称，结合我的持仓、最新研究和联网信息分析后续风险" onChange={(event) => { setDraft(event.target.value); setMentionCaret(event.target.selectionStart); setMentionMenuOpen(true) }} onSelect={(event) => setMentionCaret(event.currentTarget.selectionStart)} onKeyDown={(event) => {
+      <div className="chat-composer"><div className="quick-questions" aria-label="快捷问题">{QUICK_QUESTIONS.map(([label, value]) => <button className="secondary" type="button" key={label} onClick={() => useQuickQuestion(value)}>{label}</button>)}</div><div className="mention-composer"><textarea ref={composer} rows={4} value={draft} placeholder="例如：输入 @ 后继续输入股票名称，结合我的持仓、最新研究和联网信息分析后续风险" onChange={(event) => { setDraft(event.target.value); setMentionCaret(event.target.selectionStart); setMentionMenuOpen(true) }} onSelect={(event) => setMentionCaret(event.currentTarget.selectionStart)} onKeyDown={(event) => {
         if (matchedMentionOptions.length) {
           if (event.key === 'ArrowDown') { event.preventDefault(); setActiveMentionIndex((index) => (index + 1) % matchedMentionOptions.length); return }
           if (event.key === 'ArrowUp') { event.preventDefault(); setActiveMentionIndex((index) => (index - 1 + matchedMentionOptions.length) % matchedMentionOptions.length); return }

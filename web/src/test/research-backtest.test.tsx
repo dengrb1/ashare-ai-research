@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RefreshProvider } from '../context/RefreshContext'
 import { MarketProvider } from '../context/MarketContext'
 import { BacktestPage } from '../pages/BacktestPage'
+import { CandidatesPage } from '../pages/CandidatesPage'
 import { PortfolioPage } from '../pages/PortfolioPage'
 import { ReportsPage } from '../pages/ReportsPage'
 import { ResearchPage } from '../pages/ResearchPage'
@@ -362,5 +363,39 @@ describe('backtest task recovery and retry', () => {
     expect(mockFetch.mock.calls.some(([url]) => String(url).endsWith('/retry'))).toBe(false)
     await userEvent.click(screen.getByRole('button', { name: '重新运行' }))
     await waitFor(() => expect(mockFetch.mock.calls.some(([url]) => String(url).endsWith('/retry'))).toBe(true))
+  })
+})
+
+describe('candidate trade-plan actions', () => {
+  it('uses report gates before submitting a single-symbol paper trade plan', async () => {
+    const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/research/runs?')) return jsonResponse([{ run_id: 'run-1', trading_date: '2026-07-17', status: 'SUCCEEDED' }])
+      if (url.includes('/candidates/2026-07-17')) return jsonResponse([
+        { symbol: '600000.SH', name: '浦发银行', rank: 1, total_score: 82, prediction_percentile: .91, event_risk_multiplier: 1 },
+        { symbol: '600001.SH', name: '受限股票', rank: 2, total_score: 70, prediction_percentile: .7, event_risk_multiplier: 1 },
+      ])
+      if (url.includes('/reports/2026-07-17')) return jsonResponse({ report_id: 'report-1', run_id: 'run-1', trading_date: '2026-07-17', report_type: 'DAILY_RESEARCH' })
+      if (url.endsWith('/reports/report-1/symbols')) return jsonResponse([
+        { symbol: '600000.SH', name: '浦发银行', research_status: 'FORMAL', advice_eligible: true, exclusion_reasons: [], data_quality: {}, score: { symbol: '600000.SH', total_score: 82 } },
+        { symbol: '600001.SH', name: '受限股票', research_status: 'FORMAL_WITH_LIMITATIONS', advice_eligible: false, recommendation: 'NO_BUY', exclusion_reasons: ['MISSING_OFFICIAL_DISCLOSURE'], data_quality: {}, score: { symbol: '600001.SH', total_score: 70 } },
+      ])
+      if (url.endsWith('/reports/report-1/trade-plans') && init?.method === 'POST') return jsonResponse({ plan_id: 'plan-1', user_id: 'user-1', report_id: 'report-1', run_id: 'run-1', trading_date: '2026-07-17', decision_at: '2026-07-17T18:00:00+08:00', available_at: '2026-07-17T18:01:00+08:00', status: 'PENDING', objective: 'RISK_ADJUSTED_RETURN', symbols: ['600000.SH'], snapshot_ids: [], optimizer_version: 'v1', config_version: 'v1', input_hash: 'a'.repeat(64), created_at: '2026-07-17T18:01:00+08:00' }, 202)
+      if (url.endsWith('/reports/report-1/trade-plans')) return jsonResponse([])
+      throw new Error(`unexpected request ${url} ${init?.method}`)
+    })
+    vi.stubGlobal('fetch', mockFetch)
+    render(wrapper(<CandidatesPage />))
+
+    expect(await screen.findByText('浦发银行')).toBeInTheDocument()
+    expect(screen.getByText(/600000\.SH · 2026-07-17/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '生成买入建议' })).toBeEnabled()
+    expect(screen.getAllByRole('button', { name: '生成买入建议' })).toHaveLength(1)
+    await userEvent.click(screen.getByRole('button', { name: '生成买入建议' }))
+    await waitFor(() => expect(mockFetch.mock.calls.some(([url, init]) => String(url).endsWith('/reports/report-1/trade-plans') && init?.method === 'POST')).toBe(true))
+    const call = mockFetch.mock.calls.find(([url, init]) => String(url).endsWith('/reports/report-1/trade-plans') && init?.method === 'POST')
+    expect(JSON.parse(String(call?.[1]?.body))).toMatchObject({ symbols: ['600000.SH'], objective: 'RISK_ADJUSTED_RETURN' })
+    expect(new Headers(call?.[1]?.headers).get('Idempotency-Key')).toEqual(expect.any(String))
+    expect(await screen.findByText('方案生成中')).toBeInTheDocument()
   })
 })

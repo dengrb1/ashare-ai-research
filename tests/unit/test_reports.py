@@ -74,7 +74,7 @@ def test_daily_report_prefers_chinese_plain_language_summary(tmp_path) -> None:
                     "advice_eligible": True,
                     "recommendation": None,
                     "research_status": "FORMAL",
-                    "plain_language_summary": "综合评分 70.00 分，数据门禁已通过。",
+                    "plain_language_summary": "基本面相对更有支撑，数据门禁已通过。",
                     "exclusion_reasons": [],
                     "score": {
                         "total_score": 70,
@@ -121,6 +121,7 @@ def test_daily_report_prefers_chinese_plain_language_summary(tmp_path) -> None:
         },
     )
     content = store.get(report.object_uri).decode("utf-8")
-    assert "给家人看的总结" in content
-    assert "综合评分 70.00 分" in content
+    assert "省流版" in content
+    assert "给家人看的总结" not in content
+    assert "综合评分 70.00 分" not in content
     assert "english factor should not be rendered" not in content

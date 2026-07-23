@@ -562,6 +562,9 @@ td small { font-size: 11px; }
 .chat-messages article header { display:flex; justify-content:space-between; gap:14px; }
 .chat-messages article p { white-space:pre-wrap; line-height:1.7; margin:8px 0 0; }
 .chat-composer textarea { width:100%; resize:vertical; }
+.quick-questions { display:flex; flex-wrap:wrap; gap:7px; margin:0 0 10px; }
+.quick-questions .secondary { min-height:32px; }
+.candidate-plan-link { display:inline-flex; align-items:center; text-decoration:none; white-space:nowrap; }
 .mention-composer { position: relative; }
 .mention-menu { position: absolute; z-index: 12; right: 0; bottom: calc(100% + 6px); left: 0; display: grid; max-height: 260px; overflow: auto; background: var(--surface); border: 1px solid var(--accent-line); border-radius: 8px; box-shadow: 0 16px 34px rgba(0, 0, 0, .32); }
 .mention-menu button { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 48px; padding: 8px 11px; color: var(--text); text-align: left; background: transparent; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; }

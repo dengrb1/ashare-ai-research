@@ -161,7 +161,7 @@ export const api = {
   reportContent: (reportId: string) => request<{ content?: string; body?: string }>(`/reports/${reportId}/content`),
   reportSymbols: (reportId: string) => request<ReportSymbol[]>(`/reports/${reportId}/symbols`),
   reportTradePlans: (reportId: string) => request<TradePlan[]>(`/reports/${reportId}/trade-plans`),
-  submitTradePlan: (reportId: string, payload: { symbols: string[]; budget_override?: number; objective?: 'RISK_ADJUSTED_RETURN' }) => request<TradePlan>(`/reports/${reportId}/trade-plans`, { method: 'POST', body: JSON.stringify(payload) }),
+  submitTradePlan: (reportId: string, payload: { symbols: string[]; budget_override?: number; objective?: 'RISK_ADJUSTED_RETURN' }, idempotencyKey = crypto.randomUUID()) => request<TradePlan>(`/reports/${reportId}/trade-plans`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify(payload) }),
   tradePlan: (planId: string) => request<TradePlan>(`/trade-plans/${planId}`),
 
   submitResearch: (payload: string | ResearchSubmission) => request<Run>('/research/runs', { method: 'POST', body: JSON.stringify(typeof payload === 'string' ? { trading_date: payload } : payload) }),
