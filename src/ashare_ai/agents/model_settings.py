@@ -88,6 +88,8 @@ class ModelProbeResult:
     message: str
     model: str
     checked_at: datetime
+    structured_output_supported: bool = True
+    streaming_supported: bool = False
 
 
 class ModelConfigurationService:
@@ -233,6 +235,8 @@ class ModelConfigurationService:
             pointer.last_checked_at = probe.checked_at
             pointer.last_check_status = "REACHABLE" if probe.reachable else "FAILED"
             pointer.last_check_message = probe.message
+            pointer.structured_output_supported = probe.structured_output_supported
+            pointer.streaming_supported = probe.streaming_supported
         session.flush()
         return row
 
@@ -270,11 +274,24 @@ class ModelConfigurationService:
                 raise ModelSettingsError("model probe returned an unexpected result")
         except (OpenAICompatibleError, httpx.HTTPError) as exc:
             raise ModelSettingsError(_safe_error(exc)) from exc
+        streaming_supported = False
+        try:
+            streaming_supported = await client.probe_stream()
+        except (OpenAICompatibleError, httpx.HTTPError):
+            # A compatible one-shot Responses gateway remains usable for chat;
+            # the persisted capability makes the eventual degradation visible.
+            streaming_supported = False
         return ModelProbeResult(
             reachable=True,
-            message="Responses API structured-output probe succeeded",
+            message=(
+                "Responses API structured and streaming probes succeeded"
+                if streaming_supported
+                else "Responses API structured probe succeeded; streaming will degrade"
+            ),
             model=model,
             checked_at=checked_at,
+            structured_output_supported=True,
+            streaming_supported=streaming_supported,
         )
 
     async def list_models(self, draft: ModelSettingsDraft, session: Session) -> list[str]:
@@ -320,6 +337,10 @@ class ModelConfigurationService:
             "enabled": bool(runtime and runtime.enabled),
             "message": message,
             "checked_at": pointer.last_checked_at if pointer else None,
+            "structured_output_supported": bool(
+                pointer and pointer.structured_output_supported
+            ),
+            "streaming_supported": bool(pointer and pointer.streaming_supported),
         }
 
     def _runtime_from_row(self, row: ModelConfigurationVersion) -> ModelRuntimeConfiguration:

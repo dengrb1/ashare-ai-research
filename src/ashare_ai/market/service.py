@@ -5,6 +5,7 @@ import re
 import secrets
 import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import suppress
@@ -30,6 +31,7 @@ PERIODS = {
     "daily": "daily",
 }
 MAX_PREFETCH_SYMBOLS = 50
+_PROVIDER_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="market-provider")
 
 
 class MarketProvider(Protocol):
@@ -165,6 +167,12 @@ def _append_adjusted_daily_quote(
     merged = {str(item["timestamp"]): dict(item) for item in hfq_bars}
     merged[str(adjusted["timestamp"])] = adjusted
     return sorted(merged.values(), key=lambda item: str(item["timestamp"]))[-limit:]
+
+
+def _mark_kline_cache_hit(value: dict[str, Any]) -> dict[str, Any]:
+    raw_status = value.get("status")
+    status: dict[str, Any] = dict(raw_status) if isinstance(raw_status, dict) else {}
+    return {**value, "status": {**status, "cache_hit": True}}
 
 
 class AKShareMarketProvider:
@@ -585,9 +593,16 @@ class MarketDataService:
         self.fallback = self.fallbacks[0] if self.fallbacks else None
         self.clock = clock or (lambda: datetime.now(UTC))
         self._redis_override = redis_client
-        self._cache: dict[str, dict[str, Any]] = {}
+        self._cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._cache_guard = threading.Lock()
         self._locks: dict[str, threading.Lock] = {}
         self._guard = threading.Lock()
+        self._provider_slots = threading.BoundedSemaphore(
+            max(
+                self.settings.market_provider_max_workers,
+                self.settings.market_provider_max_queue,
+            )
+        )
 
     def _lock(self, key: str) -> threading.Lock:
         with self._guard:
@@ -606,9 +621,11 @@ class MarketDataService:
             return None
 
     def _get(self, key: str, now: datetime | None = None) -> dict[str, Any] | None:
-        local = self._cache.get(key)
-        if local is not None and (now is None or self._fresh(local, now)):
-            return local
+        with self._cache_guard:
+            local = self._cache.get(key)
+            if local is not None and (now is None or self._fresh(local, now)):
+                self._cache.move_to_end(key)
+                return local
         client = self._redis()
         if client is None:
             return local
@@ -617,7 +634,7 @@ class MarketDataService:
             if payload:
                 value = cast(dict[str, Any], json.loads(payload))
                 if local is None or value.get("cached_at", "") >= local.get("cached_at", ""):
-                    self._cache[key] = value
+                    self._cache_set(key, value)
                     return value
         except Exception:
             pass
@@ -631,7 +648,7 @@ class MarketDataService:
             payload = client.get(f"ashare:market:{key}")
             if payload:
                 value = cast(dict[str, Any], json.loads(payload))
-                self._cache[key] = value
+                self._cache_set(key, value)
                 return value
         except Exception:
             pass
@@ -667,7 +684,7 @@ class MarketDataService:
             client.eval(script, 1, f"ashare:market:refresh:{key}", token)
 
     def _set(self, key: str, value: dict[str, Any]) -> None:
-        self._cache[key] = value
+        self._cache_set(key, value)
         client = self._redis()
         if client is not None:
             with suppress(Exception):
@@ -677,16 +694,34 @@ class MarketDataService:
                     json.dumps(value, ensure_ascii=False, separators=(",", ":")),
                 )
 
+    def _cache_set(self, key: str, value: dict[str, Any]) -> None:
+        with self._cache_guard:
+            self._cache[key] = value
+            self._cache.move_to_end(key)
+            while len(self._cache) > self.settings.market_cache_max_entries:
+                self._cache.popitem(last=False)
+
     def _call(self, function: Any, *args: Any) -> Any:
-        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="market-provider")
-        future = pool.submit(function, *args)
+        """Use a shared bounded pool and retain timed-out slots until completion.
+
+        Cancelling a Python thread cannot stop an already running provider call. A
+        semaphore therefore stays acquired until its future has actually finished,
+        bounding both concurrent calls and any residual work after a timeout.
+        """
+
+        if not self._provider_slots.acquire(blocking=False):
+            raise TimeoutError("market provider queue is saturated")
+        try:
+            future = _PROVIDER_EXECUTOR.submit(function, *args)
+        except Exception:
+            self._provider_slots.release()
+            raise
+        future.add_done_callback(lambda _: self._provider_slots.release())
         try:
             return future.result(timeout=self.settings.market_timeout_seconds)
         except FutureTimeoutError as exc:
             future.cancel()
             raise TimeoutError("market provider timeout") from exc
-        finally:
-            pool.shutdown(wait=False, cancel_futures=True)
 
     def _status(
         self,
@@ -725,9 +760,17 @@ class MarketDataService:
         # therefore coalesce disjoint page/watchlist/holding requests into one upstream call.
         key = "quotes:all"
 
-        def selected(record: dict[str, Any]) -> list[dict[str, Any]]:
+        def selected(
+            record: dict[str, Any], *, cache_hit: bool = False
+        ) -> list[dict[str, Any]]:
             requested = set(normalized)
-            return [item for item in record["items"] if item["symbol"] in requested]
+            rows: list[dict[str, Any]] = []
+            for item in record["items"]:
+                if item["symbol"] not in requested:
+                    continue
+                status = item.get("status") if isinstance(item.get("status"), dict) else {}
+                rows.append({**item, "status": {**status, "cache_hit": cache_hit}})
+            return rows
 
         now = self.clock()
         cached = self._get(key, now)
@@ -737,7 +780,7 @@ class MarketDataService:
             and self._fresh(cached, now)
             and len(selected(cached)) == len(normalized)
         ):
-            return selected(cached)
+            return selected(cached, cache_hit=True)
         with self._lock(key):
             now = self.clock()
             cached = self._get(key, now)
@@ -747,7 +790,7 @@ class MarketDataService:
                 and self._fresh(cached, now)
                 and len(selected(cached)) == len(normalized)
             ):
-                return selected(cached)
+                return selected(cached, cache_hit=True)
             redis_client, refresh_token, claimed = self._claim_refresh(key)
             if not claimed:
                 deadline = time.monotonic() + self.settings.market_timeout_seconds
@@ -758,7 +801,7 @@ class MarketDataService:
                         and self._fresh(shared, self.clock())
                         and len(selected(shared)) == len(normalized)
                     ):
-                        return selected(shared)
+                        return selected(shared, cache_hit=True)
                     time.sleep(0.05)
             errors: list[str] = []
             try:
@@ -827,7 +870,7 @@ class MarketDataService:
                     "items": [merged[symbol] for symbol in sorted(merged)],
                 }
                 self._set(key, record)
-                return selected(record)
+                return selected(record, cache_hit=False)
             finally:
                 if claimed:
                     self._release_refresh(redis_client, key, refresh_token)
@@ -850,19 +893,19 @@ class MarketDataService:
         now = self.clock()
         cached = self._get(key, now)
         if not force_refresh and cached is not None and self._fresh(cached, now):
-            return cast(dict[str, Any], cached["value"])
+            return _mark_kline_cache_hit(cast(dict[str, Any], cached["value"]))
         with self._lock(key):
             now = self.clock()
             cached = self._get(key, now)
             if not force_refresh and cached is not None and self._fresh(cached, now):
-                return cast(dict[str, Any], cached["value"])
+                return _mark_kline_cache_hit(cast(dict[str, Any], cached["value"]))
             redis_client, refresh_token, claimed = self._claim_refresh(key)
             if not claimed:
                 deadline = time.monotonic() + self.settings.market_timeout_seconds
                 while time.monotonic() < deadline:
                     shared = self._get_shared(key)
                     if shared is not None and self._fresh(shared, self.clock()):
-                        return cast(dict[str, Any], shared["value"])
+                        return _mark_kline_cache_hit(cast(dict[str, Any], shared["value"]))
                     time.sleep(0.05)
             errors: list[str] = []
             stale_primary_bars: list[dict[str, Any]] | None = None

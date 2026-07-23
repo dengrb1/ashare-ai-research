@@ -267,7 +267,7 @@ def test_akshare_bundle_can_freeze_latest_completed_session_before_next_open() -
     )
 
     assert bundle.trading_date == trading_date
-    assert bundle.schema_version == "canonical-daily-bundle-akshare-v2"
+    assert bundle.schema_version == "canonical-daily-bundle-akshare-v3"
     assert min(item.fetched_at for item in bundle.securities) == datetime(
         2026, 7, 15, 8, 30, tzinfo=SHANGHAI
     )

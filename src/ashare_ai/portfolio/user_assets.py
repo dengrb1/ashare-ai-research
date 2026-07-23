@@ -50,6 +50,8 @@ class UserAssetService:
                 "total_assets": None,
                 "exit_monitor_enabled": False,
                 "default_profit_trigger": None,
+                "stop_loss_monitor_enabled": True,
+                "buy_monitor_enabled": True,
                 "updated_at": None,
             }
         return {
@@ -62,6 +64,8 @@ class UserAssetService:
                 if row.default_profit_trigger is not None
                 else None
             ),
+            "stop_loss_monitor_enabled": row.stop_loss_monitor_enabled,
+            "buy_monitor_enabled": row.buy_monitor_enabled,
             "updated_at": row.updated_at,
         }
 
@@ -73,6 +77,10 @@ class UserAssetService:
         total_assets: float | None | _UnsetTotalAssets = UNSET_TOTAL_ASSETS,
         exit_monitor_enabled: bool = False,
         default_profit_trigger: float | None = None,
+        stop_loss_monitor_enabled: bool | None = None,
+        buy_monitor_enabled: bool | None = None,
+        *,
+        commit: bool = True,
     ) -> dict[str, Any]:
         now = datetime.now(UTC)
         row = self.session.get(UserAssetState, user_id)
@@ -91,6 +99,13 @@ class UserAssetService:
             if default_profit_trigger is not None
             else None
         )
+        if stop_loss_monitor_enabled is not None:
+            row.stop_loss_monitor_enabled = stop_loss_monitor_enabled
+        if buy_monitor_enabled is not None:
+            row.buy_monitor_enabled = buy_monitor_enabled
         row.updated_at = now
-        self.session.commit()
+        if commit:
+            self.session.commit()
+        else:
+            self.session.flush()
         return self.get(user_id)

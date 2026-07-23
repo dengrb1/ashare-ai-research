@@ -1,4 +1,4 @@
-import type { AIChatAttachment, AIChatMessage, AIChatThread, AssetState, AuditEvent, Candidate, DataEnvelope, ExitAdvice, FinancialSearchResult, FinancialSearchStatus, KlineBar, KlineQueryOptions, MarketPrefetchResponse, ModelSettings, ModelSettingsDraft, PersonalArchiveJob, Portfolio, Quote, Report, ReportSymbol, ResearchSettings, ResearchSubmission, Run, Score, Snapshot, TokenPair, TradePlan, User } from './types'
+import type { AIChatAttachment, AIChatMessage, AIChatThread, AssetState, AuditEvent, BuyEntryMonitor, Candidate, DataEnvelope, ExitAdvice, FinancialSearchResult, FinancialSearchStatus, KlineBar, KlineQueryOptions, MarketPrefetchResponse, ModelSettings, ModelSettingsDraft, Notification, NotificationSummary, PersonalArchiveJob, Portfolio, Quote, Report, ReportSymbol, ResearchSettings, ResearchSubmission, Run, Score, Snapshot, TokenPair, TradePlan, User } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api/v1').replace(/\/$/, '')
 
@@ -65,7 +65,15 @@ export const api = {
   me: () => request<User>('/auth/me'),
   assets: () => request<AssetState>('/assets'),
   saveAssets: (payload: AssetState) => request<AssetState>('/assets', { method: 'PUT', body: JSON.stringify(payload) }),
+  saveExitMonitorSettings: (payload: Pick<AssetState, 'exit_monitor_enabled' | 'default_profit_trigger' | 'stop_loss_monitor_enabled' | 'buy_monitor_enabled'>, idempotencyKey = crypto.randomUUID()) => request<AssetState>('/assets/exit-monitor', { method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify(payload) }),
   exitAdvice: (limit = 30) => request<ExitAdvice[]>(`/exit-advice${params({ limit })}`),
+  submitManualExitAdvice: (symbol: string, idempotencyKey = crypto.randomUUID()) => request<ExitAdvice>('/exit-advice/manual', { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ symbol }) }),
+  buyEntryMonitors: (limit = 50) => request<BuyEntryMonitor[]>(`/buy-entry-monitors${params({ limit })}`),
+  updateBuyEntryMonitor: (symbol: string, enabled: boolean, idempotencyKey = crypto.randomUUID()) => request<BuyEntryMonitor[]>('/buy-entry-monitors', { method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ symbol, enabled }) }),
+  notificationSummary: () => request<NotificationSummary>('/notifications/summary'),
+  notifications: (options: { cursor?: string; unreadOnly?: boolean; limit?: number } = {}) => request<{ items: Notification[]; next_cursor?: string | null }>(`/notifications${params({ cursor: options.cursor, unread_only: options.unreadOnly ? 'true' : undefined, limit: options.limit })}`),
+  markNotificationsRead: (notificationIds: string[], idempotencyKey = crypto.randomUUID()) => request<NotificationSummary>('/notifications/read', { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ notification_ids: notificationIds }) }),
+  markAllNotificationsRead: (idempotencyKey = crypto.randomUUID()) => request<NotificationSummary>('/notifications/read-all', { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey } }),
   aiModels: () => request<{ models: string[]; reasoning_efforts: string[]; web_search_available: boolean; cache_enabled: boolean }>('/ai/models'),
   aiChatThreads: () => request<AIChatThread[]>('/ai/chat/threads'),
   aiChatThreadIndex: (options: { cursor?: string; q?: string; archived?: boolean; limit?: number } = {}) => request<{ items: AIChatThread[]; next_cursor?: string | null }>(`/ai/chat/thread-index${params({ cursor: options.cursor, q: options.q, archived: options.archived ? 'true' : undefined, limit: options.limit })}`),

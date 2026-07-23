@@ -113,6 +113,8 @@ class ModelSettingsResponse(BaseModel):
     degraded: bool
     status_message: str
     checked_at: datetime | None = None
+    structured_output_supported: bool = False
+    streaming_supported: bool = False
 
 
 class ModelProbeResponse(BaseModel):
@@ -120,6 +122,8 @@ class ModelProbeResponse(BaseModel):
     message: str
     model: str
     checked_at: datetime
+    structured_output_supported: bool = True
+    streaming_supported: bool = False
 
 
 class ModelListResponse(BaseModel):
@@ -141,6 +145,11 @@ class PaperPosition(BaseModel):
     exit_trigger_price: Decimal | None = Field(
         default=None, gt=0, le=Decimal("10000000")
     )
+    stop_loss_price: Decimal | None = Field(
+        default=None, gt=0, le=Decimal("10000000")
+    )
+    stop_loss_mode: Literal["AUTO_ATR20", "MANUAL", "FALLBACK_8PCT"] = "AUTO_ATR20"
+    stop_loss_enabled: bool = True
 
     @field_validator("symbol", mode="before")
     @classmethod
@@ -152,6 +161,18 @@ class PaperPosition(BaseModel):
     def normalize_name(cls, value: object) -> object:
         return value.strip() if isinstance(value, str) else value
 
+    @model_validator(mode="after")
+    def normalize_stop_loss_mode(self) -> PaperPosition:
+        if self.stop_loss_price is not None and self.stop_loss_mode != "MANUAL":
+            self.stop_loss_mode = "MANUAL"
+        if self.stop_loss_price is not None:
+            stop_price = Decimal(self.stop_loss_price)
+            lower = Decimal(str(self.cost)) * Decimal("0.90")
+            upper = Decimal(str(self.cost)) * Decimal("0.95")
+            if not lower <= stop_price <= upper:
+                raise ValueError("manual stop loss must be 5% to 10% below cost")
+        return self
+
 
 class AssetStateRequest(BaseModel):
     watchlist: list[str] = Field(max_length=MAX_WATCHLIST_SYMBOLS)
@@ -161,6 +182,8 @@ class AssetStateRequest(BaseModel):
     default_profit_trigger: Decimal | None = Field(
         default=None, gt=0, le=Decimal("100000000000")
     )
+    stop_loss_monitor_enabled: bool | None = None
+    buy_monitor_enabled: bool | None = None
 
     @field_validator("watchlist", mode="before")
     @classmethod
@@ -196,6 +219,8 @@ class AssetStateResponse(BaseModel):
     total_assets: float | None = None
     exit_monitor_enabled: bool = False
     default_profit_trigger: Decimal | None = None
+    stop_loss_monitor_enabled: bool = True
+    buy_monitor_enabled: bool = True
     updated_at: datetime | None = None
 
 
@@ -206,6 +231,8 @@ class ExitMonitorSettingsRequest(BaseModel):
     default_profit_trigger: Decimal | None = Field(
         default=None, gt=0, le=Decimal("100000000000")
     )
+    stop_loss_monitor_enabled: bool | None = None
+    buy_monitor_enabled: bool | None = None
 
 
 class ExitAdviceResponse(_SanitizedErrorResponse):
@@ -219,7 +246,7 @@ class ExitAdviceResponse(_SanitizedErrorResponse):
     current_price: Decimal
     unrealized_profit: Decimal
     trigger_amount: Decimal
-    trigger_type: Literal["PRICE", "PROFIT_AMOUNT"] = "PROFIT_AMOUNT"
+    trigger_type: Literal["PRICE", "PROFIT_AMOUNT", "MANUAL", "STOP_LOSS"] = "PROFIT_AMOUNT"
     trigger_price: Decimal | None = None
     position_snapshot: dict[str, Any]
     research_context: dict[str, Any]
@@ -232,6 +259,72 @@ class ExitAdviceResponse(_SanitizedErrorResponse):
     cache_hit: bool
     created_at: datetime
     completed_at: datetime | None
+    status_url: str | None = None
+
+
+class ManualExitAdviceRequest(BaseModel):
+    symbol: str = Field(pattern=r"^\d{6}\.(SH|SZ|BJ)$")
+
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def normalize_symbol(cls, value: object) -> object:
+        return value.strip().upper() if isinstance(value, str) else value
+
+
+class NotificationResponse(OrmResponse):
+    notification_id: str
+    notification_type: str
+    severity: Literal["INFO", "WARNING", "HIGH", "CRITICAL"]
+    title: str
+    body: str
+    resource_type: str | None = None
+    resource_id: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    read_at: datetime | None = None
+    created_at: datetime
+    expires_at: datetime
+
+
+class NotificationListResponse(BaseModel):
+    items: list[NotificationResponse]
+    next_cursor: str | None = None
+
+
+class NotificationSummaryResponse(BaseModel):
+    unread_count: int
+    high_risk_unread_count: int
+    latest: list[NotificationResponse] = Field(default_factory=list)
+
+
+class NotificationMarkReadRequest(BaseModel):
+    notification_ids: list[str] = Field(min_length=1, max_length=100)
+
+
+class BuyEntryMonitorResponse(OrmResponse):
+    monitor_id: str
+    symbol: str
+    status: str
+    effective_date: date
+    expires_at: datetime
+    entry_low: Decimal
+    entry_high: Decimal
+    score_run_id: str | None = None
+    trade_plan_id: str | None = None
+    rationale: dict[str, Any] = Field(default_factory=dict)
+    triggered_at: datetime | None = None
+    error_code: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class BuyEntryMonitorRequest(BaseModel):
+    symbol: str = Field(pattern=r"^\d{6}\.(SH|SZ|BJ)$")
+    enabled: bool = True
+
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def normalize_symbol(cls, value: object) -> object:
+        return value.strip().upper() if isinstance(value, str) else value
 
 
 class AIChatThreadRequest(BaseModel):
@@ -293,7 +386,33 @@ class AIChatMessageResponse(OrmResponse):
     output_tokens: int
     error_code: str | None = None
     request_id: str | None = None
+    streaming_mode: Literal["STREAMING", "DEGRADED", "CACHED"] = "STREAMING"
+    data_status: dict[str, Any] = Field(default_factory=dict)
+    response_id: str | None = None
     created_at: datetime
+
+
+class AIChatMetricResponse(BaseModel):
+    metric: Literal["answer", "context", "market", "news", "model"]
+    requests: int
+    hits: int
+    hit_rate: float
+    average_latency_ms: float
+    average_singleflight_wait_ms: float
+    degraded_count: int
+
+
+class SecurityResolveCandidate(BaseModel):
+    symbol: str
+    name: str
+
+
+class SecurityResolveResponse(BaseModel):
+    query: str
+    state: Literal["RESOLVED", "UNRESOLVED", "AMBIGUOUS"]
+    candidates: list[SecurityResolveCandidate] = Field(default_factory=list)
+    reason_code: str
+    decision_at: datetime
 
 
 class AIChatMentionRef(BaseModel):

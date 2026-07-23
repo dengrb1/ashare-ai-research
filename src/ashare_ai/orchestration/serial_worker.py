@@ -11,6 +11,8 @@ from typing import Any
 from ashare_ai.agents.attachments import AttachmentService
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.time import SHANGHAI
+from ashare_ai.notifications.service import NotificationService
+from ashare_ai.orchestration.personal_archive_jobs import cleanup_expired_archives
 from ashare_ai.orchestration.redis_queue import RedisLeasedQueue
 from ashare_ai.orchestration.runner import seconds_until_next_tick
 from ashare_ai.storage.database import SessionLocal
@@ -26,7 +28,6 @@ class QueueSpec:
 
 
 QUEUE_SPECS = (
-    QueueSpec("exit-review", "ashare:exit-advice:pending", "ashare:exit-advice:processing"),
     QueueSpec(
         "personal-archive",
         "ashare:personal-archive:pending",
@@ -76,13 +77,17 @@ def run_loop(*, max_iterations: int | None = None) -> None:
         if now_monotonic >= next_attachment_cleanup:
             with SessionLocal() as session:
                 deleted = AttachmentService(session).cleanup_expired()
-            from ashare_ai.orchestration.personal_archive_jobs import cleanup_expired_archives
-
             expired_archives = cleanup_expired_archives()
+            with SessionLocal() as session:
+                expired_notifications = NotificationService(session).cleanup_expired()
+                if expired_notifications:
+                    session.commit()
             if deleted:
                 logger.info("purged %s expired chat attachments", deleted)
             if expired_archives:
                 logger.info("purged %s expired personal archives", expired_archives)
+            if expired_notifications:
+                logger.info("purged %s expired notifications", expired_notifications)
             next_attachment_cleanup = now_monotonic + 300
         if now_monotonic >= next_schedule_check:
             return_code = execute_isolated("schedule", "tick")

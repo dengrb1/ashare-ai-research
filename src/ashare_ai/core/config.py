@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     lake_root: Path = Path("data/lake")
     private_object_root: Path = Path("data/private")
-    policy_config_path: Path = runtime_resource_path("configs/first_release.v2.json")
+    policy_config_path: Path = runtime_resource_path("configs/first_release.v3.json")
     object_store_endpoint: str | None = None
     object_store_bucket: str = "ashare-research"
     object_store_access_key: str | None = None
@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     market_cache_seconds: int = Field(default=15, ge=1, le=300)
     market_kline_cache_seconds: int = Field(default=300, ge=15, le=3600)
     market_prefetch_max_workers: int = Field(default=4, ge=1, le=16)
+    market_provider_max_workers: int = Field(default=4, ge=1, le=16)
+    market_provider_max_queue: int = Field(default=8, ge=1, le=64)
+    market_cache_max_entries: int = Field(default=512, ge=64, le=4096)
     market_stale_seconds: int = Field(default=900, ge=15, le=86_400)
     market_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
     financial_search_provider: str = "neodata-financial-search"

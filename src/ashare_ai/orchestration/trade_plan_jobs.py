@@ -24,6 +24,7 @@ from ashare_ai.backtest.trade_plan import (
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.hashing import canonical_json, stable_hash
 from ashare_ai.core.security import safe_error_message
+from ashare_ai.notifications.service import NotificationService
 from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.orchestration.builtin_backtest import read_backtest_bundle
 from ashare_ai.orchestration.daily import flow
@@ -318,6 +319,17 @@ def execute_trade_plan_job(
                 "ai_status": explanation.get("status"),
             },
         )
+        NotificationService(session).create(
+            user_id=completed.user_id,
+            notification_type="TRADE_PLAN_COMPLETED",
+            severity="INFO",
+            title="模拟交易方案已完成",
+            body="正式 Trade Plan 已生成，仅用于模拟研究，不会自动交易。",
+            resource_type="TRADE_PLAN",
+            resource_id=completed.plan_id,
+            payload={"outcome": result.outcome.value, "symbols": completed.symbols},
+            dedupe_key=f"trade-plan-completed:{completed.plan_id}",
+        )
         session.commit()
     return result
 
@@ -342,6 +354,16 @@ def mark_trade_plan_failed(
             "Trade Plan generation failed",
             severity="ERROR",
             details={"plan_id": plan_id, "error_type": type(error).__name__},
+        )
+        NotificationService(session).create(
+            user_id=row.user_id,
+            notification_type="TRADE_PLAN_FAILED",
+            severity="WARNING",
+            title="模拟交易方案生成失败",
+            body="未生成交易方案；不会执行任何自动交易。",
+            resource_type="TRADE_PLAN",
+            resource_id=row.plan_id,
+            dedupe_key=f"trade-plan-failed:{row.plan_id}",
         )
         session.commit()
 

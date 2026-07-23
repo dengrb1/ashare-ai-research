@@ -20,18 +20,32 @@ class SearXNGSearchClient:
             raise ValueError("SEARXNG_BASE_URL must be an HTTP(S) origin")
         self.base_url = self.settings.searxng_base_url.rstrip("/")
 
-    def search(self, query: str, *, max_results: int | None = None) -> list[dict[str, Any]]:
+    def search_news(
+        self,
+        query: str,
+        *,
+        max_results: int | None = None,
+        time_range: str = "month",
+    ) -> list[dict[str, Any]]:
+        """Return recent news results only.
+
+        SearXNG is intentionally not a general retrieval tool for model prompts:
+        the caller supplies a stock-specific query and this adapter asks only for
+        the news category.  URL, engine, and result-size checks remain at this
+        boundary so untrusted search payloads cannot grow a chat request freely.
+        """
         normalized = " ".join(query.split())[:256]
         if not normalized:
             return []
         limit = min(max_results or self.settings.searxng_max_results, 5)
+        allowed_range = time_range if time_range in {"day", "month", "year"} else "month"
         params = {
             "q": normalized,
             "format": "json",
             "language": "en-US",
-            "categories": "general,news",
+            "categories": "news",
             "engines": "google,bing,duckduckgo,brave",
-            "time_range": "year",
+            "time_range": allowed_range,
         }
         response = httpx.get(
             f"{self.base_url}/search",
@@ -86,6 +100,10 @@ class SearXNGSearchClient:
             if len(results) >= limit:
                 break
         return results
+
+    def search(self, query: str, *, max_results: int | None = None) -> list[dict[str, Any]]:
+        """Backward-compatible alias for the news-only operation."""
+        return self.search_news(query, max_results=max_results)
 
     def available(self) -> bool:
         try:

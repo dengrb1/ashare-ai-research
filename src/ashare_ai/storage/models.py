@@ -132,6 +132,12 @@ class UserAssetState(Base):
     total_assets: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
     exit_monitor_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     default_profit_trigger: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    # Stop-loss monitoring is deliberately independent from the legacy profit monitor.
+    # Both only create research/notifications; neither can alter a simulated position.
+    stop_loss_monitor_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
+    buy_monitor_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -209,6 +215,10 @@ class ActiveModelConfiguration(Base):
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_check_status: Mapped[str] = mapped_column(String(16), nullable=False, default="UNTESTED")
     last_check_message: Mapped[str | None] = mapped_column(Text)
+    structured_output_supported: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    streaming_supported: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     configuration: Mapped[ModelConfigurationVersion] = relationship()
 
@@ -645,6 +655,91 @@ class AIResponseCacheRow(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class AIChatMetricRow(Base):
+    """Daily, user-isolated chat cache and latency aggregates.
+
+    The rows intentionally contain counters only.  They never retain prompts,
+    upstream errors, credentials, or a user's raw market/position context.
+    """
+
+    __tablename__ = "ai_chat_metrics"
+    __table_args__ = (
+        UniqueConstraint("user_id", "metric", "bucket_date", name="uq_chat_metric_bucket"),
+        Index("ix_chat_metric_user_date", "user_id", "bucket_date"),
+    )
+
+    metric_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.user_id", ondelete="CASCADE"), nullable=False
+    )
+    metric: Mapped[str] = mapped_column(String(32), nullable=False)
+    bucket_date: Mapped[date] = mapped_column(Date, nullable=False)
+    request_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    hit_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    latency_ms_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    singleflight_wait_ms_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    degraded_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class NotificationRow(Base):
+    """Persistent, user-owned operational and research notifications."""
+
+    __tablename__ = "notifications"
+    __table_args__ = (
+        Index("ix_notification_user_read_created", "user_id", "read_at", "created_at"),
+        Index("ix_notification_expiry", "expires_at", "read_at"),
+        UniqueConstraint("user_id", "dedupe_key", name="uq_notification_user_dedupe"),
+    )
+
+    notification_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.user_id", ondelete="CASCADE"), nullable=False
+    )
+    notification_type: Mapped[str] = mapped_column(String(48), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False, default="INFO")
+    title: Mapped[str] = mapped_column(String(160), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    resource_type: Mapped[str | None] = mapped_column(String(32))
+    resource_id: Mapped[str | None] = mapped_column(String(64))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    dedupe_key: Mapped[str | None] = mapped_column(String(64))
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class BuyEntryMonitorRow(Base):
+    """A next-session buy-range monitor derived from a formal research result."""
+
+    __tablename__ = "buy_entry_monitors"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "symbol", "effective_date", name="uq_buy_monitor_user_symbol_date"
+        ),
+        Index("ix_buy_monitor_active", "status", "effective_date", "expires_at"),
+        Index("ix_buy_monitor_user_symbol", "user_id", "symbol"),
+    )
+
+    monitor_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.user_id", ondelete="CASCADE"), nullable=False
+    )
+    symbol: Mapped[str] = mapped_column(String(9), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="ACTIVE")
+    effective_date: Mapped[date] = mapped_column(Date, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    entry_low: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    entry_high: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    score_run_id: Mapped[str | None] = mapped_column(ForeignKey("job_runs.run_id"))
+    trade_plan_id: Mapped[str | None] = mapped_column(ForeignKey("trade_plans.plan_id"))
+    rationale: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    triggered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_code: Mapped[str | None] = mapped_column(String(48))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class AIChatThread(Base):
     __tablename__ = "ai_chat_threads"
     __table_args__ = (
@@ -721,6 +816,11 @@ class AIChatMessage(Base):
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_code: Mapped[str | None] = mapped_column(String(48))
     request_id: Mapped[str | None] = mapped_column(String(64))
+    streaming_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="STREAMING")
+    data_status: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    response_id: Mapped[str | None] = mapped_column(String(128))
+    model_configuration_sha256: Mapped[str | None] = mapped_column(String(64))
+    attachment_context_sha256: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 

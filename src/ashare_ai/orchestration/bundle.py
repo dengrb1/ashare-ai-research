@@ -33,6 +33,10 @@ class CanonicalDailyBundle(FrozenModel):
     decision_at: AwareDatetime
     next_trading_date: date
     securities: tuple[SecurityMasterRecord, ...] = Field(min_length=15)
+    # A full post-close directory is carried separately from the bounded research
+    # universe so @mentions can resolve any listed security without widening the
+    # expensive feature/market-history bundle.
+    security_directory: tuple[SecurityMasterRecord, ...] = ()
     statuses: tuple[SecurityStatusRecord, ...] = Field(min_length=15)
     industries: tuple[IndustryMembership, ...] = Field(min_length=15)
     bars: tuple[DailyBar, ...] = Field(min_length=15)
@@ -72,6 +76,11 @@ class CanonicalDailyBundle(FrozenModel):
         symbols = [item.symbol for item in self.securities]
         if len(symbols) != len(set(symbols)):
             raise ValueError("bundle securities must be unique by symbol")
+        directory_symbols = [item.symbol for item in self.security_directory]
+        if len(directory_symbols) != len(set(directory_symbols)):
+            raise ValueError("bundle security_directory must be unique by symbol")
+        if set(symbols) & set(directory_symbols):
+            raise ValueError("bundle directory must not duplicate research securities")
         symbol_set = set(symbols)
         if {item.symbol for item in self.statuses} != symbol_set:
             raise ValueError("bundle statuses must cover every security exactly")

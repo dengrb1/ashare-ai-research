@@ -5,6 +5,7 @@ import { useMarket } from '../context/MarketContext'
 import { formatTime } from './Ui'
 import { ThemeToggle } from '../context/ThemeContext'
 import { useRefreshControl } from '../context/RefreshContext'
+import { NotificationBell } from './NotificationBell'
 
 const NAV = [
   { to: '/', label: '全局仪表盘', icon: '◫', end: true },
@@ -116,6 +117,7 @@ export function AppShell() {
         <div className="topbar-title"><h1>{title}</h1><p>{subtitle}</p></div>
         <div className="top-actions">
           <button className="refresh-button" onClick={() => void refresh()} disabled={!available || busy} title="刷新当前页面">{busy ? '刷新中' : '↻ 刷新'}</button>
+          <NotificationBell />
           <ThemeToggle compact />
           <div className="market-clock"><span>上海时间</span><strong>{shanghaiClock}</strong></div>
           <div className="user-menu"><span>{user?.username.slice(0, 1).toUpperCase()}</span><div><strong>{user?.username}</strong><small>{isAdmin ? '管理员' : '研究员'}</small></div><button onClick={() => void logout()} title="退出登录">退出</button></div>

@@ -114,9 +114,9 @@ npm run dev
 登录后前端会把“自选股 + 我的持仓”合并去重，在后台调用行情预取接口。报价按 15 秒刷新，后复权日 K 预热和缓存周期为 5 分钟；1/5/15/30/60 分钟线按需分段加载，最新分段最长缓存 30 秒并在页面停留、重新聚焦时自动检查。收盘后最后一根分钟线正常停在当日 15:00；后端会拒绝把上一交易日的数据标记为实时。实时行情缓存始终与研究、评分、报告和回测的不可变快照隔离。
 自选、我的持仓和账户总资金按登录用户保存到 PostgreSQL，可在“我的持仓”页新增、编辑或删除。账户总资金包括持仓市值和可用现金；当前仓位按最新行情（不可用时按成本价估算）乘以持仓数量后除以账户总资金自动计算。Cookie 只承载认证会话，清除 Cookie 后重新登录同一账户仍会恢复资产数据；部署前仅存在浏览器内存中的自定义数据无法追溯，新表上线后从默认值开始并在首次修改后永久保存。这些手工数据只用于页面记账与行情预取，不会覆盖研究生成的版本化组合，也不会触发真实下单。
 
-持仓页可启用盘中盈利退出监控，设置全局人民币浮盈触发金额并允许个股覆盖。交易日 09:30–11:30、13:00–15:00 每 5 分钟检查；严格超过触发线时排队执行 AI 退出研究。AI 可建议继续持有、减仓或卖出，并生成目标价/数量分档；服务端再按持仓上限、买入日期 T+1 和带生效日期的交易规则复核。结果只生成待确认的模拟卖出方案，不自动修改持仓。同日价格相对上次变化不足 3%、研究与持仓未变时不重复调用；完全相同输入会命中 PostgreSQL AI 缓存并显示缓存状态。
+持仓页可启用盘中盈利退出监控、止损预警和自选股买入区间监控。交易日 09:30–11:30、13:00–15:00 每分钟合并行情后检查；止损线优先使用手工价格，缺失时以 20 个后复权日 K 的 ATR 推导并限制在成本价下方 5%-10%，历史不足时使用 8%。触发止损时先写入高优先级通知，再排队快速 AI 退出研究；用户也可手动提交某个现有持仓的退出研究。正式评分合格且 Trade Plan 为 `BUY` 的自选股，仅在下一个交易日的有效入场区间首次命中时提示。所有路径只创建通知、研究和模拟方案，不自动买入、卖出或修改持仓。
 
-研究中心提供持久化 AI 股票问答。用户可用 `@600690.SH` 或已保存持仓名称附加系统内最新行情、近 30 根日 K、个人持仓和最近正式评分；可选已配置的搜索/研究模型与 `low|medium|high|xhigh` 思考强度。响应通过 SSE 流式返回并按用户保存。联网由同一 Compose 私有网络中的 SearXNG 提供，生产默认地址为 `http://searxng:8080`；只向搜索服务发送查询词，模型不会获得数据库、凭据或任意内网访问能力。
+研究中心提供持久化 AI 股票问答。用户可用任意 `@名称`、`@002138` 或 `@600690.SH` 附加由已提交证券主数据精确解析的行情、近 30 根日 K、个人持仓、最近正式评分和强相关新闻；同名歧义会拒绝绑定。无历史 `decision_at` 时服务端在并行数据返回后冻结实时决策时点；显式历史时点只读取 PIT 合格评分与日 K，不混入当前持仓、实时行情或新闻。响应默认通过 Responses API SSE 输出检索、行情、新闻和生成阶段及增量 Markdown；不兼容网关会明确标为非流式降级并通知管理员。Markdown 不解释原始 HTML、不加载远程图片，并限制危险链接协议。联网新闻仅通过同一 Compose 私有网络中的 SearXNG，查询词含股票名称、代码和新闻/公告/行业快讯，最多保留 5 条强相关去重结果；模型不会获得数据库、凭据或任意内网访问能力。
 
 ### 完整 Docker 栈
 
@@ -134,9 +134,9 @@ Copy-Item .env.docker.example .env.docker
 docker compose -p ashare-ai-src -f compose.yaml up -d --build
 ```
 
-默认 Compose 面向小型主机，建议至少 2GB 内存：包含 Nginx WebGUI、API、单一串行 `job-worker`、
+默认 Compose 面向小型主机，建议至少 2GB 内存：包含 Nginx WebGUI、API、单一串行 `job-worker`、独立低并发 `exit-advice-worker`、
 PostgreSQL、Redis 和仅在 Compose 私有网络内可访问的 SearXNG，并为服务设置内存/PID/日志上限。`job-worker` 同时承担收盘后调度，按
-Research、Trade Plan、Exit Advice、Backtest 四类 Redis 租约队列逐个取任务；每个重任务在隔离子进程中
+Research、Trade Plan、Backtest 等 Redis 租约队列逐个取任务；退出研究由独立 Worker 消费，避免与普通重任务争抢队列。每个普通重任务在隔离子进程中
 执行，结束后释放 Pandas/PyArrow 等科学计算堆，避免多个 Worker 并发触发 OOM。WebGUI 由
 Nginx 提供静态文件并把 `/api` 反向代理到 FastAPI；本地浏览器访问 `http://localhost`。
 PostgreSQL、Redis 和 API 默认仅绑定 `127.0.0.1`，Redis 强制密码认证。
@@ -161,7 +161,7 @@ docker compose -p ashare-ai-src -f compose.yaml logs job-worker --tail 100
 ```
 
 生产调度默认使用仓库内置的 `ApplicationPipeline + BuiltinDailyBackend`：开发环境会生成确定性全 A 风格 demo bundle，完整跑通股票池、三类特征、严格 Agent Schema、综合评分、预测分位、事件风控、15 股组合和日报；生产环境必须通过 `ASHARE_CANONICAL_BUNDLE` 提供强类型 canonical JSON，否则 fail closed。也可替换 `ASHARE_STAGE_BACKEND_FACTORY` 接入获授权的数据源与模型实现，而不修改编排图。
-当前生产默认使用 `configs/first_release.v2.json`：保留 15/8%/25%/20%、风格限额、熔断、容量阈值和三类必需基准，并新增分红/新闻评分及 Trade Plan 优化配置。`configs/first_release.v1.json` 保留用于历史结果回放；每次运行都会把实际配置版本和文件哈希写入 Manifest。
+当前生产默认使用 `configs/first_release.v3.json`：保留 15/8%/25%/20%、风格限额、熔断、容量阈值和三类必需基准，并新增聊天缓存、止损、买入监控和通知保留策略。`configs/first_release.v1.json` 与 `configs/first_release.v2.json` 保留用于历史结果回放；每次运行都会把实际配置版本和文件哈希写入 Manifest。
 
 ### 开发检查
 
@@ -221,7 +221,15 @@ docker compose -p ashare-ai -f compose.yaml -f compose.ghcr.yaml up -d
 - `PUT /api/v1/assets/exit-monitor`
 - `GET /api/v1/exit-advice`
 - `GET /api/v1/exit-advice/{advice_id}`
+- `POST /api/v1/exit-advice/manual`
+- `GET|PUT /api/v1/buy-entry-monitors`
+- `GET /api/v1/notifications`
+- `GET /api/v1/notifications/summary`
+- `POST /api/v1/notifications/read`
+- `POST /api/v1/notifications/read-all`
+- `GET /api/v1/securities/resolve`
 - `GET /api/v1/ai/models`
+- `GET /api/v1/ai/chat/metrics`
 - `GET|POST /api/v1/ai/chat/threads`
 - `GET /api/v1/ai/chat/thread-index`
 - `PATCH|DELETE /api/v1/ai/chat/threads/{thread_id}`
@@ -302,6 +310,9 @@ Web、API、PostgreSQL 和 Redis 默认只绑定 `127.0.0.1`；物理手机联�
 MARKET_CACHE_SECONDS=15
 MARKET_KLINE_CACHE_SECONDS=300
 MARKET_PREFETCH_MAX_WORKERS=4
+MARKET_PROVIDER_MAX_WORKERS=4
+MARKET_PROVIDER_MAX_QUEUE=8
+MARKET_CACHE_MAX_ENTRIES=512
 MARKET_STALE_SECONDS=900
 MARKET_TIMEOUT_SECONDS=10
 ```

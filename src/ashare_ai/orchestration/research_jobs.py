@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.security import safe_error_message
+from ashare_ai.notifications.service import NotificationService
 from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.orchestration.daily import Pipeline, load_pipeline
 from ashare_ai.orchestration.redis_queue import RedisLeasedQueue
@@ -149,6 +150,17 @@ def mark_research_failed(
             severity="ERROR",
             details=_error_details(error),
         )
+        if run.user_id:
+            NotificationService(session).create(
+                user_id=run.user_id,
+                notification_type="RESEARCH_FAILED",
+                severity="WARNING",
+                title="正式研究运行失败",
+                body="本次研究未完成；没有生成或执行自动交易。",
+                resource_type="RESEARCH_RUN",
+                resource_id=run.run_id,
+                dedupe_key=f"research-failed:{run.run_id}",
+            )
         session.commit()
 
 
@@ -289,6 +301,18 @@ def execute_research_job(
             completed = session.get(JobRun, run_id)
             if completed is not None:
                 completed.active_research_key = None
+                if completed.user_id:
+                    NotificationService(session).create(
+                        user_id=completed.user_id,
+                        notification_type="RESEARCH_COMPLETED",
+                        severity="INFO",
+                        title="正式研究运行已完成",
+                        body="研究结果已生成，可查看报告与模拟交易方案。",
+                        resource_type="RESEARCH_RUN",
+                        resource_id=completed.run_id,
+                        payload={"status": completed.status, "report_id": report_id},
+                        dedupe_key=f"research-completed:{completed.run_id}",
+                    )
                 session.commit()
         return result
     except Exception as exc:

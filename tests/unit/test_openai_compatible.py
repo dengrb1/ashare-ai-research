@@ -325,6 +325,7 @@ async def test_stream_text_retries_clean_eof_before_first_delta() -> None:
             async for event in client.stream_text(
                 messages=({"role": "user", "content": "hello"},),
                 idempotency_key="clean-eof-retry",
+                allow_degraded=False,
             )
         ]
 

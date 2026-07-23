@@ -12,9 +12,12 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
+    "lucide-react": "^1.25.0",
     "react": "latest",
     "react-dom": "latest",
+    "react-markdown": "^10.1.0",
     "react-router-dom": "latest",
+    "remark-gfm": "^4.0.1",
     "typescript": "latest",
     "vite": "latest"
   },

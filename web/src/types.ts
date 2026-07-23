@@ -49,6 +49,9 @@ export interface PaperPosition {
   acquired_on?: string | null
   profit_trigger_amount?: number | string | null
   exit_trigger_price?: number | string | null
+  stop_loss_price?: number | string | null
+  stop_loss_mode?: 'AUTO_ATR20' | 'MANUAL' | 'FALLBACK_8PCT'
+  stop_loss_enabled?: boolean
 }
 
 export interface AssetState {
@@ -57,6 +60,8 @@ export interface AssetState {
   total_assets?: number | null
   exit_monitor_enabled?: boolean
   default_profit_trigger?: number | string | null
+  stop_loss_monitor_enabled?: boolean
+  buy_monitor_enabled?: boolean
   updated_at?: string | null
 }
 
@@ -70,7 +75,7 @@ export interface ExitAdvice {
   current_price: number | string
   unrealized_profit: number | string
   trigger_amount: number | string
-  trigger_type?: 'PRICE' | 'PROFIT_AMOUNT'
+  trigger_type?: 'PRICE' | 'PROFIT_AMOUNT' | 'MANUAL' | 'STOP_LOSS'
   trigger_price?: number | string | null
   position_snapshot: Record<string, unknown>
   research_context: Record<string, unknown>
@@ -81,6 +86,7 @@ export interface ExitAdvice {
   created_at: string
   completed_at?: string | null
   error_message?: string | null
+  status_url?: string | null
 }
 
 export interface AIChatThread {
@@ -117,7 +123,47 @@ export interface AIChatMessage {
   output_tokens: number
   error_code?: string | null
   request_id?: string | null
+  streaming_mode?: 'STREAMING' | 'DEGRADED' | 'CACHED'
+  data_status?: Record<string, unknown>
+  response_id?: string | null
   created_at: string
+}
+
+export interface Notification {
+  notification_id: string
+  notification_type: string
+  severity: 'INFO' | 'WARNING' | 'HIGH' | 'CRITICAL'
+  title: string
+  body: string
+  resource_type?: string | null
+  resource_id?: string | null
+  payload: Record<string, unknown>
+  read_at?: string | null
+  created_at: string
+  expires_at: string
+}
+
+export interface NotificationSummary {
+  unread_count: number
+  high_risk_unread_count: number
+  latest: Notification[]
+}
+
+export interface BuyEntryMonitor {
+  monitor_id: string
+  symbol: string
+  status: string
+  effective_date: string
+  expires_at: string
+  entry_low: number | string
+  entry_high: number | string
+  score_run_id?: string | null
+  trade_plan_id?: string | null
+  rationale: Record<string, unknown>
+  triggered_at?: string | null
+  error_code?: string | null
+  created_at: string
+  updated_at: string
 }
 
 export interface AIChatAttachment {

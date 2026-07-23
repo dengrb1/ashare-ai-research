@@ -169,6 +169,8 @@ class OpenAICompatibleStructuredLLMClient:
         *,
         messages: tuple[Mapping[str, Any], ...],
         idempotency_key: str,
+        previous_response_id: str | None = None,
+        allow_degraded: bool = True,
     ) -> AsyncIterator[dict[str, Any]]:
         """Yield normalized Responses API text deltas and a final usage event."""
         if not messages or not idempotency_key:
@@ -179,6 +181,8 @@ class OpenAICompatibleStructuredLLMClient:
             "reasoning": {"effort": self._reasoning_effort},
             "stream": True,
         }
+        if previous_response_id:
+            request_body["previous_response_id"] = previous_response_id
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(timeout=self._timeout)
         attempts = 0
@@ -230,7 +234,7 @@ class OpenAICompatibleStructuredLLMClient:
                                     if isinstance(completed, dict)
                                     else {}
                                 )
-                                yield {
+                                normalized_completed = {
                                     "type": "completed",
                                     "model": (
                                         str(completed.get("model") or self._model)
@@ -244,6 +248,11 @@ class OpenAICompatibleStructuredLLMClient:
                                         usage.get("output_tokens", 0)
                                     ),
                                 }
+                                if isinstance(completed, dict) and isinstance(
+                                    completed.get("id"), str
+                                ):
+                                    normalized_completed["response_id"] = str(completed["id"])
+                                yield normalized_completed
                             elif event_type in {"response.failed", "error"}:
                                 raise OpenAICompatibleError(
                                     "Responses API streaming generation failed",
@@ -272,6 +281,27 @@ class OpenAICompatibleStructuredLLMClient:
                             retryable=not emitted_text,
                         ) from exc
                 except OpenAICompatibleError as exc:
+                    if (
+                        not emitted_text
+                        and allow_degraded
+                        and _can_degrade_stream(exc)
+                        and (not exc.retryable or attempts >= self._max_retries)
+                    ):
+                        degraded = await self._generate_text_degraded(
+                            client=client,
+                            request_body=request_body,
+                            idempotency_key=idempotency_key,
+                        )
+                        yield {"type": "degraded", "reason_code": "STREAMING_UNSUPPORTED"}
+                        yield {"type": "delta", "delta": degraded["text"]}
+                        yield {
+                            "type": "completed",
+                            "model": degraded["model"],
+                            "input_tokens": degraded["input_tokens"],
+                            "output_tokens": degraded["output_tokens"],
+                            "response_id": degraded["response_id"],
+                        }
+                        return
                     if emitted_text or not exc.retryable or attempts >= self._max_retries:
                         raise
                 attempts += 1
@@ -280,6 +310,56 @@ class OpenAICompatibleStructuredLLMClient:
         finally:
             if owns_client:
                 await client.aclose()
+
+    async def probe_stream(self) -> bool:
+        """Check native SSE support without silently using the chat fallback."""
+        completed = False
+        async for event in self.stream_text(
+            messages=({"role": "user", "content": "Reply with ok."},),
+            idempotency_key=f"stream-probe-{self._model}",
+            allow_degraded=False,
+        ):
+            completed = completed or event.get("type") == "completed"
+        return completed
+
+    async def _generate_text_degraded(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        request_body: Mapping[str, Any],
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        body = dict(request_body)
+        body["stream"] = False
+        response = await client.post(
+            f"{self._base_url}/responses",
+            json=body,
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Idempotency-Key": idempotency_key,
+                "Accept": "application/json",
+            },
+            timeout=self._timeout,
+        )
+        if response.is_error:
+            raise OpenAICompatibleError(
+                _http_error_message(response),
+                code=_status_error_code(response.status_code),
+                status_code=response.status_code,
+                retryable=response.status_code in _RETRYABLE_STATUS_CODES,
+            )
+        payload = _decode_response(response)
+        text = _extract_output_text(payload).strip()
+        if not text:
+            raise OpenAICompatibleError("Responses API response contains no output text")
+        usage = _usage(payload)
+        return {
+            "text": text,
+            "model": str(payload.get("model") or self._model),
+            "input_tokens": usage[0],
+            "output_tokens": usage[1],
+            "response_id": str(payload.get("id")) if isinstance(payload.get("id"), str) else None,
+        }
 
 
 class _RetryableResponseError(Exception):
@@ -339,6 +419,18 @@ def _status_error_code(status_code: int) -> str:
     if status_code >= 500:
         return "MODEL_GATEWAY_UNAVAILABLE"
     return "MODEL_RESPONSE_ERROR"
+
+
+def _can_degrade_stream(error: OpenAICompatibleError) -> bool:
+    """Only use a one-shot reply for gateways that reject/break SSE itself."""
+    return error.code == "MODEL_STREAM_INCOMPLETE" or error.status_code in {
+        400,
+        404,
+        405,
+        406,
+        415,
+        501,
+    }
 
 
 def _schema_name(schema: type[BaseModel]) -> str:

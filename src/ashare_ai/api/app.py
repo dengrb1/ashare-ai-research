@@ -37,6 +37,8 @@ from ashare_ai.agents.attachments import (
     inspect_image,
 )
 from ashare_ai.agents.chat import ChatStreamError, allow_chat_request, stream_chat_response
+from ashare_ai.agents.chat_context import resolve_security_mentions
+from ashare_ai.agents.chat_observability import chat_metric_summary
 from ashare_ai.agents.chat_threads import ChatThreadService, InvalidThreadCursor
 from ashare_ai.agents.model_settings import (
     ModelConfigurationService,
@@ -68,6 +70,7 @@ from ashare_ai.api.schemas import (
     AIChatAttachmentResponse,
     AIChatBulkDeleteRequest,
     AIChatMessageResponse,
+    AIChatMetricResponse,
     AIChatSendRequest,
     AIChatThreadIndexResponse,
     AIChatThreadPatchRequest,
@@ -81,18 +84,25 @@ from ashare_ai.api.schemas import (
     AuditEventResponse,
     BacktestRequest,
     BacktestResponse,
+    BuyEntryMonitorRequest,
+    BuyEntryMonitorResponse,
     CandidateResponse,
     ExitAdviceResponse,
     ExitMonitorSettingsRequest,
     HealthResponse,
     KlineResponse,
     LoginRequest,
+    ManualExitAdviceRequest,
     MarketPrefetchRequest,
     MarketPrefetchResponse,
     ModelListResponse,
     ModelProbeResponse,
     ModelSettingsRequest,
     ModelSettingsResponse,
+    NotificationListResponse,
+    NotificationMarkReadRequest,
+    NotificationResponse,
+    NotificationSummaryResponse,
     PasswordResetRequest,
     PersonalArchiveApplyRequest,
     PersonalArchiveExportRequest,
@@ -110,6 +120,8 @@ from ashare_ai.api.schemas import (
     RunListResponse,
     RunResponse,
     ScoreResponse,
+    SecurityResolveCandidate,
+    SecurityResolveResponse,
     SnapshotResponse,
     TokenResponse,
     TradePlanRequest,
@@ -123,9 +135,15 @@ from ashare_ai.core.hashing import sha256_bytes, stable_hash
 from ashare_ai.core.security import safe_error_message
 from ashare_ai.core.time import SHANGHAI
 from ashare_ai.market.service import get_market_data_service
+from ashare_ai.notifications.service import InvalidNotificationCursor, NotificationService
 from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.orchestration.backtest_jobs import enqueue_backtest
 from ashare_ai.orchestration.daily import load_pipeline
+from ashare_ai.orchestration.exit_advice_jobs import (
+    ExitAdviceRequestError,
+    create_manual_exit_advice,
+    enqueue_exit_advice,
+)
 from ashare_ai.orchestration.personal_archive_jobs import enqueue_personal_archive
 from ashare_ai.orchestration.research_jobs import enqueue_research, enqueue_research_at
 from ashare_ai.orchestration.research_schedule import (
@@ -156,6 +174,7 @@ from ashare_ai.storage.models import (
     ApiIdempotencyKey,
     AuditEvent,
     BacktestRun,
+    BuyEntryMonitorRow,
     CandidateRow,
     ExitAdviceRow,
     JobRun,
@@ -635,6 +654,10 @@ def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
                 "idempotency_key": True,
                 "paper_portfolio_only": True,
                 "profit_exit_monitor": True,
+                "stop_loss_monitor": True,
+                "buy_entry_monitor": True,
+                "notifications": True,
+                "chat_context_metrics": True,
                 "persistent_ai_chat": True,
                 "chat_images_seven_day_retention": True,
                 "personal_archive_export_import": True,
@@ -650,6 +673,12 @@ def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
                 "report_trade_plans": "/api/v1/reports/{report_id}/trade-plans",
                 "trade_plan": "/api/v1/trade-plans/{plan_id}",
                 "exit_advice": "/api/v1/exit-advice",
+                "manual_exit_advice": "/api/v1/exit-advice/manual",
+                "buy_entry_monitors": "/api/v1/buy-entry-monitors",
+                "notifications": "/api/v1/notifications",
+                "notification_summary": "/api/v1/notifications/summary",
+                "security_resolve": "/api/v1/securities/resolve",
+                "chat_metrics": "/api/v1/ai/chat/metrics",
                 "ai_chat_threads": "/api/v1/ai/chat/threads",
                 "ai_chat_thread_index": "/api/v1/ai/chat/thread-index",
                 "personal_data_exports": "/api/v1/me/data-exports",
@@ -685,17 +714,43 @@ def update_asset_state(
                 else previous.get("default_profit_trigger")
             )
         ),
+        (
+            bool(payload.stop_loss_monitor_enabled)
+            if "stop_loss_monitor_enabled" in payload.model_fields_set
+            else bool(previous.get("stop_loss_monitor_enabled", True))
+        ),
+        (
+            bool(payload.buy_monitor_enabled)
+            if "buy_monitor_enabled" in payload.model_fields_set
+            else bool(previous.get("buy_monitor_enabled", True))
+        ),
     )
     return AssetStateResponse.model_validate(state)
 
 
 @app.put("/api/v1/assets/exit-monitor", response_model=AssetStateResponse)
 def update_exit_monitor_settings(
-    payload: ExitMonitorSettingsRequest, db: DbSession, context: Writer
+    payload: ExitMonitorSettingsRequest,
+    db: DbSession,
+    context: Writer,
+    idempotency_key: IdempotencyKey = None,
 ) -> AssetStateResponse:
     """Update only exit-monitor fields so native clients cannot overwrite stale asset data."""
 
+    if idempotency_key is None:
+        raise HTTPException(status_code=400, detail="Idempotency-Key is required")
+    route = "/api/v1/assets/exit-monitor"
+    fingerprint = _idempotency_fingerprint(
+        context.user.user_id, route, idempotency_key, payload.model_dump(mode="json")
+    )
+    replay = _find_idempotency(
+        db, user_id=context.user.user_id, route=route, fingerprint=fingerprint
+    )
     service = UserAssetService(db)
+    if replay is not None:
+        if replay.resource_type != "EXIT_MONITOR_SETTINGS":
+            raise HTTPException(status_code=409, detail="idempotent resource is unavailable")
+        return AssetStateResponse.model_validate(service.get(context.user.user_id))
     previous = service.get(context.user.user_id)
     state = service.save(
         context.user.user_id,
@@ -708,8 +763,120 @@ def update_exit_monitor_settings(
             if payload.default_profit_trigger is not None
             else None
         ),
+        (
+            payload.stop_loss_monitor_enabled
+            if payload.stop_loss_monitor_enabled is not None
+            else bool(previous.get("stop_loss_monitor_enabled", True))
+        ),
+        (
+            payload.buy_monitor_enabled
+            if payload.buy_monitor_enabled is not None
+            else bool(previous.get("buy_monitor_enabled", True))
+        ),
+        commit=False,
     )
+    _remember_idempotency(
+        db,
+        user_id=context.user.user_id,
+        route=route,
+        fingerprint=fingerprint,
+        resource_type="EXIT_MONITOR_SETTINGS",
+        resource_id=context.user.user_id,
+    )
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        winner = _find_idempotency(
+            db, user_id=context.user.user_id, route=route, fingerprint=fingerprint
+        )
+        if winner is not None and winner.resource_type == "EXIT_MONITOR_SETTINGS":
+            return AssetStateResponse.model_validate(service.get(context.user.user_id))
+        raise HTTPException(status_code=409, detail="exit monitor update conflicted") from exc
     return AssetStateResponse.model_validate(state)
+
+
+@app.post(
+    "/api/v1/exit-advice/manual",
+    response_model=ExitAdviceResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def submit_manual_exit_advice(
+    payload: ManualExitAdviceRequest,
+    response: Response,
+    db: DbSession,
+    context: Writer,
+    idempotency_key: IdempotencyKey = None,
+) -> ExitAdviceResponse:
+    """Queue a paper-only exit study for one of the caller's current positions."""
+
+    if idempotency_key is None:
+        raise HTTPException(status_code=400, detail="Idempotency-Key is required")
+    route = "/api/v1/exit-advice/manual"
+    fingerprint = _idempotency_fingerprint(
+        context.user.user_id, route, idempotency_key, payload.model_dump(mode="json")
+    )
+    replay = _find_idempotency(
+        db, user_id=context.user.user_id, route=route, fingerprint=fingerprint
+    )
+    if replay is not None:
+        row = db.get(ExitAdviceRow, replay.resource_id)
+        if (
+            replay.resource_type != "EXIT_ADVICE"
+            or row is None
+            or row.user_id != context.user.user_id
+        ):
+            raise HTTPException(status_code=409, detail="idempotent resource is unavailable")
+        response.status_code = status.HTTP_200_OK
+        return ExitAdviceResponse.model_validate(row).model_copy(
+            update={"status_url": f"/api/v1/exit-advice/{row.advice_id}"}
+        )
+    try:
+        row = create_manual_exit_advice(
+            db,
+            user_id=context.user.user_id,
+            symbol=payload.symbol,
+        )
+    except ExitAdviceRequestError as exc:
+        # Codes are stable client-facing states; provider errors and position data
+        # are deliberately not reflected in this public response.
+        raise HTTPException(status_code=422, detail=exc.code) from exc
+    _remember_idempotency(
+        db,
+        user_id=context.user.user_id,
+        route=route,
+        fingerprint=fingerprint,
+        resource_type="EXIT_ADVICE",
+        resource_id=row.advice_id,
+    )
+    try:
+        db.commit()
+        enqueue_exit_advice(row.advice_id)
+    except IntegrityError as exc:
+        db.rollback()
+        replay = _find_idempotency(
+            db, user_id=context.user.user_id, route=route, fingerprint=fingerprint
+        )
+        if replay is not None:
+            winner = db.get(ExitAdviceRow, replay.resource_id)
+            if winner is not None and winner.user_id == context.user.user_id:
+                response.status_code = status.HTTP_200_OK
+                return ExitAdviceResponse.model_validate(winner).model_copy(
+                    update={"status_url": f"/api/v1/exit-advice/{winner.advice_id}"}
+                )
+        raise HTTPException(status_code=409, detail="exit advice submission conflicted") from exc
+    except Exception as exc:
+        db.rollback()
+        failed = db.get(ExitAdviceRow, row.advice_id)
+        if failed is not None:
+            failed.status = "FAILED"
+            failed.error_message = "QUEUE_UNAVAILABLE"
+            failed.completed_at = datetime.now(UTC)
+            db.commit()
+        raise HTTPException(status_code=503, detail="exit advice queue unavailable") from exc
+    return ExitAdviceResponse.model_validate(row).model_copy(
+        update={"status_url": f"/api/v1/exit-advice/{row.advice_id}"}
+    )
 
 
 @app.get("/api/v1/exit-advice", response_model=list[ExitAdviceResponse])
@@ -739,6 +906,185 @@ def exit_advice_detail(advice_id: str, db: DbSession, context: Current) -> ExitA
     return ExitAdviceResponse.model_validate(row)
 
 
+@app.get("/api/v1/buy-entry-monitors", response_model=list[BuyEntryMonitorResponse])
+def buy_entry_monitor_list(
+    db: DbSession,
+    context: Current,
+    limit: int = Query(default=50, ge=1, le=200),
+    before: datetime | None = None,
+) -> list[BuyEntryMonitorResponse]:
+    statement = select(BuyEntryMonitorRow).where(
+        BuyEntryMonitorRow.user_id == context.user.user_id
+    )
+    if before is not None:
+        statement = statement.where(BuyEntryMonitorRow.updated_at < before)
+    rows = db.scalars(
+        statement.order_by(
+            BuyEntryMonitorRow.updated_at.desc(),
+            BuyEntryMonitorRow.monitor_id.desc(),
+        ).limit(limit)
+    ).all()
+    return [BuyEntryMonitorResponse.model_validate(row) for row in rows]
+
+
+@app.put("/api/v1/buy-entry-monitors", response_model=list[BuyEntryMonitorResponse])
+def update_buy_entry_monitor(
+    payload: BuyEntryMonitorRequest,
+    db: DbSession,
+    context: Writer,
+    idempotency_key: IdempotencyKey = None,
+) -> list[BuyEntryMonitorResponse]:
+    """Enable or cancel a watchlist symbol's derived paper-entry monitors."""
+
+    if idempotency_key is None:
+        raise HTTPException(status_code=400, detail="Idempotency-Key is required")
+    assets = UserAssetService(db).get(context.user.user_id)
+    if payload.enabled and payload.symbol not in set(assets["watchlist"]):
+        raise HTTPException(status_code=422, detail="SYMBOL_NOT_IN_WATCHLIST")
+    route = "/api/v1/buy-entry-monitors"
+    fingerprint = _idempotency_fingerprint(
+        context.user.user_id, route, idempotency_key, payload.model_dump(mode="json")
+    )
+    replay = _find_idempotency(
+        db, user_id=context.user.user_id, route=route, fingerprint=fingerprint
+    )
+    if replay is None:
+        now = datetime.now(UTC)
+        rows = list(
+            db.scalars(
+                select(BuyEntryMonitorRow).where(
+                    BuyEntryMonitorRow.user_id == context.user.user_id,
+                    BuyEntryMonitorRow.symbol == payload.symbol,
+                    BuyEntryMonitorRow.status == "ACTIVE",
+                )
+            ).all()
+        )
+        if not payload.enabled:
+            for row in rows:
+                row.status = "CANCELLED"
+                row.updated_at = now
+        _remember_idempotency(
+            db,
+            user_id=context.user.user_id,
+            route=route,
+            fingerprint=fingerprint,
+            resource_type="BUY_ENTRY_MONITOR_SETTING",
+            resource_id=payload.symbol,
+        )
+        db.commit()
+    return [
+        BuyEntryMonitorResponse.model_validate(row)
+        for row in db.scalars(
+            select(BuyEntryMonitorRow)
+            .where(
+                BuyEntryMonitorRow.user_id == context.user.user_id,
+                BuyEntryMonitorRow.symbol == payload.symbol,
+            )
+            .order_by(BuyEntryMonitorRow.updated_at.desc())
+        ).all()
+    ]
+
+
+@app.get("/api/v1/notifications", response_model=NotificationListResponse)
+def notification_list(
+    db: DbSession,
+    context: Current,
+    limit: int = Query(default=50, ge=1, le=200),
+    cursor: str | None = None,
+    unread_only: bool = False,
+) -> NotificationListResponse:
+    try:
+        items, next_cursor = NotificationService(db).list(
+            context.user.user_id,
+            limit=limit,
+            cursor=cursor,
+            unread_only=unread_only,
+        )
+    except InvalidNotificationCursor as exc:
+        raise HTTPException(status_code=422, detail="invalid notification cursor") from exc
+    return NotificationListResponse(
+        items=[NotificationResponse.model_validate(item) for item in items],
+        next_cursor=next_cursor,
+    )
+
+
+@app.get("/api/v1/notifications/summary", response_model=NotificationSummaryResponse)
+def notification_summary(db: DbSession, context: Current) -> NotificationSummaryResponse:
+    summary = NotificationService(db).summary(context.user.user_id)
+    return NotificationSummaryResponse(
+        unread_count=summary["unread_count"],
+        high_risk_unread_count=summary["high_risk_unread_count"],
+        latest=[NotificationResponse.model_validate(item) for item in summary["latest"]],
+    )
+
+
+@app.post("/api/v1/notifications/read", response_model=NotificationSummaryResponse)
+def mark_notifications_read(
+    payload: NotificationMarkReadRequest,
+    db: DbSession,
+    context: Writer,
+    idempotency_key: IdempotencyKey = None,
+) -> NotificationSummaryResponse:
+    if idempotency_key is None:
+        raise HTTPException(status_code=400, detail="Idempotency-Key is required")
+    route = "/api/v1/notifications/read"
+    fingerprint = _idempotency_fingerprint(
+        context.user.user_id, route, idempotency_key, payload.model_dump(mode="json")
+    )
+    replay = _find_idempotency(
+        db, user_id=context.user.user_id, route=route, fingerprint=fingerprint
+    )
+    if replay is None:
+        NotificationService(db).mark_read(context.user.user_id, payload.notification_ids)
+        _remember_idempotency(
+            db,
+            user_id=context.user.user_id,
+            route=route,
+            fingerprint=fingerprint,
+            resource_type="NOTIFICATION_READ",
+            resource_id=context.user.user_id,
+        )
+        db.commit()
+    summary = NotificationService(db).summary(context.user.user_id)
+    return NotificationSummaryResponse(
+        unread_count=summary["unread_count"],
+        high_risk_unread_count=summary["high_risk_unread_count"],
+        latest=[NotificationResponse.model_validate(item) for item in summary["latest"]],
+    )
+
+
+@app.post("/api/v1/notifications/read-all", response_model=NotificationSummaryResponse)
+def mark_all_notifications_read(
+    db: DbSession,
+    context: Writer,
+    idempotency_key: IdempotencyKey = None,
+) -> NotificationSummaryResponse:
+    if idempotency_key is None:
+        raise HTTPException(status_code=400, detail="Idempotency-Key is required")
+    route = "/api/v1/notifications/read-all"
+    fingerprint = _idempotency_fingerprint(context.user.user_id, route, idempotency_key, {})
+    replay = _find_idempotency(
+        db, user_id=context.user.user_id, route=route, fingerprint=fingerprint
+    )
+    if replay is None:
+        NotificationService(db).mark_all_read(context.user.user_id)
+        _remember_idempotency(
+            db,
+            user_id=context.user.user_id,
+            route=route,
+            fingerprint=fingerprint,
+            resource_type="NOTIFICATION_READ",
+            resource_id=context.user.user_id,
+        )
+        db.commit()
+    summary = NotificationService(db).summary(context.user.user_id)
+    return NotificationSummaryResponse(
+        unread_count=summary["unread_count"],
+        high_risk_unread_count=summary["high_risk_unread_count"],
+        latest=[NotificationResponse.model_validate(item) for item in summary["latest"]],
+    )
+
+
 @app.get("/api/v1/ai/models", response_model=AIModelOptionsResponse)
 def ai_model_options(db: DbSession, _: Current) -> AIModelOptionsResponse:
     runtime = ModelConfigurationService().resolve(db)
@@ -752,6 +1098,48 @@ def ai_model_options(db: DbSession, _: Current) -> AIModelOptionsResponse:
         reasoning_efforts=["low", "medium", "high", "xhigh"],
         web_search_available=bool(get_settings().searxng_base_url),
     )
+
+
+@app.get("/api/v1/securities/resolve", response_model=SecurityResolveResponse)
+def resolve_security(
+    _: Current,
+    q: str = Query(min_length=1, max_length=64),
+    decision_at: datetime | None = None,
+) -> SecurityResolveResponse:
+    if decision_at is not None and decision_at.tzinfo is None:
+        raise HTTPException(status_code=422, detail="decision_at must include a timezone")
+    current = decision_at.astimezone(UTC) if decision_at is not None else datetime.now(UTC)
+    if current > datetime.now(UTC) + timedelta(seconds=30):
+        raise HTTPException(status_code=422, detail="decision_at must not be in the future")
+    result = resolve_security_mentions(f"@{q.strip()}", [], decision_at=current)
+    status_item = result.statuses[0] if result.statuses else {}
+    status_state = str(status_item.get("state") or "MISSING")
+    response_state: Literal["RESOLVED", "UNRESOLVED", "AMBIGUOUS"]
+    candidates: list[SecurityResolveCandidate]
+    if status_state == "RESOLVED":
+        response_state = "RESOLVED"
+        candidates = [SecurityResolveCandidate(**item) for item in result.refs]
+    elif status_state == "AMBIGUOUS":
+        response_state = "AMBIGUOUS"
+        candidates = []
+    else:
+        response_state = "UNRESOLVED"
+        candidates = []
+    return SecurityResolveResponse(
+        query=q.strip(),
+        state=response_state,
+        candidates=candidates,
+        reason_code=str(status_item.get("reason_code") or "SECURITY_MASTER_NOT_FOUND"),
+        decision_at=current,
+    )
+
+
+@app.get("/api/v1/ai/chat/metrics", response_model=list[AIChatMetricResponse])
+def ai_chat_metrics(db: DbSession, context: Current) -> list[AIChatMetricResponse]:
+    return [
+        AIChatMetricResponse(**item)
+        for item in chat_metric_summary(db, context.user.user_id)
+    ]
 
 
 @app.get("/api/v1/ai/chat/threads", response_model=list[AIChatThreadResponse])
@@ -1239,6 +1627,11 @@ def stream_ai_chat_message(
     context: Writer,
     idempotency_key: IdempotencyKey = None,
 ) -> StreamingResponse:
+    if payload.decision_at is not None:
+        if payload.decision_at.tzinfo is None:
+            raise HTTPException(status_code=422, detail="decision_at must include a timezone")
+        if payload.decision_at.astimezone(UTC) > datetime.now(UTC) + timedelta(seconds=30):
+            raise HTTPException(status_code=422, detail="decision_at must not be in the future")
     owned = db.scalar(
         select(AIChatThread.thread_id).where(
             AIChatThread.thread_id == thread_id,
@@ -1273,7 +1666,7 @@ def stream_ai_chat_message(
                 web_search=payload.web_search,
                 attachment_ids=payload.attachment_ids,
                 mention_refs=[item.model_dump() for item in payload.mention_refs],
-                decision_at=payload.decision_at or datetime.now(UTC),
+                decision_at=payload.decision_at,
                 idempotency_key=effective_key,
                 request_id=request_id,
             ):
@@ -1425,6 +1818,8 @@ def _model_settings_response(db: Session) -> ModelSettingsResponse:
             reachable=False,
             degraded=False,
             status_message="尚未配置模型 API",
+            structured_output_supported=False,
+            streaming_supported=False,
         )
     health = service.status(db)
     return ModelSettingsResponse(
@@ -1446,6 +1841,8 @@ def _model_settings_response(db: Session) -> ModelSettingsResponse:
         degraded=bool(health["degraded"]),
         status_message=str(health["message"]),
         checked_at=(health["checked_at"] if isinstance(health["checked_at"], datetime) else None),
+        structured_output_supported=bool(health.get("structured_output_supported")),
+        streaming_supported=bool(health.get("streaming_supported")),
     )
 
 

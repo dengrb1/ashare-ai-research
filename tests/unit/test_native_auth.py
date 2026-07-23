@@ -80,15 +80,19 @@ def test_native_bearer_refresh_rotation_revoke_expiry_and_disable() -> None:
             "formal_watchlist_reports": True,
             "report_symbol_eligibility": True,
             "trade_plan_generation": True,
-                "research_cancellation": True,
-                "idempotency_key": True,
-                "paper_portfolio_only": True,
-                "profit_exit_monitor": True,
-                "persistent_ai_chat": True,
-                "chat_images_seven_day_retention": True,
-                "personal_archive_export_import": True,
-                "searxng_web_research": True,
-            }
+            "research_cancellation": True,
+            "idempotency_key": True,
+            "paper_portfolio_only": True,
+            "profit_exit_monitor": True,
+            "stop_loss_monitor": True,
+            "buy_entry_monitor": True,
+            "notifications": True,
+            "chat_context_metrics": True,
+            "persistent_ai_chat": True,
+            "chat_images_seven_day_retention": True,
+            "personal_archive_export_import": True,
+            "searxng_web_research": True,
+        }
         assert bootstrap_body["capabilities"]["endpoints"]["report_symbols"] == (
             "/api/v1/reports/{report_id}/symbols"
         )
@@ -101,7 +105,7 @@ def test_native_bearer_refresh_rotation_revoke_expiry_and_disable() -> None:
         original_assets = bootstrap_body["assets"]
         monitor = client.put(
             "/api/v1/assets/exit-monitor",
-            headers=headers,
+            headers={**headers, "Idempotency-Key": "native-exit-monitor-valid"},
             json={"exit_monitor_enabled": True, "default_profit_trigger": "1200.50"},
         )
         assert monitor.status_code == 200
@@ -111,7 +115,7 @@ def test_native_bearer_refresh_rotation_revoke_expiry_and_disable() -> None:
         assert monitor.json()["positions"] == original_assets["positions"]
         assert client.put(
             "/api/v1/assets/exit-monitor",
-            headers=headers,
+            headers={**headers, "Idempotency-Key": "native-exit-monitor-invalid"},
             json={"exit_monitor_enabled": True, "default_profit_trigger": -1},
         ).status_code == 422
 

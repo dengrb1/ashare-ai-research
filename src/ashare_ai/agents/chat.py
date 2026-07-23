@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from time import perf_counter
 from typing import Any, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -17,6 +17,13 @@ from ashare_ai.agents.attachments import (
     MAX_MESSAGE_IMAGE_BYTES,
     AttachmentService,
 )
+from ashare_ai.agents.chat_context import (
+    ChatContextService,
+    get_chat_context_service,
+    resolve_security_mentions,
+    symbol_from_code,
+)
+from ashare_ai.agents.chat_observability import record_chat_metric
 from ashare_ai.agents.chat_threads import automatic_group
 from ashare_ai.agents.model_settings import ModelConfigurationService
 from ashare_ai.agents.openai_compatible import (
@@ -25,22 +32,16 @@ from ashare_ai.agents.openai_compatible import (
 )
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.hashing import canonical_json, sha256_bytes, stable_hash
-from ashare_ai.market.service import get_market_data_service, normalize_symbol
-from ashare_ai.portfolio.user_assets import UserAssetService
-from ashare_ai.search.searxng import SearXNGSearchClient
+from ashare_ai.notifications.service import NotificationService
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import (
     AIChatAttachment,
     AIChatMessage,
     AIChatThread,
     AIResponseCacheRow,
-    JobRun,
-    ScoreRow,
-    SecurityMaster,
 )
 
-CHAT_PROMPT_VERSION = "stock-chat-v2"
-_MENTION = re.compile(r"@([0-9]{6}(?:\.(?:SH|SZ|BJ))?|[\u4e00-\u9fffA-Za-z]{2,20})", re.I)
+CHAT_PROMPT_VERSION = "stock-chat-v3"
 
 
 class ChatStreamError(RuntimeError):
@@ -75,13 +76,7 @@ def allow_chat_request(user_id: str) -> bool:
 
 
 def _symbol_from_code(value: str) -> str | None:
-    raw = value.upper()
-    if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", raw):
-        return raw
-    if not re.fullmatch(r"\d{6}", raw):
-        return None
-    suffix = "SH" if raw.startswith("6") else "BJ" if raw.startswith(("4", "8")) else "SZ"
-    return f"{raw}.{suffix}"
+    return symbol_from_code(value)
 
 
 def _resolve_mentions(
@@ -91,156 +86,27 @@ def _resolve_mentions(
     *,
     now: datetime,
 ) -> list[dict[str, str]]:
-    aliases: dict[str, str] = {}
-    verified_names: dict[str, str] = {}
-    asset_symbols: set[str] = set()
-    for position in assets.get("positions", []):
-        symbol = str(position.get("symbol") or "").upper()
-        if symbol:
-            aliases[symbol.casefold()] = symbol
-            asset_symbols.add(symbol)
-    for symbol in assets.get("watchlist", []):
-        normalized = str(symbol).upper()
-        aliases[normalized.casefold()] = normalized
-        asset_symbols.add(normalized)
-
-    requested: list[tuple[str, str]] = []
-    for item in requested_refs:
-        symbol = normalize_symbol(str(item.get("symbol") or ""))
-        name = str(item.get("name") or "").strip()
-        requested.append((symbol, name))
-
-    verified_symbols = set(asset_symbols)
-    candidate_symbols = sorted(asset_symbols | {symbol for symbol, _ in requested})
-    if candidate_symbols:
-        with SessionLocal() as session:
-            for symbol in candidate_symbols:
-                master = session.scalar(
-                    select(SecurityMaster)
-                    .where(
-                        SecurityMaster.symbol == symbol,
-                        SecurityMaster.available_at <= now,
-                    )
-                    .order_by(SecurityMaster.available_at.desc())
-                    .limit(1)
-                )
-                if master is not None:
-                    verified_names[symbol] = master.short_name
-                    verified_symbols.add(symbol)
-                    aliases[master.short_name.casefold()] = symbol
-
-    requested_by_alias: dict[str, str] = {}
-    requested_symbols: list[str] = []
-    requested_names_by_symbol: dict[str, set[str]] = {}
-    for symbol, name in requested:
-        if symbol not in verified_symbols:
-            continue
-        canonical_name = verified_names.get(symbol)
-        if canonical_name is not None and name.casefold() == canonical_name.casefold():
-            requested_by_alias[name.casefold()] = symbol
-            requested_names_by_symbol.setdefault(symbol, set()).add(name)
-        requested_by_alias[symbol.casefold()] = symbol
-        requested_symbols.append(symbol)
-
-    symbols: list[str] = []
-    for match in _MENTION.finditer(content):
-        raw = match.group(1).strip()
-        resolved = _symbol_from_code(raw) or aliases.get(raw.casefold())
-        resolved = resolved or requested_by_alias.get(raw.casefold())
-        if resolved and resolved not in symbols:
-            symbols.append(normalize_symbol(resolved))
-    for symbol in requested_symbols:
-        if symbol not in symbols and (
-            f"@{symbol}".casefold() in content.casefold()
-            or any(
-                f"@{name}" in content
-                for name in requested_names_by_symbol.get(symbol, set())
-            )
-        ):
-            symbols.append(symbol)
-    symbols = symbols[:5]
-
-    symbols = [symbol for symbol in symbols if symbol in verified_symbols]
-    refs: list[dict[str, str]] = []
-    for symbol in symbols:
-        display_name = verified_names.get(symbol) or symbol
-        refs.append({"symbol": symbol, "name": display_name})
-    return refs
+    del assets  # Mention identity is intentionally independent of saved assets.
+    return resolve_security_mentions(
+        content,
+        requested_refs,
+        decision_at=now,
+        session_factory=SessionLocal,
+    ).refs
 
 
 def _system_context(
     user_id: str, symbols: list[str], decision_at: datetime
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    with SessionLocal() as session:
-        assets = UserAssetService(session).get(user_id)
-        positions = {
-            str(item.get("symbol")): item
-            for item in assets.get("positions", [])
-            if item.get("symbol") in symbols
-        }
-        scores: dict[str, Any] = {}
-        for symbol in symbols:
-            row = session.scalar(
-                select(ScoreRow)
-                .join(JobRun, JobRun.run_id == ScoreRow.run_id)
-                .where(
-                    ScoreRow.symbol == symbol,
-                    JobRun.user_id == user_id,
-                    JobRun.status.in_(("SUCCEEDED", "FUSED")),
-                    JobRun.decision_at <= decision_at,
-                    ScoreRow.decision_at <= decision_at,
-                )
-                .order_by(JobRun.trading_date.desc(), JobRun.completed_at.desc())
-                .limit(1)
-            )
-            if row is not None:
-                scores[symbol] = {
-                    "trading_date": row.trading_date.isoformat(),
-                    "decision_at": row.decision_at.isoformat(),
-                    "total_score": row.total_score,
-                    "fundamental_score": row.fundamental_score,
-                    "technical_score": row.technical_score,
-                    "sentiment_score": row.sentiment_score,
-                    "event_risk_multiplier": row.event_risk_multiplier,
-                    "formula_version": row.formula_version,
-                }
-    quotes: dict[str, Any] = {}
-    bars: dict[str, Any] = {}
-    if symbols:
-        market = get_market_data_service()
-        for item in market.quotes(symbols):
-            collected_at = (item.get("status") or {}).get("collected_at")
-            try:
-                collected = datetime.fromisoformat(str(collected_at))
-            except (TypeError, ValueError):
-                continue
-            if collected.tzinfo is not None and collected <= decision_at:
-                quotes[item["symbol"]] = item
-        for symbol in symbols:
-            try:
-                payload = market.klines(symbol, "day", limit=30, end=decision_at)
-                bars[symbol] = payload.get("bars", [])[-30:]
-            except RuntimeError:
-                bars[symbol] = []
-    sources = [
-        {
-            "source": "system",
-            "symbol": symbol,
-            "uri": f"/api/v1/market/quotes?symbols={symbol}",
-            "available_at": (quotes.get(symbol, {}).get("status", {}) or {}).get(
-                "collected_at"
-            ),
-        }
-        for symbol in symbols
-    ]
-    return {
-        "symbols": symbols,
-        "positions": positions,
-        "quotes": quotes,
-        "daily_bars": bars,
-        "latest_formal_scores": scores,
-        "decision_at": decision_at.isoformat(),
-    }, sources
+    refs = [{"symbol": symbol, "name": symbol} for symbol in symbols]
+    result = ChatContextService().build(
+        user_id=user_id,
+        refs=refs,
+        requested_decision_at=decision_at,
+        web_search=False,
+        model_configuration_sha256=None,
+    )
+    return result.context, result.sources
 
 
 def _validate_attachments(
@@ -287,17 +153,19 @@ async def stream_chat_response(
     web_search: bool,
     attachment_ids: list[str],
     mention_refs: list[dict[str, str]],
-    decision_at: datetime,
+    decision_at: datetime | None,
     idempotency_key: str,
     request_id: str,
 ) -> AsyncIterator[dict[str, Any]]:
     now = datetime.now(UTC)
-    if decision_at.tzinfo is None:
+    if decision_at is not None and decision_at.tzinfo is None:
         raise ValueError("decision_at must include a timezone")
-    client_decision_at = decision_at.astimezone(UTC)
-    if client_decision_at > now + timedelta(seconds=30):
+    client_decision_at = decision_at.astimezone(UTC) if decision_at is not None else None
+    if client_decision_at is not None and client_decision_at > now + timedelta(seconds=30):
         raise ValueError("decision_at must not be in the future")
-    decision_at = now
+    # An omitted decision_at deliberately means live mode. It is replaced by the
+    # authoritative server timestamp only after parallel live-data retrieval.
+    decision_at = client_decision_at or now
     trading_date = decision_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
     key_sha = sha256_bytes(idempotency_key.encode())
     with SessionLocal() as session:
@@ -309,8 +177,13 @@ async def stream_chat_response(
         )
         if thread is None:
             raise KeyError(thread_id)
-        assets = UserAssetService(session).get(user_id)
-        refs = _resolve_mentions(content, assets, mention_refs, now=now)
+        mention_resolution = resolve_security_mentions(
+            content,
+            mention_refs,
+            decision_at=decision_at,
+            session_factory=SessionLocal,
+        )
+        refs = mention_resolution.refs
         symbols = [item["symbol"] for item in refs]
         runtime = ModelConfigurationService().resolve(session)
         if runtime is not None and model not in {runtime.search_model, runtime.research_model}:
@@ -332,7 +205,7 @@ async def stream_chat_response(
                     {"id": row.attachment_id, "sha256": row.content_sha256}
                     for row in attachments
                 ],
-                "decision_at": client_decision_at.isoformat(),
+                "decision_at": client_decision_at.isoformat() if client_decision_at else None,
             }
         )
         existing_user = session.scalar(
@@ -544,17 +417,6 @@ async def stream_chat_response(
             user_message_id = user_message.message_id
             assistant_message_id = assistant_message.message_id
 
-    yield {
-        "type": "meta",
-        "replayed": replayed,
-        "cache_hit": False,
-        "status": "PENDING",
-        "user_message_id": user_message_id,
-        "assistant_message_id": assistant_message_id,
-        "symbols": symbols,
-        "mention_refs": refs,
-    }
-
     chunks: list[str] = []
     try:
         if runtime is None:
@@ -563,27 +425,96 @@ async def stream_chat_response(
                 code="MODEL_NOT_CONFIGURED",
                 request_id=request_id,
             )
-        context, sources = await asyncio.to_thread(
-            _system_context, user_id, symbols, decision_at
+        yield {"type": "stage", "stage": "retrieval", "status": "STARTED"}
+        started_context = perf_counter()
+        context_result = await asyncio.to_thread(
+            get_chat_context_service().build,
+            user_id=user_id,
+            refs=refs,
+            requested_decision_at=client_decision_at,
+            web_search=web_search,
+            model_configuration_sha256=runtime.config_sha256,
         )
-        web_sources: list[dict[str, Any]] = []
-        if web_search:
-            query = " ".join(symbols) + " A股 最新消息 " + content.replace("@", " ")[:120]
-            try:
-                web_sources = await asyncio.to_thread(SearXNGSearchClient().search, query)
-            except Exception:
-                web_sources = []
-        sources.extend(
-            {
-                "source": "searxng",
-                "title": item["title"],
-                "uri": item["url"],
-                "engine": item["engine"],
-            }
-            for item in web_sources
+        context_elapsed_ms = round((perf_counter() - started_context) * 1000)
+        decision_at = context_result.decision_at
+        trading_date = decision_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
+        context = context_result.context
+        sources = context_result.sources
+        data_status = {
+            **context_result.data_status,
+            "mentions": mention_resolution.statuses,
+        }
+        context["data_status"] = data_status
+        _set_message_pit(
+            user_message_id,
+            assistant_message_id,
+            decision_at=decision_at,
+            trading_date=trading_date,
         )
-        context["web_search"] = web_sources
+        record_chat_metric(
+            user_id=user_id,
+            metric="context",
+            hit=context_result.context_cache_hit,
+            latency_ms=context_elapsed_ms,
+            singleflight_wait_ms=context_result.singleflight_wait_ms,
+        )
+        record_chat_metric(
+            user_id=user_id,
+            metric="market",
+            hit=context_result.market_cache_hit,
+            latency_ms=context_elapsed_ms,
+            singleflight_wait_ms=context_result.singleflight_wait_ms,
+        )
+        record_chat_metric(
+            user_id=user_id,
+            metric="news",
+            hit=context_result.news_cache_hit,
+            latency_ms=context_elapsed_ms,
+            singleflight_wait_ms=context_result.singleflight_wait_ms,
+        )
+        yield {
+            "type": "meta",
+            "replayed": replayed,
+            "cache_hit": False,
+            "status": "PENDING",
+            "user_message_id": user_message_id,
+            "assistant_message_id": assistant_message_id,
+            "symbols": symbols,
+            "mention_refs": refs,
+            "mention_status": mention_resolution.statuses,
+            "decision_at": decision_at.isoformat(),
+            "historical": client_decision_at is not None,
+            "data_status": data_status,
+        }
+        yield {
+            "type": "stage",
+            "stage": "market",
+            "status": "COMPLETED",
+            "cache_hit": context_result.market_cache_hit,
+        }
+        yield {
+            "type": "stage",
+            "stage": "news",
+            "status": "COMPLETED",
+            "cache_hit": context_result.news_cache_hit,
+        }
         context_sha = stable_hash(context)
+        # Re-read history against the final frozen live timestamp.  A browser
+        # request never gets to make a newer message visible in an older turn.
+        with SessionLocal() as session:
+            history = list(
+                session.scalars(
+                    select(AIChatMessage)
+                    .where(
+                        AIChatMessage.thread_id == thread_id,
+                        AIChatMessage.status.in_(("COMPLETED", "FAILED", "CANCELLED")),
+                        AIChatMessage.available_at <= decision_at,
+                        AIChatMessage.message_id.not_in(excluded_ids),
+                    )
+                    .order_by(AIChatMessage.created_at.desc())
+                    .limit(20)
+                ).all()
+            )[::-1]
         stable_prompt = (
             "你是A股研究对话助手。只能使用系统上下文、已保存对话和联网摘要回答；"
             "明确区分实时行情、历史研究和外部网页。不得声称执行真实交易，不得泄漏"
@@ -686,6 +617,9 @@ async def stream_chat_response(
                 "messages": messages,
             }
         )
+        attachment_context_sha = stable_hash(
+            [row.content_sha256 for row in attachments]
+        )
         with SessionLocal() as session:
             cached = session.scalar(
                 select(AIResponseCacheRow).where(
@@ -714,15 +648,39 @@ async def stream_chat_response(
                     cache_hit=True,
                     input_tokens=0,
                     output_tokens=0,
+                    streaming_mode="CACHED",
+                    data_status=data_status,
+                    model_configuration_sha256=runtime.config_sha256,
+                    attachment_context_sha256=attachment_context_sha,
                 )
                 session.commit()
+                record_chat_metric(
+                    user_id=user_id,
+                    metric="answer",
+                    hit=True,
+                    latency_ms=0,
+                )
+                record_chat_metric(
+                    user_id=user_id,
+                    metric="model",
+                    hit=True,
+                    latency_ms=0,
+                )
                 yield {"type": "cache", "cache_hit": True, "sources": sources}
+                yield {"type": "stage", "stage": "generation", "status": "CACHED"}
                 for index in range(0, len(text), 80):
                     yield {"type": "delta", "delta": text[index : index + 80]}
-                yield {"type": "done", "cache_hit": True, "status": "COMPLETED"}
+                yield {
+                    "type": "done",
+                    "cache_hit": True,
+                    "status": "COMPLETED",
+                    "streaming_mode": "CACHED",
+                }
                 return
 
         yield {"type": "context", "cache_hit": False, "sources": sources}
+        yield {"type": "stage", "stage": "generation", "status": "STARTED"}
+        yield {"type": "heartbeat", "stage": "generation"}
         client = OpenAICompatibleStructuredLLMClient(
             base_url=runtime.base_url,
             api_key=runtime.api_key,
@@ -733,9 +691,21 @@ async def stream_chat_response(
         )
         input_tokens = output_tokens = 0
         actual_model = model
+        response_id: str | None = None
+        streaming_mode = "STREAMING"
+        model_started = perf_counter()
         streaming_marked = False
+        previous_response_id = _reusable_response_id(
+            history,
+            model=model,
+            configuration_sha256=runtime.config_sha256,
+            context_sha=context_sha,
+            attachment_context_sha=attachment_context_sha,
+        )
         async for event in client.stream_text(
-            messages=tuple(messages), idempotency_key=request_sha
+            messages=tuple(messages),
+            idempotency_key=request_sha,
+            previous_response_id=previous_response_id,
         ):
             if event["type"] == "delta":
                 chunks.append(str(event["delta"]))
@@ -743,10 +713,15 @@ async def stream_chat_response(
                     _set_message_status(assistant_message_id, "STREAMING")
                     streaming_marked = True
                 yield event
+            elif event["type"] == "degraded":
+                streaming_mode = "DEGRADED"
+                yield {"type": "stage", "stage": "generation", "status": "DEGRADED"}
             elif event["type"] == "completed":
                 input_tokens = int(event.get("input_tokens", 0))
                 output_tokens = int(event.get("output_tokens", 0))
                 actual_model = str(event.get("model") or model)
+                raw_response_id = event.get("response_id")
+                response_id = raw_response_id if isinstance(raw_response_id, str) else None
         text = "".join(chunks).strip()
         if not text:
             raise ChatStreamError(
@@ -771,6 +746,11 @@ async def stream_chat_response(
                 cache_hit=False,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                streaming_mode=streaming_mode,
+                data_status=data_status,
+                response_id=response_id,
+                model_configuration_sha256=runtime.config_sha256,
+                attachment_context_sha256=attachment_context_sha,
             )
             session.add(
                 AIResponseCacheRow(
@@ -789,16 +769,42 @@ async def stream_chat_response(
                 )
             )
             try:
+                if streaming_mode == "DEGRADED":
+                    NotificationService(session).create_for_administrators(
+                        notification_type="CHAT_STREAM_DEGRADED",
+                        severity="WARNING",
+                        title="AI 对话已降级为一次性回复",
+                        body="当前模型网关不支持稳定的 Responses SSE 流式输出。",
+                        resource_type="AI_CHAT_MESSAGE",
+                        resource_id=assistant_message_id,
+                        dedupe_key=f"chat-stream-degraded:{runtime.config_sha256}",
+                    )
                 session.commit()
             except IntegrityError:
                 session.rollback()
                 _set_message_status(assistant_message_id, "COMPLETED", content=text)
+        model_elapsed_ms = round((perf_counter() - model_started) * 1000)
+        record_chat_metric(
+            user_id=user_id,
+            metric="answer",
+            hit=False,
+            latency_ms=model_elapsed_ms,
+            degraded=streaming_mode == "DEGRADED",
+        )
+        record_chat_metric(
+            user_id=user_id,
+            metric="model",
+            hit=False,
+            latency_ms=model_elapsed_ms,
+            degraded=streaming_mode == "DEGRADED",
+        )
         yield {
             "type": "done",
             "cache_hit": False,
             "status": "COMPLETED",
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
+            "streaming_mode": streaming_mode,
         }
     except asyncio.CancelledError:
         _fail_assistant(
@@ -864,6 +870,11 @@ def _complete_assistant(
     cache_hit: bool,
     input_tokens: int,
     output_tokens: int,
+    streaming_mode: str = "STREAMING",
+    data_status: dict[str, Any] | None = None,
+    response_id: str | None = None,
+    model_configuration_sha256: str | None = None,
+    attachment_context_sha256: str | None = None,
 ) -> None:
     row = session.get(AIChatMessage, message_id)
     if row is None:
@@ -881,10 +892,13 @@ def _complete_assistant(
     row.input_tokens = input_tokens
     row.output_tokens = output_tokens
     row.error_code = None
+    row.streaming_mode = streaming_mode
+    row.data_status = data_status or {}
+    row.response_id = response_id
+    row.model_configuration_sha256 = model_configuration_sha256
+    row.attachment_context_sha256 = attachment_context_sha256
     completed_at = datetime.now(UTC)
     row.available_at = completed_at
-    row.decision_at = completed_at
-    row.trading_date = completed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
 
 
 def _set_message_status(message_id: str, status: str, content: str | None = None) -> None:
@@ -895,12 +909,7 @@ def _set_message_status(message_id: str, status: str, content: str | None = None
             if content is not None:
                 row.content = content
             if status == "COMPLETED":
-                completed_at = datetime.now(UTC)
-                row.available_at = completed_at
-                row.decision_at = completed_at
-                row.trading_date = completed_at.astimezone(
-                    ZoneInfo("Asia/Shanghai")
-                ).date()
+                row.available_at = datetime.now(UTC)
             session.commit()
 
 
@@ -919,8 +928,45 @@ def _fail_assistant(
             row.content = content
             row.error_code = error_code
             row.request_id = request_id
-            failed_at = datetime.now(UTC)
-            row.available_at = failed_at
-            row.decision_at = failed_at
-            row.trading_date = failed_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
+            row.available_at = datetime.now(UTC)
             session.commit()
+
+
+def _set_message_pit(
+    user_message_id: str,
+    assistant_message_id: str,
+    *,
+    decision_at: datetime,
+    trading_date: Any,
+) -> None:
+    with SessionLocal() as session:
+        for message_id in (user_message_id, assistant_message_id):
+            row = session.get(AIChatMessage, message_id)
+            if row is not None:
+                row.decision_at = decision_at
+                row.trading_date = trading_date
+        session.commit()
+
+
+def _reusable_response_id(
+    history: list[AIChatMessage],
+    *,
+    model: str,
+    configuration_sha256: str,
+    context_sha: str,
+    attachment_context_sha: str,
+) -> str | None:
+    """Reuse a Responses thread only when its dynamic inputs are byte-equivalent."""
+    for row in reversed(history):
+        if row.role != "assistant" or row.status != "COMPLETED":
+            continue
+        if (
+            row.response_id
+            and row.model_name == model
+            and row.model_configuration_sha256 == configuration_sha256
+            and row.context_sha256 == context_sha
+            and row.attachment_context_sha256 == attachment_context_sha
+        ):
+            return row.response_id
+        return None
+    return None

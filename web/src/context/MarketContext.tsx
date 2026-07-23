@@ -29,6 +29,8 @@ interface MarketValue {
   totalAssets: number | null
   exitMonitorEnabled: boolean
   defaultProfitTrigger: number | null
+  stopLossMonitorEnabled: boolean
+  buyMonitorEnabled: boolean
   assetsLoading: boolean
   assetsSaving: boolean
   delayed: boolean
@@ -42,7 +44,7 @@ interface MarketValue {
   upsertPosition: (position: PaperPosition, previousSymbol?: string) => Promise<void>
   removePosition: (symbol: string) => Promise<void>
   saveTotalAssets: (totalAssets: number | null) => Promise<void>
-  saveExitSettings: (enabled: boolean, amount: number | null) => Promise<void>
+  saveExitSettings: (enabled: boolean, amount: number | null, stopLossEnabled?: boolean, buyMonitorEnabled?: boolean) => Promise<void>
   subscribe: (symbols: string[]) => () => void
   refresh: (force?: boolean) => Promise<void>
   prefetch: () => Promise<void>
@@ -85,6 +87,8 @@ export function MarketProvider({ children }: { children: ReactNode }) {
   const [totalAssets, setTotalAssets] = useState<number | null>(null)
   const [exitMonitorEnabled, setExitMonitorEnabled] = useState(false)
   const [defaultProfitTrigger, setDefaultProfitTrigger] = useState<number | null>(null)
+  const [stopLossMonitorEnabled, setStopLossMonitorEnabled] = useState(true)
+  const [buyMonitorEnabled, setBuyMonitorEnabled] = useState(true)
   const [assetsLoading, setAssetsLoading] = useState(true)
   const [assetsSaving, setAssetsSaving] = useState(false)
   const [quotes, setQuotes] = useState<Record<string, Quote>>({})
@@ -109,6 +113,8 @@ export function MarketProvider({ children }: { children: ReactNode }) {
       setTotalAssets(state.total_assets ?? null)
       setExitMonitorEnabled(Boolean(state.exit_monitor_enabled))
       setDefaultProfitTrigger(state.default_profit_trigger == null ? null : Number(state.default_profit_trigger))
+      setStopLossMonitorEnabled(state.stop_loss_monitor_enabled !== false)
+      setBuyMonitorEnabled(state.buy_monitor_enabled !== false)
     }).catch((error) => {
       if (!active) return
       setMeta((current) => ({ ...current, error: error instanceof Error ? error.message : '自选与持仓加载失败' }))
@@ -194,19 +200,21 @@ export function MarketProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const saveAssets = useCallback(async (nextWatchlist: string[], nextPositions: PaperPosition[], nextTotalAssets = totalAssets, nextExitEnabled = exitMonitorEnabled, nextProfitTrigger = defaultProfitTrigger) => {
+  const saveAssets = useCallback(async (nextWatchlist: string[], nextPositions: PaperPosition[], nextTotalAssets = totalAssets, nextExitEnabled = exitMonitorEnabled, nextProfitTrigger = defaultProfitTrigger, nextStopLossEnabled = stopLossMonitorEnabled, nextBuyMonitorEnabled = buyMonitorEnabled) => {
     try {
-      const saved = await api.saveAssets({ watchlist: nextWatchlist, positions: nextPositions, total_assets: nextTotalAssets, exit_monitor_enabled: nextExitEnabled, default_profit_trigger: nextProfitTrigger })
+      const saved = await api.saveAssets({ watchlist: nextWatchlist, positions: nextPositions, total_assets: nextTotalAssets, exit_monitor_enabled: nextExitEnabled, default_profit_trigger: nextProfitTrigger, stop_loss_monitor_enabled: nextStopLossEnabled, buy_monitor_enabled: nextBuyMonitorEnabled })
       setWatchlist(saved.watchlist)
       setPositions(saved.positions)
       setTotalAssets(saved.total_assets ?? null)
       setExitMonitorEnabled(Boolean(saved.exit_monitor_enabled))
       setDefaultProfitTrigger(saved.default_profit_trigger == null ? null : Number(saved.default_profit_trigger))
+      setStopLossMonitorEnabled(saved.stop_loss_monitor_enabled !== false)
+      setBuyMonitorEnabled(saved.buy_monitor_enabled !== false)
     } catch (error) {
       setMeta((current) => ({ ...current, error: error instanceof Error ? error.message : '自选与持仓保存失败' }))
       throw error
     }
-  }, [defaultProfitTrigger, exitMonitorEnabled, totalAssets])
+  }, [buyMonitorEnabled, defaultProfitTrigger, exitMonitorEnabled, stopLossMonitorEnabled, totalAssets])
 
   const beginAssetMutation = useCallback(() => {
     if (assetMutation.current) throw new Error('自选与持仓正在保存，请稍候')
@@ -270,13 +278,27 @@ export function MarketProvider({ children }: { children: ReactNode }) {
     try { await saveAssets(watchlist, positions, nextTotalAssets) } catch (error) { setTotalAssets(totalAssets); throw error } finally { endAssetMutation() }
   }, [beginAssetMutation, endAssetMutation, positions, saveAssets, totalAssets, watchlist])
 
-  const saveExitSettings = useCallback(async (enabled: boolean, amount: number | null) => {
-    beginAssetMutation(); const previousEnabled = exitMonitorEnabled; const previousAmount = defaultProfitTrigger
-    setExitMonitorEnabled(enabled); setDefaultProfitTrigger(amount)
-    try { await saveAssets(watchlist, positions, totalAssets, enabled, amount) }
-    catch (error) { setExitMonitorEnabled(previousEnabled); setDefaultProfitTrigger(previousAmount); throw error }
+  const saveExitSettings = useCallback(async (enabled: boolean, amount: number | null, nextStopLossEnabled = stopLossMonitorEnabled, nextBuyMonitorEnabled = buyMonitorEnabled) => {
+    beginAssetMutation(); const previousEnabled = exitMonitorEnabled; const previousAmount = defaultProfitTrigger; const previousStopLoss = stopLossMonitorEnabled; const previousBuyMonitor = buyMonitorEnabled
+    setExitMonitorEnabled(enabled); setDefaultProfitTrigger(amount); setStopLossMonitorEnabled(nextStopLossEnabled); setBuyMonitorEnabled(nextBuyMonitorEnabled)
+    try {
+      const saved = await api.saveExitMonitorSettings({
+        exit_monitor_enabled: enabled,
+        default_profit_trigger: amount,
+        stop_loss_monitor_enabled: nextStopLossEnabled,
+        buy_monitor_enabled: nextBuyMonitorEnabled,
+      })
+      const savedTrigger = Number(saved.default_profit_trigger)
+      setExitMonitorEnabled(Boolean(saved.exit_monitor_enabled))
+      setDefaultProfitTrigger(
+        saved.default_profit_trigger == null || !Number.isFinite(savedTrigger) ? null : savedTrigger,
+      )
+      setStopLossMonitorEnabled(saved.stop_loss_monitor_enabled ?? true)
+      setBuyMonitorEnabled(saved.buy_monitor_enabled ?? true)
+    }
+    catch (error) { setExitMonitorEnabled(previousEnabled); setDefaultProfitTrigger(previousAmount); setStopLossMonitorEnabled(previousStopLoss); setBuyMonitorEnabled(previousBuyMonitor); throw error }
     finally { endAssetMutation() }
-  }, [beginAssetMutation, defaultProfitTrigger, endAssetMutation, exitMonitorEnabled, positions, saveAssets, totalAssets, watchlist])
+  }, [beginAssetMutation, buyMonitorEnabled, defaultProfitTrigger, endAssetMutation, exitMonitorEnabled, stopLossMonitorEnabled])
 
   const getKline = useCallback((symbol: string, period: string, request: number | { range: KlineRange } = 160) => {
     const entry = typeof request === 'number'
@@ -391,7 +413,7 @@ export function MarketProvider({ children }: { children: ReactNode }) {
     return work
   }, [])
 
-  const value = useMemo(() => ({ quotes, watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, assetsLoading, assetsSaving, ...meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings, subscribe, refresh, prefetch, getKline, loadKline }), [quotes, watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, assetsLoading, assetsSaving, meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings, subscribe, refresh, prefetch, getKline, loadKline])
+  const value = useMemo(() => ({ quotes, watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, stopLossMonitorEnabled, buyMonitorEnabled, assetsLoading, assetsSaving, ...meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings, subscribe, refresh, prefetch, getKline, loadKline }), [quotes, watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, stopLossMonitorEnabled, buyMonitorEnabled, assetsLoading, assetsSaving, meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings, subscribe, refresh, prefetch, getKline, loadKline])
   return <MarketContext.Provider value={value}>{children}</MarketContext.Provider>
 }
 

@@ -1084,13 +1084,48 @@ class AKShareCanonicalBundleBuilder:
                 "evidence_coverage": 1.0 if not sentiment_reasons else 0.5,
             }
 
+        # Preserve the full post-close directory as immutable evidence. The selected
+        # research universe remains intentionally bounded, while chat resolution can
+        # safely bind any current listed name/code using this committed projection.
+        selected_symbols = {item.symbol for item in securities}
+        security_directory: list[SecurityMasterRecord] = []
+        for security in sorted(all_by_symbol.values(), key=lambda item: item["symbol"]):
+            symbol = security["symbol"]
+            if symbol in selected_symbols:
+                continue
+            source = f"{security.get('_canonical_source', self.provider.source)}-directory"
+            security_directory.append(
+                SecurityMasterRecord(
+                    **_pit(
+                        symbol,
+                        trading_date,
+                        market_available_at,
+                        fetched_at,
+                        f"directory-{symbol}",
+                        ingestion_id,
+                        source,
+                        {"security": security, "fetched_at": fetched_at.isoformat()},
+                        AvailabilityBasis.DATE_ONLY_CONSERVATIVE,
+                    ),
+                    exchange=Exchange(infer_exchange(symbol.split(".", 1)[0]).value),
+                    board=_board(symbol),
+                    short_name=security["name"],
+                    # A directory-only record supports identity lookup, never trading
+                    # rule eligibility. Its conservative effective date prevents it
+                    # from being mistaken for historical master evidence.
+                    list_date=trading_date,
+                    effective_from=trading_date,
+                )
+            )
+
         benchmark_returns = self._benchmarks(start_date, trading_date, bars)
         return CanonicalDailyBundle(
-            schema_version="canonical-daily-bundle-akshare-v2",
+            schema_version="canonical-daily-bundle-akshare-v3",
             trading_date=trading_date,
             decision_at=decision_at,
             next_trading_date=next_trading_date,
             securities=tuple(securities),
+            security_directory=tuple(security_directory),
             statuses=tuple(statuses),
             industries=tuple(industries),
             bars=tuple(bars),

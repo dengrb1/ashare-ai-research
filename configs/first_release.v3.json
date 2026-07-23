@@ -1,0 +1,80 @@
+{
+  "version": "first-release-v3",
+  "scoring": {
+    "formula_version": "composite-35-35-20-10-dividend-news-v2",
+    "fundamental_weight": 0.35,
+    "technical_weight": 0.35,
+    "sentiment_weight": 0.20,
+    "quality_confidence_weight": 0.10,
+    "dividend_yield_multiplier": 200,
+    "dividend_yield_bonus_cap": 8,
+    "dividend_continuity_bonus_cap": 2,
+    "dividend_total_bonus_cap": 10,
+    "news_window_days": 30,
+    "event_classifier_version": "dividend-news-events-v2",
+    "event_risk_multipliers": {"LOW": 1.0, "MEDIUM": 0.8, "HIGH": 0.5, "CRITICAL": 0.0}
+  },
+  "universe": {
+    "minimum_listing_days": 120,
+    "liquidity_window": 20,
+    "minimum_average_amount": 50000000,
+    "abnormal_return_window": 20
+  },
+  "portfolio": {
+    "target_count": 15,
+    "maximum_single_weight": 0.08,
+    "maximum_industry_weight": 0.25,
+    "maximum_one_way_turnover": 0.20,
+    "cash_buffer": 0.02,
+    "style_exposure_limits": {"beta": 0.5, "size": 0.5, "value": 0.5, "momentum": 0.5, "volatility": 0.5, "liquidity": 0.5}
+  },
+  "execution": {"participation_rate": 0.05, "impact_coefficient": 0.5, "maximum_slippage_bps": 100},
+  "risk": {
+    "derisk_drawdown": 0.08,
+    "observe_only_drawdown": 0.12,
+    "minimum_observation_sessions": 5,
+    "recovery_drawdown": 0.08,
+    "manual_recovery_required": true
+  },
+  "backtest": {
+    "required_benchmarks": ["CSI300", "CSI500", "EQUAL_WEIGHT_UNIVERSE"],
+    "capacity_max_participation": 0.05,
+    "capacity_min_fill_rate": 0.95,
+    "capacity_max_impact_bps": 50
+  },
+  "trade_plan": {
+    "objective": "RISK_ADJUSTED_RETURN",
+    "history_sessions": 240,
+    "training_sessions": 160,
+    "validation_sessions": 80,
+    "entry_step_sessions": 10,
+    "minimum_completed_trades": 5,
+    "maximum_drawdown": 0.12,
+    "entry_discounts": [0, 0.01, 0.02],
+    "take_profits": [0.08, 0.12, 0.16],
+    "stop_losses": [0.05, 0.08, 0.10],
+    "trailing_stops": [0.05, 0.08],
+    "maximum_holding_sessions": [10, 20, 40, 60],
+    "entry_valid_sessions": 3,
+    "score_exit_threshold": 60
+  },
+  "chat": {
+    "context_cache_seconds": 120,
+    "answer_cache_hours": 24,
+    "max_daily_kline_concurrency": 4,
+    "news_window_days": 30,
+    "max_news_results": 5
+  },
+  "monitoring": {
+    "stop_loss_enabled_by_default": true,
+    "stop_loss_atr_sessions": 20,
+    "stop_loss_atr_multiple": 2,
+    "stop_loss_min_pct": 0.05,
+    "stop_loss_max_pct": 0.10,
+    "stop_loss_fallback_pct": 0.08,
+    "stop_loss_cooldown_minutes": 30,
+    "buy_monitor_valid_sessions": 1,
+    "buy_entry_band_pct": 0.02
+  },
+  "notifications": {"read_retention_days": 90, "unread_retention_days": 180, "page_limit": 50}
+}

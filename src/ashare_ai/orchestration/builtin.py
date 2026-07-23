@@ -76,6 +76,7 @@ from ashare_ai.storage.models import (
     PortfolioRow,
     ReportRow,
     ScoreRow,
+    SecurityMaster,
     SnapshotManifestRow,
 )
 from ashare_ai.storage.object_service import StoredObjectService
@@ -203,6 +204,32 @@ class TradePlanPolicy(FrozenModel):
     score_exit_threshold: Decimal = Field(default=Decimal("60"), ge=0, le=100)
 
 
+class ChatPolicy(FrozenModel):
+    context_cache_seconds: int = Field(default=120, ge=15, le=3600)
+    answer_cache_hours: int = Field(default=24, ge=1, le=168)
+    max_daily_kline_concurrency: int = Field(default=4, ge=1, le=16)
+    news_window_days: int = Field(default=30, ge=1, le=365)
+    max_news_results: int = Field(default=5, ge=1, le=5)
+
+
+class MonitoringPolicy(FrozenModel):
+    stop_loss_enabled_by_default: bool = True
+    stop_loss_atr_sessions: int = Field(default=20, ge=5, le=120)
+    stop_loss_atr_multiple: Decimal = Field(default=Decimal("2"), gt=0, le=10)
+    stop_loss_min_pct: Decimal = Field(default=Decimal("0.05"), gt=0, lt=1)
+    stop_loss_max_pct: Decimal = Field(default=Decimal("0.10"), gt=0, lt=1)
+    stop_loss_fallback_pct: Decimal = Field(default=Decimal("0.08"), gt=0, lt=1)
+    stop_loss_cooldown_minutes: int = Field(default=30, ge=1, le=24 * 60)
+    buy_monitor_valid_sessions: int = Field(default=1, ge=1, le=5)
+    buy_entry_band_pct: Decimal = Field(default=Decimal("0.02"), gt=0, le=Decimal("0.10"))
+
+
+class NotificationPolicy(FrozenModel):
+    read_retention_days: int = Field(default=90, ge=1, le=3650)
+    unread_retention_days: int = Field(default=180, ge=1, le=3650)
+    page_limit: int = Field(default=50, ge=1, le=200)
+
+
 class FirstReleasePolicy(FrozenModel):
     version: str
     scoring: ScoringPolicy
@@ -212,6 +239,9 @@ class FirstReleasePolicy(FrozenModel):
     risk: RiskPolicy
     backtest: BacktestPolicy
     trade_plan: TradePlanPolicy = TradePlanPolicy()
+    chat: ChatPolicy = ChatPolicy()
+    monitoring: MonitoringPolicy = MonitoringPolicy()
+    notifications: NotificationPolicy = NotificationPolicy()
 
     @model_validator(mode="after")
     def enforce_release_contract(self) -> FirstReleasePolicy:
@@ -433,6 +463,7 @@ class BuiltinDailyBackend:
             canonical_snapshot_ids = self._persist_canonical_evidence_snapshots(
                 session, run, bundle
             )
+            self._project_security_master(session, bundle)
             updated = dict(run.manifest)
             updated["canonical_snapshot_ids"] = canonical_snapshot_ids
             run.manifest = updated
@@ -452,6 +483,71 @@ class BuiltinDailyBackend:
         )
         return [snapshot.snapshot_id]
 
+    @staticmethod
+    def _project_security_master(session: Session, bundle: CanonicalDailyBundle) -> None:
+        """Expose a read-only projection of committed canonical security evidence.
+
+        Chat and paper-risk APIs need a small indexed lookup surface, but must not
+        treat a provider response as authoritative on its own.  This projection is
+        written only after the immutable input and canonical evidence manifests have
+        been committed in the same ingestion transaction.  Existing facts are never
+        overwritten: a correction with the same source/effective date remains
+        available from its frozen manifest while the established master identity is
+        retained for point-in-time API resolution.
+        """
+
+        statuses = {
+            item.symbol: item
+            for item in bundle.statuses
+            if item.available_at <= bundle.decision_at
+            and item.effective_from <= bundle.trading_date
+            and (item.effective_to is None or item.effective_to >= bundle.trading_date)
+        }
+        industries = {
+            item.symbol: item
+            for item in bundle.industries
+            if item.available_at <= bundle.decision_at
+            and item.effective_from <= bundle.trading_date
+            and (item.effective_to is None or item.effective_to >= bundle.trading_date)
+        }
+        for record in (*bundle.securities, *bundle.security_directory):
+            existing = session.scalar(
+                select(SecurityMaster).where(
+                    SecurityMaster.symbol == record.symbol,
+                    SecurityMaster.effective_from == record.effective_from,
+                    SecurityMaster.source == record.source,
+                )
+            )
+            if existing is not None:
+                continue
+            status = statuses.get(record.symbol)
+            industry = industries.get(record.symbol)
+            session.add(
+                SecurityMaster(
+                    symbol=record.symbol,
+                    trading_date=record.trading_date,
+                    exchange=record.exchange.value,
+                    board=record.board.value,
+                    short_name=record.short_name,
+                    list_date=record.list_date,
+                    delist_date=record.delist_date,
+                    effective_from=record.effective_from,
+                    effective_to=record.effective_to,
+                    is_st=status.is_st if status is not None else False,
+                    is_suspended=status.is_suspended if status is not None else False,
+                    industry_code=industry.industry_code if industry is not None else None,
+                    source=record.source,
+                    source_record_id=record.source_record_id,
+                    available_at=record.available_at,
+                    fetched_at=record.fetched_at,
+                    payload_sha256=record.payload_sha256,
+                    schema_version=record.schema_version,
+                    adapter_version=record.adapter_version,
+                    ingestion_run_id=str(record.ingestion_run_id),
+                    availability_basis=record.availability_basis.value,
+                )
+            )
+
     def _persist_canonical_evidence_snapshots(
         self,
         session: Session,
@@ -461,6 +557,14 @@ class BuiltinDailyBackend:
         lake = ImmutableLake(self._settings.lake_root)
         repository = SnapshotRepository(session)
         datasets: tuple[tuple[str, str, list[dict[str, Any]]], ...] = (
+            (
+                "canonical_security_master",
+                "canonical-bundle",
+                [
+                    item.model_dump(mode="json")
+                    for item in (*bundle.securities, *bundle.security_directory)
+                ],
+            ),
             (
                 "canonical_news",
                 "multi-free-news",
