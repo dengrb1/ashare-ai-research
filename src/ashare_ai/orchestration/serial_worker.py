@@ -25,6 +25,7 @@ class QueueSpec:
     kind: str
     pending: str
     processing: str
+    delayed: str | None = None
 
 
 QUEUE_SPECS = (
@@ -33,7 +34,12 @@ QUEUE_SPECS = (
         "ashare:personal-archive:pending",
         "ashare:personal-archive:processing",
     ),
-    QueueSpec("research", "ashare:research:pending", "ashare:research:processing"),
+    QueueSpec(
+        "research",
+        "ashare:research:pending",
+        "ashare:research:processing",
+        "ashare:research:delayed",
+    ),
     QueueSpec("trade-plan", "ashare:trade-plan:pending", "ashare:trade-plan:processing"),
     QueueSpec("backtest", "ashare:backtest:pending", "ashare:backtest:processing"),
 )
@@ -57,6 +63,7 @@ def build_queues(client: Any) -> list[tuple[QueueSpec, RedisLeasedQueue]]:
                 client,
                 pending=spec.pending,
                 processing=spec.processing,
+                delayed=spec.delayed,
                 lease_seconds=lease_seconds,
             ),
         )
@@ -100,6 +107,7 @@ def run_loop(*, max_iterations: int | None = None) -> None:
 
         claimed = False
         for spec, queue in queues:
+            queue.promote_due()
             queue.requeue_expired()
             job_id = queue.claim()
             if job_id is None:

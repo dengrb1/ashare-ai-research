@@ -1095,6 +1095,60 @@ def test_research_submission_prepares_frozen_manifest_and_deduplicates(monkeypat
         session.close()
 
 
+def test_research_submission_reuses_a_waiting_data_readiness_run(monkeypatch) -> None:
+    session, _, _ = _database()
+    pipeline = PreparedPipeline(session)
+    delayed: list[tuple[str, datetime]] = []
+    next_retry_at = "2026-07-14T08:05:00+00:00"
+    monkeypatch.setattr("ashare_ai.api.app.load_pipeline", lambda: pipeline)
+    monkeypatch.setattr(
+        "ashare_ai.api.app._manual_research_date", lambda value, now: value
+    )
+    monkeypatch.setattr(
+        "ashare_ai.api.app._research_readiness_wait",
+        lambda _date, _now: {
+            "deadline_at": "2026-07-15T01:00:00+00:00",
+            "next_retry_at": next_retry_at,
+            "attempt_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        "ashare_ai.api.app.enqueue_research_at",
+        lambda run_id, available_at: delayed.append((run_id, available_at)),
+    )
+
+    def override_db():
+        yield session
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        client = TestClient(app)
+        client.post(
+            "/api/v1/auth/login",
+            json={"username": "alice", "password": "alice-password"},
+        )
+        csrf = client.cookies.get("ashare_csrf")
+        payload = {
+            "trading_date": "2026-07-14",
+            "scope": "CUSTOM",
+            "symbols": ["600519.SH"],
+            "total_budget": 1_000_000,
+            "per_symbol_budget": 80_000,
+        }
+        first = client.post("/api/v1/research/runs", json=payload, headers={"x-csrf-token": csrf})
+        second = client.post("/api/v1/research/runs", json=payload, headers={"x-csrf-token": csrf})
+
+        assert first.status_code == 202
+        assert first.json()["status"] == "DATA_READINESS_WAITING"
+        assert second.status_code == 200
+        assert second.json()["run_id"] == first.json()["run_id"]
+        assert pipeline.start_calls == 1
+        assert delayed == [("prepared-run", datetime.fromisoformat(next_retry_at))]
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+
 def test_watchlist_research_accepts_a_selected_subset_and_rejects_outside_symbols(
     monkeypatch,
 ) -> None:

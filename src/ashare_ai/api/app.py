@@ -2609,7 +2609,13 @@ def submit_research(
         .order_by(JobRun.started_at.desc())
     )
     if existing is not None:
-        if existing.status in {"PENDING", "RUNNING", "PROCESSING", "CANCEL_REQUESTED"}:
+        if existing.status in {
+            "PENDING",
+            "RUNNING",
+            "PROCESSING",
+            "CANCEL_REQUESTED",
+            "DATA_READINESS_WAITING",
+        }:
             response.status_code = 200
             return RunResponse.model_validate(existing)
         existing.active_research_key = None
