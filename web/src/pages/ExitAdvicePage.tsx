@@ -15,6 +15,12 @@ function failureMessage(row: ExitAdvice) {
   return '本次退出研究处理失败，未生成退出建议；持仓没有被修改或自动卖出。'
 }
 
+const BLOCKER_LABELS: Record<string, string> = {
+  T1_NOT_SELLABLE: '当日买入，T+1 禁止卖出',
+  MISSING_ACQUIRED_ON: '缺少买入日期，禁止卖出',
+  TRADING_RULE_CONTEXT_MISSING: '交易规则上下文缺失',
+}
+
 export function ExitAdvicePage() {
   const [rows, setRows] = useState<ExitAdvice[]>([])
   const [selected, setSelected] = useState<ExitAdvice | null>(null)
@@ -62,7 +68,7 @@ export function ExitAdvicePage() {
           <div className="summary-grid compact"><div><span>当前价</span><strong>¥ {formatNumber(Number(selected.current_price))}</strong></div><div><span>触发线</span><strong>¥ {formatAmount(Number(selected.trigger_amount))}</strong></div><div><span>AI 结论</span><strong>{actionLabel(selected.action, selected.status)}</strong></div><div><span>调用</span><strong>{selected.cache_hit ? '缓存命中' : '新生成'}</strong></div></div>
           {typeof result.summary === 'string' && <div className="advice-summary"><strong>研究结论</strong><p>{result.summary}</p></div>}
           {failed ? <div className="failure-box"><strong>{selected.status === 'UNAVAILABLE' ? '模型暂不可用' : '退出研究生成失败'}</strong><p>{failureMessage(selected)}</p><button className="secondary" disabled={retrying} onClick={() => void retry()}>{retrying ? '正在重新发起…' : '重新发起研究'}</button></div> : ladder.length ? <div className="table-wrap"><table><thead><tr><th>目标价</th><th>卖出数量</th><th>预计金额</th><th>状态</th><th>依据</th></tr></thead><tbody>{ladder.map((item, index) => <tr key={index}><td>¥ {item.target_price as string}</td><td>{String(item.quantity)} 股</td><td>¥ {formatAmount(Number(item.estimated_gross_proceeds))}</td><td>{item.status === 'READY_FOR_CONFIRMATION' ? '待用户确认' : '已阻断'}</td><td>{String(item.reason || '')}</td></tr>)}</tbody></table></div> : <Empty title={selected.status === 'PENDING' || selected.status === 'QUEUED' || selected.status === 'RUNNING' ? '研究正在生成' : '暂无可执行分档'} />}
-          {!!blockers.length && <div className="warning-box"><strong>模拟卖出门禁未通过</strong><p>{blockers.join('、')}。请补齐买入日期或等待交易规则数据可用；系统不会自动修改持仓。</p></div>}
+          {!!blockers.length && <div className={`warning-box ${blockers.includes('T1_NOT_SELLABLE') ? 't1-warning' : ''}`}><strong>{blockers.includes('T1_NOT_SELLABLE') ? '高优先级限制：当日买入，T+1 禁止卖出' : '模拟卖出门禁未通过'}</strong><p>{blockers.map((item) => BLOCKER_LABELS[item] || item).join('、')}。系统不会自动修改持仓。</p></div>}
           <p className="form-hint">模型：{selected.model_name || '—'} · 思考强度：{selected.reasoning_effort || '—'} · 仅模拟方案，不接入实盘。</p>
         </div>}
       </Panel>

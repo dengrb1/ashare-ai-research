@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from typing import Any, cast
@@ -33,6 +33,7 @@ from ashare_ai.agents.openai_compatible import (
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.hashing import canonical_json, sha256_bytes, stable_hash
 from ashare_ai.notifications.service import NotificationService
+from ashare_ai.search.web import get_web_search_service
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import (
     AIChatAttachment,
@@ -41,7 +42,7 @@ from ashare_ai.storage.models import (
     AIResponseCacheRow,
 )
 
-CHAT_PROMPT_VERSION = "stock-chat-v3"
+CHAT_PROMPT_VERSION = "stock-chat-v4"
 
 
 class ChatStreamError(RuntimeError):
@@ -202,8 +203,7 @@ async def stream_chat_response(
                 "web_search": web_search,
                 "mention_refs": refs,
                 "attachments": [
-                    {"id": row.attachment_id, "sha256": row.content_sha256}
-                    for row in attachments
+                    {"id": row.attachment_id, "sha256": row.content_sha256} for row in attachments
                 ],
                 "decision_at": client_decision_at.isoformat() if client_decision_at else None,
             }
@@ -345,9 +345,7 @@ async def stream_chat_response(
             cumulative.update({item["symbol"]: item for item in refs})
             thread.cumulative_mentions = list(cumulative.values())
             if thread.group_mode == "AUTO":
-                thread.group_type, thread.group_label = automatic_group(
-                    thread.cumulative_mentions
-                )
+                thread.group_type, thread.group_label = automatic_group(thread.cumulative_mentions)
             try:
                 session.commit()
             except IntegrityError:
@@ -440,9 +438,36 @@ async def stream_chat_response(
         trading_date = decision_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
         context = context_result.context
         sources = context_result.sources
+        if web_search and client_decision_at is None:
+            public_search = await asyncio.to_thread(get_web_search_service().search, content)
+            context["web_search"] = {
+                "query": content,
+                "results": public_search.items,
+                "status": public_search.status,
+            }
+            sources.extend(
+                {
+                    "source": "searxng",
+                    "title": str(item.get("title") or "网页来源"),
+                    "uri": str(item.get("url") or ""),
+                    "available_at": public_search.status.get("searched_at"),
+                }
+                for item in public_search.items
+                if item.get("url")
+            )
+        elif web_search:
+            context["web_search"] = {
+                "query": content,
+                "results": [],
+                "status": {
+                    "state": "EXCLUDED",
+                    "reason_code": "HISTORICAL_WEB_SEARCH_EXCLUDED",
+                },
+            }
         data_status = {
             **context_result.data_status,
             "mentions": mention_resolution.statuses,
+            "web_search": context.get("web_search", {}).get("status"),
         }
         context["data_status"] = data_status
         _set_message_pit(
@@ -515,18 +540,22 @@ async def stream_chat_response(
                     .limit(20)
                 ).all()
             )[::-1]
+        profile = runtime.profile_for(model)
         stable_prompt = (
             "你是A股研究对话助手。只能使用系统上下文、已保存对话和联网摘要回答；"
             "明确区分实时行情、历史研究和外部网页。不得声称执行真实交易，不得泄漏"
             "内部路径、凭据或审计载荷。涉及买卖时给出条件、风险和数据时点，不承诺收益。"
             "引用网页时用[来源标题](URL)。"
         )
-        messages: list[dict[str, Any]] = [{"role": "system", "content": stable_prompt}]
+        history_messages: list[dict[str, Any]] = []
+        snapshots_by_user = {
+            item.parent_message_id: item.private_context_snapshot
+            for item in history
+            if item.role == "assistant" and item.parent_message_id and item.private_context_snapshot
+        }
         history_attachment_ids = list(
             dict.fromkeys(
-                attachment_id
-                for item in history
-                for attachment_id in (item.attachment_ids or [])
+                attachment_id for item in history for attachment_id in (item.attachment_ids or [])
             )
         )
         history_image_parts: dict[str, list[dict[str, Any]]] = {}
@@ -550,9 +579,7 @@ async def stream_chat_response(
                     for attachment_id in item.attachment_ids:
                         row = by_id.get(attachment_id)
                         data_url = (
-                            attachment_service.model_data_url(row)
-                            if row is not None
-                            else None
+                            attachment_service.model_data_url(row) if row is not None else None
                         )
                         if data_url and remaining_history_images > 0:
                             parts.append({"type": "input_image", "image_url": data_url})
@@ -567,9 +594,15 @@ async def stream_chat_response(
                     if parts:
                         history_image_parts[item.message_id] = parts
         for item in history:
+            if profile.cache_policy == "GROK":
+                snapshot = snapshots_by_user.get(item.message_id)
+                if isinstance(snapshot, str) and snapshot:
+                    history_messages.append(
+                        {"role": "system", "content": "当前动态上下文：\n" + snapshot}
+                    )
             image_parts = history_image_parts.get(item.message_id, [])
             if item.role == "user" and image_parts:
-                messages.append(
+                history_messages.append(
                     {
                         "role": item.role,
                         "content": [
@@ -579,9 +612,9 @@ async def stream_chat_response(
                     }
                 )
             else:
-                messages.append({"role": item.role, "content": item.content})
+                history_messages.append({"role": item.role, "content": item.content})
         dynamic_context = canonical_json(context).decode("utf-8")
-        messages.append({"role": "system", "content": "当前动态上下文：\n" + dynamic_context})
+        dynamic_message = {"role": "system", "content": "当前动态上下文：\n" + dynamic_context}
         current_parts: list[dict[str, Any]] = [{"type": "input_text", "text": content}]
         with SessionLocal() as session:
             current_rows = list(
@@ -603,7 +636,24 @@ async def stream_chat_response(
                     current_parts.append(
                         {"type": "input_text", "text": "[图片已按七天保留策略销毁]"}
                     )
-        messages.append({"role": "user", "content": current_parts})
+        current_message = {"role": "user", "content": current_parts}
+        selected_history, context_budget_status = _select_history_within_budget(
+            stable_prompt=stable_prompt,
+            history_messages=history_messages,
+            dynamic_message=dynamic_message,
+            current_message=current_message,
+            input_budget_tokens=profile.input_budget_tokens,
+        )
+        if selected_history is None:
+            raise ChatStreamError(
+                "当前上下文超过所选模型的安全输入预算，请减少引用、图片或问题范围后重试",
+                code="CHAT_CONTEXT_TOO_LARGE",
+                request_id=request_id,
+            )
+        messages: list[dict[str, Any]] = [{"role": "system", "content": stable_prompt}]
+        messages.extend(selected_history)
+        messages.append(dynamic_message)
+        messages.append(current_message)
         request_sha = stable_hash(
             {
                 "parent_turn": history[-1].message_id if history else None,
@@ -617,9 +667,7 @@ async def stream_chat_response(
                 "messages": messages,
             }
         )
-        attachment_context_sha = stable_hash(
-            [row.content_sha256 for row in attachments]
-        )
+        attachment_context_sha = stable_hash([row.content_sha256 for row in attachments])
         with SessionLocal() as session:
             cached = session.scalar(
                 select(AIResponseCacheRow).where(
@@ -646,8 +694,14 @@ async def stream_chat_response(
                     context_sha=context_sha,
                     response_sha=cached.response_sha256,
                     cache_hit=True,
-                    input_tokens=0,
-                    output_tokens=0,
+                    input_tokens=cached.input_tokens,
+                    cached_input_tokens=cached.input_tokens,
+                    cache_write_tokens=0,
+                    output_tokens=cached.output_tokens,
+                    reasoning_tokens=0,
+                    cache_policy=profile.cache_policy,
+                    context_budget_status=context_budget_status,
+                    private_context_snapshot=dynamic_context,
                     streaming_mode="CACHED",
                     data_status=data_status,
                     model_configuration_sha256=runtime.config_sha256,
@@ -688,8 +742,11 @@ async def stream_chat_response(
             reasoning_effort=reasoning_effort,
             timeout_seconds=runtime.timeout_seconds,
             max_retries=2,
+            cache_policy=profile.cache_policy,
         )
-        input_tokens = output_tokens = 0
+        input_tokens = cached_input_tokens = cache_write_tokens = output_tokens = (
+            reasoning_tokens
+        ) = 0
         actual_model = model
         response_id: str | None = None
         streaming_mode = "STREAMING"
@@ -699,13 +756,25 @@ async def stream_chat_response(
             history,
             model=model,
             configuration_sha256=runtime.config_sha256,
-            context_sha=context_sha,
             attachment_context_sha=attachment_context_sha,
+            allow_reuse=(
+                profile.cache_policy == "OPENAI" and context_budget_status == "WITHIN_BUDGET"
+            ),
+        )
+        request_messages = (
+            (dynamic_message, current_message) if previous_response_id else tuple(messages)
         )
         async for event in client.stream_text(
-            messages=tuple(messages),
+            messages=request_messages,
             idempotency_key=request_sha,
             previous_response_id=previous_response_id,
+            prompt_cache_key=stable_hash(
+                {
+                    "prompt_version": CHAT_PROMPT_VERSION,
+                    "stable_prompt": stable_prompt,
+                    "model": model,
+                }
+            ),
         ):
             if event["type"] == "delta":
                 chunks.append(str(event["delta"]))
@@ -718,7 +787,10 @@ async def stream_chat_response(
                 yield {"type": "stage", "stage": "generation", "status": "DEGRADED"}
             elif event["type"] == "completed":
                 input_tokens = int(event.get("input_tokens", 0))
+                cached_input_tokens = int(event.get("cached_input_tokens", 0))
+                cache_write_tokens = int(event.get("cache_write_tokens", 0))
                 output_tokens = int(event.get("output_tokens", 0))
+                reasoning_tokens = int(event.get("reasoning_tokens", 0))
                 actual_model = str(event.get("model") or model)
                 raw_response_id = event.get("response_id")
                 response_id = raw_response_id if isinstance(raw_response_id, str) else None
@@ -745,7 +817,13 @@ async def stream_chat_response(
                 response_sha=response_sha,
                 cache_hit=False,
                 input_tokens=input_tokens,
+                cached_input_tokens=cached_input_tokens,
+                cache_write_tokens=cache_write_tokens,
                 output_tokens=output_tokens,
+                reasoning_tokens=reasoning_tokens,
+                cache_policy=profile.cache_policy,
+                context_budget_status=context_budget_status,
+                private_context_snapshot=dynamic_context,
                 streaming_mode=streaming_mode,
                 data_status=data_status,
                 response_id=response_id,
@@ -763,7 +841,11 @@ async def stream_chat_response(
                     prompt_version=CHAT_PROMPT_VERSION,
                     response={"content": text},
                     input_tokens=input_tokens,
+                    cached_input_tokens=cached_input_tokens,
+                    cache_write_tokens=cache_write_tokens,
                     output_tokens=output_tokens,
+                    reasoning_tokens=reasoning_tokens,
+                    cache_policy=profile.cache_policy,
                     created_at=datetime.now(UTC),
                     expires_at=datetime.now(UTC) + timedelta(hours=24),
                 )
@@ -803,7 +885,12 @@ async def stream_chat_response(
             "cache_hit": False,
             "status": "COMPLETED",
             "input_tokens": input_tokens,
+            "cached_input_tokens": cached_input_tokens,
+            "cache_write_tokens": cache_write_tokens,
             "output_tokens": output_tokens,
+            "reasoning_tokens": reasoning_tokens,
+            "cache_policy": profile.cache_policy,
+            "context_budget_status": context_budget_status,
             "streaming_mode": streaming_mode,
         }
     except asyncio.CancelledError:
@@ -870,6 +957,12 @@ def _complete_assistant(
     cache_hit: bool,
     input_tokens: int,
     output_tokens: int,
+    cached_input_tokens: int = 0,
+    cache_write_tokens: int = 0,
+    reasoning_tokens: int = 0,
+    cache_policy: str = "COMPATIBLE",
+    context_budget_status: str = "WITHIN_BUDGET",
+    private_context_snapshot: str | None = None,
     streaming_mode: str = "STREAMING",
     data_status: dict[str, Any] | None = None,
     response_id: str | None = None,
@@ -890,7 +983,13 @@ def _complete_assistant(
     row.response_sha256 = response_sha
     row.cache_hit = cache_hit
     row.input_tokens = input_tokens
+    row.cached_input_tokens = cached_input_tokens
+    row.cache_write_tokens = cache_write_tokens
     row.output_tokens = output_tokens
+    row.reasoning_tokens = reasoning_tokens
+    row.cache_policy = cache_policy
+    row.context_budget_status = context_budget_status
+    row.private_context_snapshot = private_context_snapshot
     row.error_code = None
     row.streaming_mode = streaming_mode
     row.data_status = data_status or {}
@@ -953,10 +1052,13 @@ def _reusable_response_id(
     *,
     model: str,
     configuration_sha256: str,
-    context_sha: str,
     attachment_context_sha: str,
+    allow_reuse: bool,
 ) -> str | None:
-    """Reuse a Responses thread only when its dynamic inputs are byte-equivalent."""
+    """Reuse only an intact OpenAI conversation; never trust a cropped remote chain."""
+
+    if not allow_reuse:
+        return None
     for row in reversed(history):
         if row.role != "assistant" or row.status != "COMPLETED":
             continue
@@ -964,9 +1066,87 @@ def _reusable_response_id(
             row.response_id
             and row.model_name == model
             and row.model_configuration_sha256 == configuration_sha256
-            and row.context_sha256 == context_sha
             and row.attachment_context_sha256 == attachment_context_sha
         ):
             return row.response_id
         return None
     return None
+
+
+def _estimate_message_tokens(message: Mapping[str, Any]) -> int:
+    """Conservative local estimator used only to protect a provider context window."""
+
+    content = message.get("content")
+    if isinstance(content, str):
+        return max(1, (len(content.encode("utf-8")) + 3) // 4)
+    if not isinstance(content, list):
+        return 1
+    total = 0
+    for part in content:
+        if not isinstance(part, Mapping):
+            continue
+        if part.get("type") == "input_image":
+            total += 1024
+        else:
+            text = part.get("text")
+            if isinstance(text, str):
+                total += max(1, (len(text.encode("utf-8")) + 3) // 4)
+    return max(1, total)
+
+
+def _conversation_turns(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    turns: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    pending_prefix: list[dict[str, Any]] = []
+    for message in messages:
+        role = message.get("role")
+        if role == "system" and any(item.get("role") in {"user", "assistant"} for item in current):
+            pending_prefix.append(message)
+            continue
+        if role == "user" and any(item.get("role") in {"user", "assistant"} for item in current):
+            turns.append(current)
+            current = pending_prefix
+            pending_prefix = []
+        elif pending_prefix:
+            current.extend(pending_prefix)
+            pending_prefix = []
+        current.append(message)
+    current.extend(pending_prefix)
+    if current:
+        turns.append(current)
+    return turns
+
+
+def _select_history_within_budget(
+    *,
+    stable_prompt: str,
+    history_messages: list[dict[str, Any]],
+    dynamic_message: dict[str, Any],
+    current_message: dict[str, Any],
+    input_budget_tokens: int,
+) -> tuple[list[dict[str, Any]] | None, str]:
+    fixed = sum(
+        _estimate_message_tokens(message)
+        for message in (
+            {"role": "system", "content": stable_prompt},
+            dynamic_message,
+            current_message,
+        )
+    )
+    if fixed > input_budget_tokens:
+        return None, "CONTEXT_TOO_LARGE"
+    selected: list[list[dict[str, Any]]] = []
+    used = fixed
+    trimmed = False
+    for turn in reversed(_conversation_turns(history_messages)):
+        turn_tokens = sum(_estimate_message_tokens(message) for message in turn)
+        if used + turn_tokens > input_budget_tokens:
+            trimmed = True
+            break
+        selected.append(turn)
+        used += turn_tokens
+    selected.reverse()
+    flattened = [message for turn in selected for message in turn]
+    if len(flattened) != len(history_messages):
+        trimmed = True
+    return flattened, "HISTORY_TRIMMED" if trimmed else "WITHIN_BUDGET"

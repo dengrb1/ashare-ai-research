@@ -68,6 +68,7 @@ export interface AssetState {
 
 export interface ExitAdvice {
   advice_id: string
+  operation_run_id?: string | null
   symbol: string
   status: string
   action?: 'HOLD' | 'REDUCE' | 'SELL' | null
@@ -121,7 +122,12 @@ export interface AIChatMessage {
   sources: Array<Record<string, unknown>>
   cache_hit: boolean
   input_tokens: number
+  cached_input_tokens?: number
+  cache_write_tokens?: number
   output_tokens: number
+  reasoning_tokens?: number
+  cache_policy?: 'GROK' | 'OPENAI' | 'COMPATIBLE'
+  context_budget_status?: 'WITHIN_BUDGET' | 'HISTORY_TRIMMED' | 'CONTEXT_TOO_LARGE'
   error_code?: string | null
   request_id?: string | null
   streaming_mode?: 'STREAMING' | 'DEGRADED' | 'CACHED'
@@ -258,6 +264,7 @@ export interface ModelSettings {
   search_reasoning_effort: string
   research_model: string
   research_reasoning_effort: string
+  model_profiles: ModelProfile[]
   timeout_seconds: number
   enabled: boolean
   configured: boolean
@@ -274,8 +281,41 @@ export interface ModelSettingsDraft {
   search_reasoning_effort: string
   research_model: string
   research_reasoning_effort: string
+  model_profiles: ModelProfile[]
   timeout_seconds: number
   enabled: boolean
+}
+
+export interface ModelProfile {
+  model: string
+  cache_policy: 'GROK' | 'OPENAI' | 'COMPATIBLE'
+  context_window_tokens: number
+  output_token_reserve: number
+  reasoning_token_reserve: number
+  input_price_per_million: number | string
+  cached_input_price_per_million: number | string
+  cache_write_price_per_million: number | string
+  output_price_per_million: number | string
+}
+
+export interface AICostValue {
+  requests: number
+  cache_hits: number
+  input_tokens: number
+  cached_input_tokens: number
+  cache_write_tokens: number
+  uncached_input_tokens: number
+  output_tokens: number
+  estimated_spend_usd: number | string
+  estimated_savings_usd: number | string
+}
+
+export interface AICostSummary {
+  days: number
+  items: Array<AICostValue & { bucket_date: string }>
+  next_cursor?: string | null
+  totals: AICostValue
+  current_turn?: Omit<AICostValue, 'cache_hits'> & { cache_hit: boolean } | null
 }
 
 export interface KlineBar {
@@ -377,6 +417,19 @@ export interface Run {
   next_retry_at?: string | null
 }
 
+export interface RunActivity extends Run {
+  resource_type: 'RESEARCH' | 'BACKTEST' | 'TRADE_PLAN' | 'EXIT_ADVICE'
+  resource_id?: string | null
+  resource_url?: string | null
+  title?: string | null
+  symbol?: string | null
+}
+
+export interface RunActivityResponse {
+  items: RunActivity[]
+  next_cursor?: string | null
+}
+
 export type ResearchScope = 'MARKET' | 'WATCHLIST' | 'CUSTOM'
 
 export interface ResearchSubmission {
@@ -456,6 +509,19 @@ export interface ReportSymbol {
   component_summaries?: Record<string, string>
 }
 
+export interface ReportExecutionStatus {
+  report_id: string
+  as_of: string
+  items: Array<{
+    symbol: string
+    held_quantity: number
+    acquired_on?: string | null
+    sellable_quantity: number
+    t1_restricted: boolean
+    blockers: string[]
+  }>
+}
+
 export interface Portfolio {
   portfolio_id?: string | null
   run_id: string
@@ -500,6 +566,7 @@ export interface TradePlan {
   user_id: string
   report_id: string
   run_id: string
+  operation_run_id?: string | null
   trading_date: string
   decision_at: string
   available_at: string

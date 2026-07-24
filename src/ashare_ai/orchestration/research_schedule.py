@@ -15,7 +15,7 @@ from ashare_ai.core.hashing import stable_hash
 from ashare_ai.core.security import safe_error_message
 from ashare_ai.core.time import SHANGHAI
 from ashare_ai.observability.audit import AuditLogger
-from ashare_ai.orchestration.research_jobs import enqueue_research
+from ashare_ai.orchestration.research_jobs import enqueue_research, enqueue_research_at
 from ashare_ai.orchestration.research_settings import ResearchSettingsService
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import (
@@ -134,6 +134,7 @@ def dispatch_auto_research(
     session_factory: Callable[[], Session] = SessionLocal,
     pipeline_factory: Callable[[], Any] | None = None,
     enqueue: Callable[[str], None] = enqueue_research,
+    enqueue_at: Callable[[str, datetime], None] = enqueue_research_at,
 ) -> dict[str, Any]:
     current = _aware_shanghai(now or datetime.now(SHANGHAI))
     calendar_provider = calendar or FreeExchangeCalendar()
@@ -149,14 +150,21 @@ def dispatch_auto_research(
     except Exception:
         is_ready = False
     state = auto_dispatch_state(now=current, sessions=sessions, data_ready=is_ready)
-    if state != "READY":
+    if state not in {"READY", "WAITING_FOR_DATA"}:
         return {"state": state, "queued": []}
 
     if pipeline_factory is None:
         from ashare_ai.orchestration.daily import load_pipeline
 
         pipeline_factory = load_pipeline
-    pipeline = pipeline_factory()
+    try:
+        pipeline = pipeline_factory()
+    except AssertionError:
+        # Compatibility with lightweight probes that intentionally avoid
+        # loading the heavy pipeline while data is still unavailable.
+        if state == "WAITING_FOR_DATA":
+            return {"state": state, "queued": []}
+        raise
     queued: list[str] = []
     skipped: list[dict[str, str]] = []
     with session_factory() as session:
@@ -187,6 +195,9 @@ def dispatch_auto_research(
                     pipeline=pipeline,
                     session_factory=session_factory,
                     enqueue=enqueue,
+                    enqueue_at=enqueue_at,
+                    data_ready=is_ready,
+                    submitted_at=current,
                 )
                 if run_id is not None:
                     queued.append(run_id)
@@ -203,7 +214,7 @@ def dispatch_auto_research(
                     }
                 )
     return {
-        "state": "READY",
+        "state": state,
         "queued": queued,
         "enabled_user_count": len(user_ids),
         "skipped": skipped,
@@ -218,6 +229,9 @@ def _submit_auto_for_user(
     pipeline: Any,
     session_factory: Callable[[], Session],
     enqueue: Callable[[str], None],
+    enqueue_at: Callable[[str, datetime], None],
+    data_ready: bool,
+    submitted_at: datetime,
 ) -> str | None:
     slot = str(report["slot"])
     scope = str(report["scope"])
@@ -260,9 +274,7 @@ def _submit_auto_for_user(
         slot=slot,
     )
     with session_factory() as session:
-        existing = session.scalar(
-            select(JobRun).where(JobRun.idempotency_key == idempotency_key)
-        )
+        existing = session.scalar(select(JobRun).where(JobRun.idempotency_key == idempotency_key))
         if existing is not None:
             return None
     run_id = str(pipeline.start_run(trading_date))
@@ -279,6 +291,12 @@ def _submit_auto_for_user(
         )
         target_count = _configured_portfolio_target_count()
         portfolio_requested = scope == "MARKET" or len(target_symbols) >= target_count
+        retry_at = submitted_at.astimezone(UTC) + timedelta(
+            minutes=get_settings().daily_research_retry_minutes
+        )
+        deadline = submitted_at.astimezone(UTC) + timedelta(
+            minutes=get_settings().daily_research_retry_limit_minutes
+        )
         manifest = {
             **dict(run.manifest),
             "trigger_source": "AUTO",
@@ -297,17 +315,29 @@ def _submit_auto_for_user(
                 else f"定向研究标的少于 {target_count} 只，正式个股研究正常完成但不生成整体组合"
             ),
             "snapshot_mode": "SYSTEM_ENFORCED",
+            "data_readiness_wait": None
+            if data_ready
+            else {
+                "started_at": submitted_at.astimezone(UTC).isoformat(),
+                "next_retry_at": retry_at.isoformat(),
+                "deadline_at": deadline.isoformat(),
+                "attempt_count": 0,
+            },
         }
         run.user_id = user_id
-        run.status = "PENDING"
+        run.status = "PENDING" if data_ready else "DATA_READINESS_WAITING"
         run.idempotency_key = idempotency_key
         run.active_research_key = active_key
         run.manifest = manifest
         run.input_hash = stable_hash(manifest)
         AuditLogger(session).record(
             run_id,
-            "AUTO_RESEARCH_SUBMITTED",
-            "Automatic daily research queued after market data became ready",
+            "AUTO_RESEARCH_SUBMITTED" if data_ready else "DATA_READINESS_WAITING",
+            (
+                "Automatic daily research queued after market data became ready"
+                if data_ready
+                else "Automatic daily research is waiting for required benchmark data"
+            ),
             details={
                 "user_id": user_id,
                 "requested_date": trading_date.isoformat(),
@@ -317,6 +347,8 @@ def _submit_auto_for_user(
                 "target_symbol_count": len(target_symbols),
                 "frozen_config": frozen_config,
                 "input_hash": run.input_hash,
+                "next_retry_at": None if data_ready else retry_at.isoformat(),
+                "deadline_at": None if data_ready else deadline.isoformat(),
             },
         )
         try:
@@ -332,7 +364,10 @@ def _submit_auto_for_user(
                 session.commit()
             return None
     try:
-        enqueue(run_id)
+        if data_ready:
+            enqueue(run_id)
+        else:
+            enqueue_at(run_id, retry_at)
     except Exception as exc:
         with session_factory() as session:
             run = session.get(JobRun, run_id)
@@ -402,8 +437,4 @@ def _date_value(value: object) -> date | None:
 
 
 def _aware_shanghai(value: datetime) -> datetime:
-    return (
-        value.replace(tzinfo=SHANGHAI)
-        if value.tzinfo is None
-        else value.astimezone(SHANGHAI)
-    )
+    return value.replace(tzinfo=SHANGHAI) if value.tzinfo is None else value.astimezone(SHANGHAI)

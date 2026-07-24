@@ -8,6 +8,7 @@ import httpx
 from ashare_ai.core.config import Settings, get_settings
 
 _FORBIDDEN_ENGINES = {"baidu", "sogou"}
+_ALLOWED_ENGINES = {"google", "bing", "duckduckgo"}
 
 
 class SearXNGSearchClient:
@@ -44,7 +45,7 @@ class SearXNGSearchClient:
             "format": "json",
             "language": "en-US",
             "categories": "news",
-            "engines": "google,bing,duckduckgo,brave",
+            "engines": "google,bing,duckduckgo",
             "time_range": allowed_range,
         }
         response = httpx.get(
@@ -83,7 +84,11 @@ class SearXNGSearchClient:
             engine = str(row.get("engine") or "").casefold()
             url = str(row.get("url") or "")
             parsed = urlsplit(url)
-            if engine in _FORBIDDEN_ENGINES or parsed.scheme not in {"http", "https"}:
+            if (
+                engine in _FORBIDDEN_ENGINES
+                or (engine and engine not in _ALLOWED_ENGINES)
+                or parsed.scheme not in {"http", "https"}
+            ):
                 continue
             if not parsed.hostname or url in seen:
                 continue
@@ -102,8 +107,52 @@ class SearXNGSearchClient:
         return results
 
     def search(self, query: str, *, max_results: int | None = None) -> list[dict[str, Any]]:
-        """Backward-compatible alias for the news-only operation."""
-        return self.search_news(query, max_results=max_results)
+        """Search the public web with a bounded result and snippet budget."""
+        normalized = " ".join(query.split())[:256]
+        if not normalized:
+            return []
+        limit = min(max_results or self.settings.searxng_max_results, 5)
+        params = {
+            "q": normalized,
+            "format": "json",
+            "language": "en-US",
+            "categories": "general",
+            "engines": "google,bing,duckduckgo",
+        }
+        response = httpx.get(
+            f"{self.base_url}/search",
+            params=params,
+            headers={"User-Agent": "AShareResearch/1.0"},
+            timeout=self.settings.searxng_timeout_seconds,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        rows = payload.get("results", []) if isinstance(payload, dict) else []
+        results: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            engine = str(row.get("engine") or "").casefold()
+            url = str(row.get("url") or "")
+            parsed = urlsplit(url)
+            if engine not in _ALLOWED_ENGINES or parsed.scheme not in {"http", "https"}:
+                continue
+            if not parsed.hostname or url in seen:
+                continue
+            seen.add(url)
+            results.append(
+                {
+                    "title": str(row.get("title") or parsed.hostname)[:300],
+                    "url": url[:2048],
+                    "snippet": str(row.get("content") or "")[:1200],
+                    "engine": engine,
+                    "published_at": row.get("publishedDate"),
+                }
+            )
+            if len(results) >= limit:
+                break
+        return results
 
     def available(self) -> bool:
         try:

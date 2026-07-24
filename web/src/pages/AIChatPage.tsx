@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm'
 import { api, streamAIChat } from '../api'
 import { Empty, ErrorNotice, formatTime, Loading, Panel } from '../components/Ui'
 import { useMarket } from '../context/MarketContext'
-import type { AIChatAttachment, AIChatMessage, AIChatThread } from '../types'
+import type { AIChatAttachment, AIChatMessage, AIChatThread, AICostSummary } from '../types'
 
 type LiveReply = { messageId: string; content: string; status: 'PENDING' | 'STREAMING' | 'FAILED' | 'CANCELLED' }
 type ChatStage = 'retrieval' | 'market' | 'news' | 'generation'
@@ -39,6 +39,11 @@ function safeHref(value?: string) {
     const parsed = new URL(value)
     return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.href : null
   } catch { return null }
+}
+
+function money(value: number | string | undefined) {
+  const amount = Number(value || 0)
+  return `$${amount.toFixed(6)}`
 }
 
 function currentMention(value: string, caret: number): MentionMatch | null {
@@ -125,6 +130,7 @@ export function AIChatPage() {
   const [stages, setStages] = useState<Partial<Record<ChatStage, StageState>>>({})
   const [streamingMode, setStreamingMode] = useState<'STREAMING' | 'DEGRADED' | 'CACHED' | null>(null)
   const [dataStatus, setDataStatus] = useState<Record<string, unknown> | null>(null)
+  const [costSummary, setCostSummary] = useState<AICostSummary | null>(null)
 
   async function loadThreads(preferredId?: string) {
     const payload = await api.aiChatThreadIndex({ q: search || undefined, archived: showArchived, limit: 100 })
@@ -141,8 +147,10 @@ export function AIChatPage() {
   }, [search, showArchived])
   useEffect(() => {
     setAttachments([]); setLiveReply(null); setStages({}); setStreamingMode(null); setDataStatus(null)
-    if (thread) void api.aiChatMessages(thread.thread_id).then(setMessages).catch((reason) => setError(reason instanceof Error ? reason.message : '消息加载失败'))
-    else setMessages([])
+    if (thread) {
+      void api.aiChatMessages(thread.thread_id).then(setMessages).catch((reason) => setError(reason instanceof Error ? reason.message : '消息加载失败'))
+      void api.aiCostSummary({ days: 30, threadId: thread.thread_id }).then(setCostSummary).catch(() => setCostSummary(null))
+    } else { setMessages([]); setCostSummary(null) }
   }, [thread?.thread_id])
   useEffect(() => { messagesEnd.current?.scrollIntoView({ block: 'end', behavior: 'smooth' }) }, [messages, liveReply?.content])
   useEffect(() => () => { if (animation.current !== null) cancelAnimationFrame(animation.current) }, [])
@@ -254,7 +262,7 @@ export function AIChatPage() {
         if (event.type === 'delta') enqueueDelta(String(event.delta || ''))
         if (event.type === 'done') { flushQueue(); if (typeof event.streaming_mode === 'string') setStreamingMode(event.streaming_mode as 'STREAMING' | 'DEGRADED' | 'CACHED') }
       }, controller.signal, crypto.randomUUID())
-      flushQueue(); setMessages(await api.aiChatMessages(activeThread.thread_id)); setLiveReply(null); await loadThreads(activeThread.thread_id)
+      flushQueue(); setMessages(await api.aiChatMessages(activeThread.thread_id)); void api.aiCostSummary({ days: 30, threadId: activeThread.thread_id }).then(setCostSummary).catch(() => setCostSummary(null)); setLiveReply(null); await loadThreads(activeThread.thread_id)
     } catch (reason) {
       flushQueue()
       const cancelled = controller.signal.aborted
@@ -277,6 +285,7 @@ export function AIChatPage() {
       {(busy || Object.keys(stages).length > 0) && <div className="chat-stage-strip" aria-live="polite">{(['retrieval', 'market', 'news', 'generation'] as ChatStage[]).map((stage) => <span className={`chat-stage ${stages[stage]?.status?.toLowerCase() || 'waiting'}`} key={stage}>{({ retrieval: '检索', market: '行情', news: '新闻', generation: '生成' } as Record<ChatStage, string>)[stage]}：{stages[stage]?.status === 'DEGRADED' ? '已降级' : stages[stage]?.status === 'CACHED' ? '缓存' : stages[stage]?.status === 'COMPLETED' ? '完成' : stages[stage]?.status === 'STARTED' ? '进行中' : '等待'}{stages[stage]?.cacheHit ? ' · 命中' : ''}</span>)}</div>}
       {streamingMode === 'DEGRADED' && <div className="warning-box chat-degraded"><strong>流式已降级</strong><p>当前模型网关返回一次性结果；本次状态已记录并通知管理员。</p></div>}
       {dataStatus && <details className="chat-data-status"><summary>查看本次上下文数据状态</summary><pre>{JSON.stringify(dataStatus, null, 2)}</pre></details>}
+      {costSummary && <section className="chat-cost-panel" aria-label="AI 成本摘要"><div className="chat-cost-heading"><strong>本轮与近 30 天成本</strong><small>估算金额以当前模型档案单价为准</small></div><div className="chat-cost-grid"><div><span>本轮支出</span><strong>{money(costSummary.current_turn?.estimated_spend_usd)}</strong><small>节省 {money(costSummary.current_turn?.estimated_savings_usd)}</small></div><div><span>近 30 天支出</span><strong>{money(costSummary.totals.estimated_spend_usd)}</strong><small>节省 {money(costSummary.totals.estimated_savings_usd)}</small></div><div><span>缓存读取 / 写入</span><strong>{costSummary.totals.cached_input_tokens.toLocaleString()} / {costSummary.totals.cache_write_tokens.toLocaleString()}</strong><small>未缓存输入 {costSummary.totals.uncached_input_tokens.toLocaleString()}</small></div><div><span>缓存命中率</span><strong>{costSummary.totals.requests ? `${(costSummary.totals.cache_hits / costSummary.totals.requests * 100).toFixed(1)}%` : '0.0%'}</strong><small>{costSummary.totals.cache_hits} / {costSummary.totals.requests} 次</small></div></div></section>}
       <div className="chat-messages">{messages.map((item) => <article key={item.message_id} className={`${item.role} ${item.status?.toLowerCase() || ''}`}><header><strong>{item.role === 'user' ? '你' : 'AI 研究助手'}</strong><small>{item.cache_hit ? '缓存命中 · ' : ''}{item.streaming_mode === 'DEGRADED' ? '一次性回复 · ' : ''}{item.status && !['COMPLETED'].includes(item.status) ? `${item.status === 'CANCELLED' ? '未完成' : '回复失败'} · ` : ''}{formatTime(item.created_at)}</small></header><div className="markdown-content"><SafeMarkdown content={item.content} /></div>{Boolean(item.attachment_ids?.length) && <div className="message-images">{item.attachment_ids?.map((id) => <AttachmentImage id={id} key={id} />)}</div>}{item.sources.length > 0 && <details><summary>查看 {item.sources.length} 个数据来源</summary><ul>{item.sources.map((source, index) => { const href = typeof source.uri === 'string' ? safeHref(source.uri) : null; return <li key={index}>{href ? <a href={href} target="_blank" rel="noreferrer noopener">{String(source.title || source.uri)}</a> : String(source.symbol || source.source || '系统数据')}</li> })}</ul></details>}</article>)}{liveReply && <article className={`assistant streaming ${liveReply.status.toLowerCase()}`}><header><strong>AI 研究助手</strong><small>{liveReply.status === 'PENDING' ? 'AI 正在回复…' : '正在生成…'}</small></header><div className="markdown-content"><SafeMarkdown content={liveReply.content} /></div><i className="stream-cursor" /></article>}<div ref={messagesEnd} /></div>
       {attachments.length > 0 && <div className="pending-images">{attachments.map((item) => <div key={item.attachment_id}><AttachmentImage id={item.attachment_id} /><button aria-label="移除图片" onClick={() => setAttachments((current) => current.filter((entry) => entry.attachment_id !== item.attachment_id))}>×</button><small>{formatTime(item.expires_at)} 销毁</small></div>)}</div>}
       <div className="image-retention-warning">图片将在上传 7 天后自动销毁，请自行保存原图。到期后历史对话仅保留占位和已有 AI 分析。</div>

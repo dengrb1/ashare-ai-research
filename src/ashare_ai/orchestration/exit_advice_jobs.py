@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from datetime import UTC, date, datetime, time
+from datetime import UTC, datetime, time
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from typing import Any, Literal
 
@@ -22,6 +22,10 @@ from ashare_ai.core.hashing import canonical_json, sha256_bytes, stable_hash
 from ashare_ai.core.time import SHANGHAI
 from ashare_ai.market.service import get_market_data_service
 from ashare_ai.notifications.service import NotificationService
+from ashare_ai.orchestration.operation_runs import (
+    create_operation_run,
+    transition_operation_run,
+)
 from ashare_ai.orchestration.redis_queue import RedisLeasedQueue
 from ashare_ai.orchestration.research_schedule import FreeExchangeCalendar
 from ashare_ai.storage.database import SessionLocal
@@ -35,6 +39,7 @@ from ashare_ai.storage.models import (
     UserAssetState,
 )
 from ashare_ai.trading.rules import RuleContext, TradingRuleRepository
+from ashare_ai.trading.sellability import position_sellability
 
 QUEUE_NAME = "ashare:exit-advice:pending"
 PROCESSING_QUEUE_NAME = "ashare:exit-advice:processing"
@@ -268,6 +273,18 @@ def _create_exit_advice_row(
     )
     session.add(row)
     session.flush()
+    operation = create_operation_run(
+        session,
+        user_id=row.user_id,
+        run_type="EXIT_ADVICE",
+        resource_id=row.advice_id,
+        trading_date=row.decision_at.astimezone(SHANGHAI).date(),
+        decision_at=row.decision_at,
+        input_hash=row.input_hash,
+        manifest={"symbol": row.symbol, "trigger_type": row.trigger_type},
+        created_at=row.created_at,
+    )
+    row.operation_run_id = operation.run_id
     return row
 
 
@@ -461,6 +478,19 @@ def dispatch_exit_advice(
                 created_at=datetime.now(UTC),
             )
             session.add(row)
+            session.flush()
+            operation = create_operation_run(
+                session,
+                user_id=row.user_id,
+                run_type="EXIT_ADVICE",
+                resource_id=row.advice_id,
+                trading_date=row.decision_at.astimezone(SHANGHAI).date(),
+                decision_at=row.decision_at,
+                input_hash=row.input_hash,
+                manifest={"symbol": row.symbol, "trigger_type": row.trigger_type},
+                created_at=row.created_at,
+            )
+            row.operation_run_id = operation.run_id
             try:
                 session.commit()
             except IntegrityError:
@@ -537,6 +567,14 @@ def execute_exit_advice(advice_id: str) -> dict[str, Any]:
         if row.status == "SUCCEEDED":
             return row.result or {}
         row.status = "RUNNING"
+        transition_operation_run(
+            session,
+            row.operation_run_id,
+            status="RUNNING",
+            event_type="EXIT_ADVICE_STARTED",
+            message="Exit advice generation started",
+            details={"advice_id": row.advice_id, "symbol": row.symbol},
+        )
         session.commit()
         reference = row.research_context.get("model_configuration")
         runtime = (
@@ -603,7 +641,10 @@ def execute_exit_advice(advice_id: str) -> dict[str, Any]:
             cached.hit_count += 1
             cached.last_hit_at = now
             cache_hit = True
-            input_tokens = output_tokens = 0
+            input_tokens = cached.input_tokens
+            cached_input_tokens = cached.input_tokens
+            cache_write_tokens = reasoning_tokens = 0
+            output_tokens = cached.output_tokens
         else:
             client = OpenAICompatibleStructuredLLMClient(
                 base_url=runtime.base_url,
@@ -612,6 +653,7 @@ def execute_exit_advice(advice_id: str) -> dict[str, Any]:
                 reasoning_effort=runtime.research_reasoning_effort,
                 timeout_seconds=runtime.timeout_seconds,
                 max_retries=1,
+                cache_policy=runtime.profile_for(runtime.research_model).cache_policy,
             )
             generation = asyncio.run(
                 client.generate_structured(
@@ -622,7 +664,10 @@ def execute_exit_advice(advice_id: str) -> dict[str, Any]:
             )
             analysis = ExitAdviceAnalysis.model_validate(generation.output)
             input_tokens = generation.metadata.input_tokens
+            cached_input_tokens = generation.metadata.cached_input_tokens
+            cache_write_tokens = generation.metadata.cache_write_tokens
             output_tokens = generation.metadata.output_tokens
+            reasoning_tokens = generation.metadata.reasoning_tokens
             cache_hit = False
             session.add(
                 AIResponseCacheRow(
@@ -635,7 +680,11 @@ def execute_exit_advice(advice_id: str) -> dict[str, Any]:
                     prompt_version=PROMPT_VERSION,
                     response=generation.output,
                     input_tokens=input_tokens,
+                    cached_input_tokens=cached_input_tokens,
+                    cache_write_tokens=cache_write_tokens,
                     output_tokens=output_tokens,
+                    reasoning_tokens=reasoning_tokens,
+                    cache_policy=generation.metadata.cache_policy,
                     created_at=now,
                     expires_at=now.replace(hour=23, minute=59, second=59, microsecond=0),
                 )
@@ -645,7 +694,10 @@ def execute_exit_advice(advice_id: str) -> dict[str, Any]:
             **analysis.model_dump(mode="json", exclude={"ladder"}),
             **validated,
             "input_tokens": input_tokens,
+            "cached_input_tokens": cached_input_tokens,
+            "cache_write_tokens": cache_write_tokens,
             "output_tokens": output_tokens,
+            "reasoning_tokens": reasoning_tokens,
         }
         row.status = "SUCCEEDED"
         row.action = analysis.action
@@ -655,6 +707,15 @@ def execute_exit_advice(advice_id: str) -> dict[str, Any]:
         row.response_sha256 = stable_hash(result)
         row.cache_hit = cache_hit
         row.completed_at = datetime.now(UTC)
+        transition_operation_run(
+            session,
+            row.operation_run_id,
+            status="SUCCEEDED",
+            event_type="EXIT_ADVICE_COMPLETED",
+            message="Exit advice generation completed",
+            details={"advice_id": row.advice_id, "symbol": row.symbol},
+            output_hash=row.response_sha256,
+        )
         NotificationService(session).create(
             user_id=row.user_id,
             notification_type="EXIT_ADVICE_COMPLETED",
@@ -674,17 +735,11 @@ def _validate_sell_ladder(
     session: Session, row: ExitAdviceRow, analysis: ExitAdviceAnalysis
 ) -> dict[str, Any]:
     position = row.position_snapshot
-    total = int(position.get("quantity", 0))
-    acquired_raw = position.get("acquired_on")
-    blockers: list[str] = []
-    if not acquired_raw:
-        blockers.append("MISSING_ACQUIRED_ON")
-        sellable = 0
-    else:
-        acquired_on = date.fromisoformat(str(acquired_raw))
-        sellable = total if acquired_on < row.decision_at.astimezone(SHANGHAI).date() else 0
-        if sellable == 0:
-            blockers.append("T1_NOT_SELLABLE")
+    eligibility = position_sellability(
+        position, trading_date=row.decision_at.astimezone(SHANGHAI).date()
+    )
+    blockers: list[str] = list(eligibility.blockers)
+    sellable = eligibility.sellable_quantity
     master = session.scalar(
         select(SecurityMaster)
         .where(
@@ -799,6 +854,15 @@ def _record_exit_failure(
     row.error_message = failure_code
     row.result = {"failure_code": failure_code, "paper_trade_only": True}
     row.completed_at = datetime.now(UTC)
+    transition_operation_run(
+        session,
+        row.operation_run_id,
+        status=status,
+        event_type="EXIT_ADVICE_FAILED",
+        message="Exit advice generation failed",
+        details={"advice_id": row.advice_id, "failure_code": failure_code},
+        error_message=failure_code,
+    )
     NotificationService(session).create(
         user_id=row.user_id,
         notification_type=notification_type,

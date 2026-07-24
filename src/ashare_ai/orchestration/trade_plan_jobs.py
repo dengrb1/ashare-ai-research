@@ -28,6 +28,7 @@ from ashare_ai.notifications.service import NotificationService
 from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.orchestration.builtin_backtest import read_backtest_bundle
 from ashare_ai.orchestration.daily import flow
+from ashare_ai.orchestration.operation_runs import transition_operation_run
 from ashare_ai.orchestration.redis_queue import RedisLeasedQueue
 from ashare_ai.orchestration.trade_plan_queue import (
     PROCESSING_QUEUE_NAME,
@@ -88,6 +89,14 @@ def execute_trade_plan_job(
             raise ValueError("trade plan requires all input snapshots to be COMMITTED")
         row.status = "RUNNING"
         row.started_at = datetime.now(UTC)
+        transition_operation_run(
+            session,
+            row.operation_run_id,
+            status="RUNNING",
+            event_type="TRADE_PLAN_STARTED",
+            message="Trade Plan worker started deterministic optimization",
+            details={"plan_id": plan_id, "snapshot_ids": row.snapshot_ids},
+        )
         AuditLogger(session).record(
             row.run_id,
             "TRADE_PLAN_STARTED",
@@ -96,8 +105,7 @@ def execute_trade_plan_job(
         )
         snapshot_uris = {item.snapshot_id: item.parquet_uri for item in manifests}
         expected_hashes = {
-            item.snapshot_id: str(item.details.get("parquet_file_sha256", ""))
-            for item in manifests
+            item.snapshot_id: str(item.details.get("parquet_file_sha256", "")) for item in manifests
         }
         session.commit()
 
@@ -137,9 +145,7 @@ def execute_trade_plan_job(
             for symbol in row.symbols
         }
         rules_by_symbol = {
-            symbol: {
-                item.trading_date: item.rule for item in bundle.rules if item.symbol == symbol
-            }
+            symbol: {item.trading_date: item.rule for item in bundle.rules if item.symbol == symbol}
             for symbol in row.symbols
         }
         adv_by_symbol = {
@@ -171,12 +177,8 @@ def execute_trade_plan_job(
                 volatilities=volatility_by_symbol[symbol],
                 execution_config=bundle.config.execution,
                 maximum_drawdown=float(optimizer_policy.get("maximum_drawdown", 0.12)),
-                minimum_completed_trades=int(
-                    optimizer_policy.get("minimum_completed_trades", 5)
-                ),
-                maximum_history_sessions=int(
-                    optimizer_policy.get("history_sessions", 240)
-                ),
+                minimum_completed_trades=int(optimizer_policy.get("minimum_completed_trades", 5)),
+                maximum_history_sessions=int(optimizer_policy.get("history_sessions", 240)),
                 training_sessions=int(optimizer_policy.get("training_sessions", 160)),
                 validation_sessions=int(optimizer_policy.get("validation_sessions", 80)),
                 entry_discounts=tuple(
@@ -197,9 +199,7 @@ def execute_trade_plan_job(
                 ),
                 maximum_holding_options=tuple(
                     int(value)
-                    for value in optimizer_policy.get(
-                        "maximum_holding_sessions", [10, 20, 40, 60]
-                    )
+                    for value in optimizer_policy.get("maximum_holding_sessions", [10, 20, 40, 60])
                 ),
                 entry_valid_sessions=int(optimizer_policy.get("entry_valid_sessions", 3)),
                 entry_step_sessions=int(optimizer_policy.get("entry_step_sessions", 10)),
@@ -218,8 +218,7 @@ def execute_trade_plan_job(
             for symbol in row.symbols
         }
         future_dates = tuple(
-            date.fromisoformat(value)
-            for value in manifest_details.get("future_trading_dates", [])
+            date.fromisoformat(value) for value in manifest_details.get("future_trading_dates", [])
         )
         saved_positions = [
             TradePlanPositionInput(
@@ -249,9 +248,9 @@ def execute_trade_plan_job(
         candidate_inputs = []
         for symbol in row.symbols:
             candidate = candidate_by_symbol[symbol]
-            latest_volatility = max(
-                volatility_by_symbol[symbol].items(), key=lambda item: item[0]
-            )[1]
+            latest_volatility = max(volatility_by_symbol[symbol].items(), key=lambda item: item[0])[
+                1
+            ]
             candidate_inputs.append(
                 TradePlanCandidateInput(
                     symbol=symbol,
@@ -272,9 +271,7 @@ def execute_trade_plan_job(
             total_assets=total_assets,
             available_cash=available_cash,
             requested_budget=Decimal(requested_budget),
-            score_exit_threshold=Decimal(
-                str(optimizer_policy.get("score_exit_threshold", 60))
-            ),
+            score_exit_threshold=Decimal(str(optimizer_policy.get("score_exit_threshold", 60))),
         )
         explanation = _generate_ai_explanation(
             plan=result,
@@ -308,6 +305,15 @@ def execute_trade_plan_job(
         completed.object_sha256 = object_sha256
         completed.active_trade_plan_key = None
         completed.completed_at = datetime.now(UTC)
+        transition_operation_run(
+            session,
+            completed.operation_run_id,
+            status="SUCCEEDED",
+            event_type="TRADE_PLAN_COMPLETED",
+            message="Deterministic Trade Plan completed",
+            details={"plan_id": plan_id, "outcome": result.outcome.value},
+            output_hash=output_hash,
+        )
         AuditLogger(session).record(
             completed.run_id,
             "TRADE_PLAN_COMPLETED",
@@ -348,6 +354,15 @@ def mark_trade_plan_failed(
         row.error_message = safe_error_message(error)
         row.active_trade_plan_key = None
         row.completed_at = datetime.now(UTC)
+        transition_operation_run(
+            session,
+            row.operation_run_id,
+            status="FAILED",
+            event_type="TRADE_PLAN_FAILED",
+            message="Trade Plan generation failed",
+            details={"plan_id": plan_id, "error_type": type(error).__name__},
+            error_message=safe_error_message(error),
+        )
         AuditLogger(session).record(
             row.run_id,
             "TRADE_PLAN_FAILED",
@@ -390,6 +405,7 @@ def _generate_ai_explanation(
             reasoning_effort=runtime.research_reasoning_effort,
             timeout_seconds=runtime.timeout_seconds,
             max_retries=1,
+            cache_policy=runtime.profile_for(runtime.research_model).cache_policy,
         )
         items: dict[str, Any] = {}
         for symbol_plan in plan.symbol_plans:
@@ -447,6 +463,12 @@ def _generate_ai_explanation(
                         "reasoning_effort": cached.reasoning_effort,
                         "response_sha256": cached.response_sha256,
                         "cache_hit": True,
+                        "input_tokens": cached.input_tokens,
+                        "cached_input_tokens": cached.input_tokens,
+                        "cache_write_tokens": 0,
+                        "output_tokens": cached.output_tokens,
+                        "reasoning_tokens": 0,
+                        "cache_policy": cached.cache_policy,
                     }
                 else:
                     generation = asyncio.run(
@@ -469,7 +491,11 @@ def _generate_ai_explanation(
                             prompt_version=PROMPT_VERSION,
                             response=generation.output,
                             input_tokens=generation.metadata.input_tokens,
+                            cached_input_tokens=generation.metadata.cached_input_tokens,
+                            cache_write_tokens=generation.metadata.cache_write_tokens,
                             output_tokens=generation.metadata.output_tokens,
+                            reasoning_tokens=generation.metadata.reasoning_tokens,
+                            cache_policy=generation.metadata.cache_policy,
                             created_at=datetime.now(UTC),
                             expires_at=datetime.now(UTC) + timedelta(days=7),
                         )
@@ -480,6 +506,12 @@ def _generate_ai_explanation(
                         "reasoning_effort": generation.metadata.reasoning_effort,
                         "response_sha256": response_sha,
                         "cache_hit": False,
+                        "input_tokens": generation.metadata.input_tokens,
+                        "cached_input_tokens": generation.metadata.cached_input_tokens,
+                        "cache_write_tokens": generation.metadata.cache_write_tokens,
+                        "output_tokens": generation.metadata.output_tokens,
+                        "reasoning_tokens": generation.metadata.reasoning_tokens,
+                        "cache_policy": generation.metadata.cache_policy,
                     }
             items[symbol_plan.symbol] = {
                 **explanation.model_dump(mode="json"),

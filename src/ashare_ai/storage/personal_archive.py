@@ -363,6 +363,7 @@ def _preview_history_classification(
                 "request_sha256",
                 "attachment_ids",
                 "attachments",
+                "private_context_snapshot",
             },
         ),
         (
@@ -578,6 +579,9 @@ def _collect_profile(
         sanitized_message = _sanitize_paths(_row_dict(row) or {})
         item = sanitized_message if isinstance(sanitized_message, dict) else {}
         item["content"] = _strip_image_data_urls(str(item.get("content") or ""))
+        # The normalized prompt snapshot is an internal cache-replay artifact,
+        # never user-visible conversation content and never exportable data.
+        item.pop("private_context_snapshot", None)
         attachment_count = len(item.pop("attachment_ids", []) or [])
         item.pop("idempotency_key_sha256", None)
         item.pop("request_sha256", None)
@@ -1163,6 +1167,7 @@ def _import_threads(
                     "request_sha256",
                     "attachment_ids",
                     "attachments",
+                    "private_context_snapshot",
                 },
             )
         ):
@@ -1189,6 +1194,7 @@ def _import_threads(
                     "request_sha256",
                     "attachment_ids",
                     "attachments",
+                    "private_context_snapshot",
                 },
             ):
                 raise PersonalArchiveError(

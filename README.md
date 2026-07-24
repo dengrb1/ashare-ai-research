@@ -116,7 +116,7 @@ npm run dev
 
 持仓页可启用盘中盈利退出监控、止损预警和自选股买入区间监控。交易日 09:30–11:30、13:00–15:00 每分钟合并行情后检查；止损线优先使用手工价格，缺失时以 20 个后复权日 K 的 ATR 推导并限制在成本价下方 5%-10%，历史不足时使用 8%。触发止损时先写入高优先级通知，再排队快速 AI 退出研究；用户也可手动提交某个现有持仓的退出研究。正式评分合格且 Trade Plan 为 `BUY` 的自选股，仅在下一个交易日的有效入场区间首次命中时提示。所有路径只创建通知、研究和模拟方案，不自动买入、卖出或修改持仓。
 
-研究中心提供持久化 AI 股票问答。用户可用任意 `@名称`、`@002138` 或 `@600690.SH` 附加由已提交证券主数据精确解析的行情、近 30 根日 K、个人持仓、最近正式评分和强相关新闻；同名歧义会拒绝绑定。无历史 `decision_at` 时服务端在并行数据返回后冻结实时决策时点；显式历史时点只读取 PIT 合格评分与日 K，不混入当前持仓、实时行情或新闻。响应默认通过 Responses API SSE 输出检索、行情、新闻和生成阶段及增量 Markdown；不兼容网关会明确标为非流式降级并通知管理员。Markdown 不解释原始 HTML、不加载远程图片，并限制危险链接协议。联网新闻仅通过同一 Compose 私有网络中的 SearXNG，查询词含股票名称、代码和新闻/公告/行业快讯，最多保留 5 条强相关去重结果；模型不会获得数据库、凭据或任意内网访问能力。
+研究中心提供持久化 AI 问答。用户可询问任意问题，也可用 `@名称`、`@002138` 或 `@600690.SH` 附加由已提交证券主数据精确解析的行情、近 30 根日 K、个人持仓、最近正式评分和强相关新闻；同名歧义会拒绝绑定。启用联网时通过同一 Compose 私有网络中的 SearXNG 检索最多 5 条 Google、Bing 或 DuckDuckGo 结果，公共检索按 SHA-256 查询键缓存，含“最新、今日、实时”等时效词缓存 5 分钟，普通查询缓存 30 分钟，并以 Redis 单飞抑制并发重复请求。无历史 `decision_at` 时服务端在并行数据返回后冻结实时决策时点；显式历史时点只读取 PIT 合格数据并禁止联网，避免未来信息。模型不会获得数据库、凭据或任意内网访问能力。
 
 ### 完整 Docker 栈
 
@@ -231,6 +231,7 @@ docker compose -p ashare-ai -f compose.yaml -f compose.ghcr.yaml up -d
 - `GET /api/v1/securities/resolve`
 - `GET /api/v1/ai/models`
 - `GET /api/v1/ai/chat/metrics`
+- `GET /api/v1/ai/costs?days=30`
 - `GET|POST /api/v1/ai/chat/threads`
 - `GET /api/v1/ai/chat/thread-index`
 - `PATCH|DELETE /api/v1/ai/chat/threads/{thread_id}`
@@ -372,7 +373,7 @@ WebGUI 可选择动态市场股票池、从当前用户的自选与持仓中自�
 配置 `TUSHARE_TOKEN` 后，Research Worker 也只在免费源失败、历史缺失或财报/公告字段
 不完整时补用 Tushare，并把各数据集的实际来源写入冻结记录。
 Demo 数据必须同时显式设置 `CANONICAL_BUNDLE_MODE=demo` 和 `ALLOW_DEMO_DATA=true`。
-管理员可在 WebGUI 的“模型设置”页配置 OpenAI-compatible Responses API。配置以不可变
+管理员可在 WebGUI 的“模型设置”页配置 OpenAI-compatible Responses API，并为每个已配置模型维护 `GROK`、`OPENAI` 或 `COMPATIBLE` 缓存档案、上下文窗口、输出/推理预留和每百万 token 单价。旧配置默认保持 `COMPATIBLE`，不会向未知网关发送专属缓存字段。聊天会按安全预算保留完整最近轮次；固定 PIT 上下文或当前问题超预算时明确拒绝。Grok 对话内部按严格追加消息链重放私有动态快照，OpenAI 可使用稳定缓存键和增量 Responses 续接；快照不会出现在消息、导出或公开 API 中。聊天页会显示本轮与近 30 天输入、缓存读取/写入、未缓存输入、命中率以及按管理员单价估算的支出和节省。配置以不可变
 版本保存，API Key 使用 `MODEL_SETTINGS_ENCRYPTION_KEYS` 加密且永不回传；搜索模型与研究
 模型可分别设置。启用新版本前必须通过严格 JSON Schema 连通性探测，失败时旧版本继续
 生效。每次日研会把配置 ID、版本和哈希固定到 Manifest，排队或运行中的任务不会跟随

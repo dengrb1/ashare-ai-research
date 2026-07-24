@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from collections.abc import AsyncIterator, Mapping, Sequence
 from time import perf_counter
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -17,6 +18,34 @@ from ashare_ai.agents.protocols import GenerationMetadata, StructuredGeneration
 _CODE_FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", flags=re.DOTALL | re.IGNORECASE)
 _RETRYABLE_STATUS_CODES = frozenset({408, 409, 429, 500, 502, 503, 504})
 _STREAM_RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+_CACHE_POLICIES = frozenset({"GROK", "OPENAI", "COMPATIBLE"})
+CachePolicy = Literal["GROK", "OPENAI", "COMPATIBLE"]
+
+
+class ModelUsage(tuple[int, int, int, int, int]):
+    """Normalized supplier usage: input, cached read, cache write, output, reasoning."""
+
+    __slots__ = ()
+
+    @property
+    def input_tokens(self) -> int:
+        return self[0]
+
+    @property
+    def cached_input_tokens(self) -> int:
+        return self[1]
+
+    @property
+    def cache_write_tokens(self) -> int:
+        return self[2]
+
+    @property
+    def output_tokens(self) -> int:
+        return self[3]
+
+    @property
+    def reasoning_tokens(self) -> int:
+        return self[4]
 
 
 class OpenAICompatibleError(RuntimeError):
@@ -56,6 +85,7 @@ class OpenAICompatibleStructuredLLMClient:
         timeout_seconds: float = 60.0,
         max_retries: int = 2,
         retry_backoff: float = 0.25,
+        cache_policy: CachePolicy = "COMPATIBLE",
         client: httpx.AsyncClient | None = None,
     ) -> None:
         if not base_url.strip():
@@ -70,6 +100,8 @@ class OpenAICompatibleStructuredLLMClient:
             raise ValueError("max_retries must be non-negative")
         if retry_backoff < 0:
             raise ValueError("retry_backoff must be non-negative")
+        if cache_policy not in _CACHE_POLICIES:
+            raise ValueError("cache_policy must be GROK, OPENAI or COMPATIBLE")
 
         normalized_url = base_url.rstrip("/")
         self._base_url = (
@@ -81,6 +113,7 @@ class OpenAICompatibleStructuredLLMClient:
         self._timeout = timeout_seconds
         self._max_retries = max_retries
         self._retry_backoff = retry_backoff
+        self._cache_policy = cache_policy
         self._client = client
 
     async def generate_structured(
@@ -127,7 +160,11 @@ class OpenAICompatibleStructuredLLMClient:
                     if response.status_code in _RETRYABLE_STATUS_CODES:
                         raise _RetryableResponseError(response)
                     if response.is_error:
-                        raise OpenAICompatibleError(_http_error_message(response))
+                        raise OpenAICompatibleError(
+                            _http_error_message(response),
+                            code=_status_error_code(response.status_code),
+                            status_code=response.status_code,
+                        )
                     response_data = _decode_response(response)
                     parsed_output = _parse_output(_extract_output_text(response_data))
                     try:
@@ -143,8 +180,12 @@ class OpenAICompatibleStructuredLLMClient:
                             provider=self.provider,
                             model_name=str(response_data.get("model") or self._model),
                             reasoning_effort=self._reasoning_effort,
-                            input_tokens=usage[0],
-                            output_tokens=usage[1],
+                            input_tokens=usage.input_tokens,
+                            cached_input_tokens=usage.cached_input_tokens,
+                            cache_write_tokens=usage.cache_write_tokens,
+                            output_tokens=usage.output_tokens,
+                            reasoning_tokens=usage.reasoning_tokens,
+                            cache_policy=self._cache_policy,
                             duration_ms=int((perf_counter() - started) * 1000),
                             retry_count=attempts,
                         ),
@@ -170,6 +211,7 @@ class OpenAICompatibleStructuredLLMClient:
         messages: tuple[Mapping[str, Any], ...],
         idempotency_key: str,
         previous_response_id: str | None = None,
+        prompt_cache_key: str | None = None,
         allow_degraded: bool = True,
     ) -> AsyncIterator[dict[str, Any]]:
         """Yield normalized Responses API text deltas and a final usage event."""
@@ -181,12 +223,16 @@ class OpenAICompatibleStructuredLLMClient:
             "reasoning": {"effort": self._reasoning_effort},
             "stream": True,
         }
-        if previous_response_id:
+        advanced_controls = self._cache_policy == "OPENAI"
+        if advanced_controls and previous_response_id:
             request_body["previous_response_id"] = previous_response_id
+        if advanced_controls:
+            request_body["prompt_cache_key"] = _prompt_cache_key(prompt_cache_key, messages)
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(timeout=self._timeout)
         attempts = 0
         emitted_text = False
+        advanced_fallback_used = False
         try:
             while True:
                 try:
@@ -241,12 +287,12 @@ class OpenAICompatibleStructuredLLMClient:
                                         if isinstance(completed, dict)
                                         else self._model
                                     ),
-                                    "input_tokens": _non_negative_int(
-                                        usage.get("input_tokens", 0)
-                                    ),
-                                    "output_tokens": _non_negative_int(
-                                        usage.get("output_tokens", 0)
-                                    ),
+                                    "input_tokens": _usage(usage).input_tokens,
+                                    "cached_input_tokens": _usage(usage).cached_input_tokens,
+                                    "cache_write_tokens": _usage(usage).cache_write_tokens,
+                                    "output_tokens": _usage(usage).output_tokens,
+                                    "reasoning_tokens": _usage(usage).reasoning_tokens,
+                                    "cache_policy": self._cache_policy,
                                 }
                                 if isinstance(completed, dict) and isinstance(
                                     completed.get("id"), str
@@ -282,6 +328,20 @@ class OpenAICompatibleStructuredLLMClient:
                         ) from exc
                 except OpenAICompatibleError as exc:
                     if (
+                        advanced_controls
+                        and not advanced_fallback_used
+                        and not emitted_text
+                        and exc.status_code in {400, 404, 422}
+                    ):
+                        # Proxies sometimes advertise Responses but reject OpenAI-only
+                        # cache/session parameters. The failed pre-body request keeps
+                        # the same idempotency key, so stripping controls cannot create
+                        # a second answer.
+                        request_body.pop("previous_response_id", None)
+                        request_body.pop("prompt_cache_key", None)
+                        advanced_fallback_used = True
+                        continue
+                    if (
                         not emitted_text
                         and allow_degraded
                         and _can_degrade_stream(exc)
@@ -298,7 +358,11 @@ class OpenAICompatibleStructuredLLMClient:
                             "type": "completed",
                             "model": degraded["model"],
                             "input_tokens": degraded["input_tokens"],
+                            "cached_input_tokens": degraded["cached_input_tokens"],
+                            "cache_write_tokens": degraded["cache_write_tokens"],
                             "output_tokens": degraded["output_tokens"],
+                            "reasoning_tokens": degraded["reasoning_tokens"],
+                            "cache_policy": degraded["cache_policy"],
                             "response_id": degraded["response_id"],
                         }
                         return
@@ -356,8 +420,12 @@ class OpenAICompatibleStructuredLLMClient:
         return {
             "text": text,
             "model": str(payload.get("model") or self._model),
-            "input_tokens": usage[0],
-            "output_tokens": usage[1],
+            "input_tokens": usage.input_tokens,
+            "cached_input_tokens": usage.cached_input_tokens,
+            "cache_write_tokens": usage.cache_write_tokens,
+            "output_tokens": usage.output_tokens,
+            "reasoning_tokens": usage.reasoning_tokens,
+            "cache_policy": self._cache_policy,
             "response_id": str(payload.get("id")) if isinstance(payload.get("id"), str) else None,
         }
 
@@ -381,16 +449,12 @@ def _messages_to_input(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, 
             parts = []
             for part_index, raw_part in enumerate(content):
                 if not isinstance(raw_part, Mapping):
-                    raise ValueError(
-                        f"messages[{index}].content[{part_index}] must be an object"
-                    )
+                    raise ValueError(f"messages[{index}].content[{part_index}] must be an object")
                 part = dict(raw_part)
                 raw_part_type = part.get("type")
                 allowed = {"output_text"} if role == "assistant" else {"input_text", "input_image"}
                 if raw_part_type not in allowed:
-                    raise ValueError(
-                        f"messages[{index}].content[{part_index}] has invalid type"
-                    )
+                    raise ValueError(f"messages[{index}].content[{part_index}] has invalid type")
                 if raw_part_type in {"input_text", "output_text"} and not isinstance(
                     part.get("text"), str
                 ):
@@ -398,8 +462,7 @@ def _messages_to_input(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, 
                         f"messages[{index}].content[{part_index}].text must be a string"
                     )
                 if raw_part_type == "input_image" and not (
-                    isinstance(part.get("image_url"), str)
-                    or isinstance(part.get("file_id"), str)
+                    isinstance(part.get("image_url"), str) or isinstance(part.get("file_id"), str)
                 ):
                     raise ValueError(
                         f"messages[{index}].content[{part_index}] requires image_url or file_id"
@@ -513,13 +576,60 @@ def _parse_output(text: str) -> dict[str, Any]:
     return payload
 
 
-def _usage(response: Mapping[str, Any]) -> tuple[int, int]:
-    usage = response.get("usage")
+def _usage(response: Mapping[str, Any]) -> ModelUsage:
+    usage = response.get("usage", response)
     if not isinstance(usage, Mapping):
-        return (0, 0)
+        return ModelUsage((0, 0, 0, 0, 0))
     input_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0))
     output_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0))
-    return (_non_negative_int(input_tokens), _non_negative_int(output_tokens))
+    input_details = usage.get("input_tokens_details", usage.get("prompt_tokens_details", {}))
+    output_details = usage.get("output_tokens_details", usage.get("completion_tokens_details", {}))
+    input_details = input_details if isinstance(input_details, Mapping) else {}
+    output_details = output_details if isinstance(output_details, Mapping) else {}
+    cached_input = _first_usage_value(
+        usage,
+        input_details,
+        keys=("cached_tokens", "cache_read_tokens", "cache_read_input_tokens"),
+    )
+    cache_write = _first_usage_value(
+        usage,
+        input_details,
+        keys=("cache_write_tokens", "cache_creation_input_tokens", "cache_creation_tokens"),
+    )
+    reasoning = _first_usage_value(
+        usage,
+        output_details,
+        keys=("reasoning_tokens",),
+    )
+    return ModelUsage(
+        (
+            _non_negative_int(input_tokens),
+            cached_input,
+            cache_write,
+            _non_negative_int(output_tokens),
+            reasoning,
+        )
+    )
+
+
+def _first_usage_value(
+    usage: Mapping[str, Any], details: Mapping[str, Any], *, keys: tuple[str, ...]
+) -> int:
+    for source in (details, usage):
+        for key in keys:
+            value = _non_negative_int(source.get(key, 0))
+            if value:
+                return value
+    return 0
+
+
+def _prompt_cache_key(supplied_key: str | None, messages: Sequence[Mapping[str, Any]]) -> str:
+    if supplied_key:
+        return supplied_key[:64]
+    canonical = json.dumps(
+        _messages_to_input(messages), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _non_negative_int(value: Any) -> int:

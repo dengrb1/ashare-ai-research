@@ -420,6 +420,7 @@ class FinancialSearchService:
             model=model,
             reasoning_effort=effort,
             timeout_seconds=runtime.timeout_seconds,
+            cache_policy=runtime.profile_for(model).cache_policy,
         )
         generation = asyncio.run(
             client.generate_structured(

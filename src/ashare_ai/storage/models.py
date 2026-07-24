@@ -134,9 +134,7 @@ class UserAssetState(Base):
     default_profit_trigger: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
     # Stop-loss monitoring is deliberately independent from the legacy profit monitor.
     # Both only create research/notifications; neither can alter a simulated position.
-    stop_loss_monitor_enabled: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=True
-    )
+    stop_loss_monitor_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     buy_monitor_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     market_refresh_interval_seconds: Mapped[int] = mapped_column(
         Integer, nullable=False, default=15
@@ -160,9 +158,7 @@ class AutomaticResearchReportConfig(Base):
     """Versioned per-slot settings for a user's automatic daily research."""
 
     __tablename__ = "automatic_research_report_configs"
-    __table_args__ = (
-        UniqueConstraint("user_id", "slot", name="uq_automatic_research_user_slot"),
-    )
+    __table_args__ = (UniqueConstraint("user_id", "slot", name="uq_automatic_research_user_slot"),)
 
     user_id: Mapped[str] = mapped_column(
         ForeignKey("user_accounts.user_id", ondelete="CASCADE"), primary_key=True
@@ -197,6 +193,7 @@ class ModelConfigurationVersion(Base):
     search_reasoning_effort: Mapped[str] = mapped_column(String(16), nullable=False)
     research_model: Mapped[str] = mapped_column(String(128), nullable=False)
     research_reasoning_effort: Mapped[str] = mapped_column(String(16), nullable=False)
+    model_profiles: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     timeout_seconds: Mapped[float] = mapped_column(Float, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
     config_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -410,7 +407,11 @@ class AgentCall(Base):
     model_name: Mapped[str] = mapped_column(String(64), nullable=False)
     reasoning_effort: Mapped[str] = mapped_column(String(16), nullable=False)
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cached_input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cache_write_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reasoning_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cache_policy: Mapped[str] = mapped_column(String(16), nullable=False, default="COMPATIBLE")
     duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     result_status: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -563,6 +564,7 @@ class TradePlanRow(Base):
     )
     report_id: Mapped[str] = mapped_column(ForeignKey("reports.report_id"), nullable=False)
     run_id: Mapped[str] = mapped_column(ForeignKey("job_runs.run_id"), nullable=False)
+    operation_run_id: Mapped[str | None] = mapped_column(ForeignKey("job_runs.run_id"), index=True)
     trading_date: Mapped[date] = mapped_column(Date, nullable=False)
     decision_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -602,6 +604,7 @@ class ExitAdviceRow(Base):
     user_id: Mapped[str] = mapped_column(
         ForeignKey("user_accounts.user_id", ondelete="CASCADE"), nullable=False, index=True
     )
+    operation_run_id: Mapped[str | None] = mapped_column(ForeignKey("job_runs.run_id"), index=True)
     symbol: Mapped[str] = mapped_column(String(9), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(24), nullable=False)
     action: Mapped[str | None] = mapped_column(String(16))
@@ -610,9 +613,7 @@ class ExitAdviceRow(Base):
     current_price: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
     unrealized_profit: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
     trigger_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
-    trigger_type: Mapped[str] = mapped_column(
-        String(24), nullable=False, default="PROFIT_AMOUNT"
-    )
+    trigger_type: Mapped[str] = mapped_column(String(24), nullable=False, default="PROFIT_AMOUNT")
     trigger_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
     position_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     research_context: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
@@ -651,7 +652,11 @@ class AIResponseCacheRow(Base):
     prompt_version: Mapped[str] = mapped_column(String(64), nullable=False)
     response: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cached_input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cache_write_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reasoning_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cache_policy: Mapped[str] = mapped_column(String(16), nullable=False, default="COMPATIBLE")
     hit_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_hit_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -816,7 +821,15 @@ class AIChatMessage(Base):
     response_sha256: Mapped[str | None] = mapped_column(String(64))
     cache_hit: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cached_input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cache_write_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reasoning_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cache_policy: Mapped[str] = mapped_column(String(16), nullable=False, default="COMPATIBLE")
+    context_budget_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="WITHIN_BUDGET"
+    )
+    private_context_snapshot: Mapped[str | None] = mapped_column(Text)
     error_code: Mapped[str | None] = mapped_column(String(48))
     request_id: Mapped[str | None] = mapped_column(String(64))
     streaming_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="STREAMING")

@@ -5,7 +5,7 @@ import { CandlestickChart } from '../components/CandlestickChart'
 import { Empty, ErrorNotice, formatNumber, formatTime, Loading, Panel, StatusPill, today } from '../components/Ui'
 import { usePageRefresh } from '../context/RefreshContext'
 import { getKlineRangePlan, KLINE_PERIODS, KLINE_RANGES, trimBarsToRange } from '../marketKlines'
-import type { Candidate, KlineBar, KlineRange, MarketDataStatus, Quote, Report, ReportSymbol, Run, Score, TradePlan } from '../types'
+import type { Candidate, KlineBar, KlineRange, MarketDataStatus, Quote, Report, ReportExecutionStatus, ReportSymbol, Run, Score, TradePlan } from '../types'
 import { resolvePublishedResearchRun } from '../researchRuns'
 
 function displayReportHtml(content: string) {
@@ -75,11 +75,14 @@ export function ReportsPage() {
   const [date, setDate] = useState(searchParams.get('date') || today())
   const requestedDate = searchParams.get('date') || undefined
   const requestedRunId = searchParams.get('run_id') || undefined
+  const requestedSymbol = /^\d{6}\.(SH|SZ|BJ)$/.test((searchParams.get('symbol') || '').toUpperCase())
+    ? (searchParams.get('symbol') || '').toUpperCase() : undefined
   const [report, setReport] = useState<Report | null>(null)
   const [content, setContent] = useState('')
   const [run, setRun] = useState<Run | null>(null)
   const [candidates, setCandidates] = useState<Candidate[]>([])
   const [reportSymbols, setReportSymbols] = useState<ReportSymbol[]>([])
+  const [executionStatus, setExecutionStatus] = useState<ReportExecutionStatus | null>(null)
   const [symbol, setSymbol] = useState('')
   const [tradePlans, setTradePlans] = useState<TradePlan[]>([])
   const [score, setScore] = useState<Score | null>(null)
@@ -100,15 +103,15 @@ export function ReportsPage() {
     try {
       const selected = await resolvePublishedResearchRun(requestedDate, requestedRunId)
       if (!selected?.trading_date) {
-        setReport(null); setRun(null); setCandidates([]); setReportSymbols([]); setTradePlans([])
+        setReport(null); setRun(null); setCandidates([]); setReportSymbols([]); setTradePlans([]); setExecutionStatus(null)
         return
       }
       setDate(selected.trading_date)
       setRun(selected)
       const row = await api.report(selected.trading_date, selected.run_id)
       setReport(row)
-      const [symbolsResult, candidatesResult, plansResult] = await Promise.allSettled([
-        api.reportSymbols(row.report_id), api.candidates(selected.trading_date, row.run_id), api.reportTradePlans(row.report_id),
+      const [symbolsResult, candidatesResult, plansResult, executionResult] = await Promise.allSettled([
+        api.reportSymbols(row.report_id), api.candidates(selected.trading_date, row.run_id), api.reportTradePlans(row.report_id), api.reportExecutionStatus(row.report_id),
       ])
       const formal = candidatesResult.status === 'fulfilled'
         ? candidatesResult.value.filter((item) => (item.event_risk_multiplier ?? 1) > 0).sort((left, right) => left.rank - right.rank) : []
@@ -117,18 +120,22 @@ export function ReportsPage() {
         : (candidatesResult.status === 'fulfilled' ? candidatesResult.value.map(fallbackReportSymbol) : [])
       setCandidates(formal)
       setReportSymbols(allSymbols)
-      setSymbol((current) => allSymbols.some((item) => item.symbol === current) ? current : allSymbols[0]?.symbol || '')
+      setSymbol((current) => {
+        if (requestedSymbol && allSymbols.some((item) => item.symbol === requestedSymbol)) return requestedSymbol
+        return allSymbols.some((item) => item.symbol === current) ? current : allSymbols[0]?.symbol || ''
+      })
       setTradePlans(plansResult.status === 'fulfilled' ? plansResult.value : [])
+      setExecutionStatus(executionResult.status === 'fulfilled' ? executionResult.value : null)
       if (row.content || row.body) setContent(row.content || row.body || '')
       else {
         try { const detail = await api.reportContent(row.report_id); setContent(detail.content || detail.body || '') }
         catch { setContent('报告正文存储于对象存储，可通过审计记录核验内容哈希。') }
       }
     } catch (reason) {
-      setReport(null); setRun(null); setCandidates([]); setReportSymbols([]); setTradePlans([])
+      setReport(null); setRun(null); setCandidates([]); setReportSymbols([]); setTradePlans([]); setExecutionStatus(null)
       setError(reason instanceof Error ? reason.message : '报告加载失败')
     } finally { setLoading(false) }
-  }, [requestedDate, requestedRunId])
+  }, [requestedDate, requestedRunId, requestedSymbol])
 
   usePageRefresh(load)
   useEffect(() => { void load() }, [load])
@@ -160,6 +167,7 @@ export function ReportsPage() {
 
   const selectedCandidate = candidates.find((item) => item.symbol === symbol)
   const selectedResearch = reportSymbols.find((item) => item.symbol === symbol)
+  const selectedExecution = executionStatus?.items.find((item) => item.symbol === symbol)
   const selectedPlan = tradePlans.find((plan) => plan.symbols.length === 1
     && plan.symbols[0] === symbol
     && (plan.status.toUpperCase() === 'SUCCEEDED' || PLAN_ACTIVE.has(plan.status.toUpperCase())))
@@ -205,8 +213,9 @@ export function ReportsPage() {
     </Panel>
 
     {report && <Panel title="自选股研究工作台" eyebrow="ALL TARGET SYMBOLS" className="full-span">
-      {reportSymbols.length ? <div className="candidate-tabs report-symbol-tabs" role="radiogroup" aria-label="本次全部研究股票">{reportSymbols.map((item) => <button role="radio" aria-checked={symbol === item.symbol} className={symbol === item.symbol ? 'active' : ''} key={item.symbol} onClick={() => setSymbol(item.symbol)}><strong>{item.rank ? `#${item.rank} ` : ''}{item.name || item.symbol}</strong><small>{item.symbol} · 最终分 {formatNumber(item.score.total_score)}</small><span className={`symbol-gate ${item.advice_eligible ? 'eligible' : 'blocked'}`}>{item.advice_eligible ? '正式可建议' : item.research_status === 'RISK_BLOCKED' ? '风险禁买' : '数据受限'}</span></button>)}</div> : <Empty title="本次报告没有股票明细" />}
+      {reportSymbols.length ? <div className="candidate-tabs report-symbol-tabs" role="radiogroup" aria-label="本次全部研究股票">{reportSymbols.map((item) => <button role="radio" aria-checked={symbol === item.symbol} className={symbol === item.symbol ? 'active' : ''} key={item.symbol} onClick={() => { setSymbol(item.symbol); setSearchParams({ date, run_id: report.run_id, symbol: item.symbol }) }}><strong>{item.rank ? `#${item.rank} ` : ''}{item.name || item.symbol}</strong><small>{item.symbol} · 最终分 {formatNumber(item.score.total_score)}</small><span className={`symbol-gate ${item.advice_eligible ? 'eligible' : 'blocked'}`}>{item.advice_eligible ? '正式可建议' : item.research_status === 'RISK_BLOCKED' ? '风险禁买' : '数据受限'}</span></button>)}</div> : <Empty title="本次报告没有股票明细" />}
       {symbol && <>
+        {selectedExecution?.t1_restricted && <div className="warning-box t1-warning"><strong>当日买入，T+1 禁止卖出</strong><p>当前模拟持仓 {selectedExecution.held_quantity} 股，服务端截至 {formatTime(executionStatus?.as_of)} 判定可卖数量为 0 股。</p></div>}
         <div className="workbench-grid">
           <section className="workbench-card"><span>最新行情</span><strong>{quote?.name || symbol} · {formatNumber(quote?.price)}</strong><small>{quote ? `${quote.change_pct >= 0 ? '+' : ''}${formatNumber(quote.change_pct)}%` : '行情暂不可用'}</small></section>
           <section className="workbench-card"><span>行情来源</span><strong>{quote?.source || marketStatus?.source || '—'}</strong><small>采集 {formatTime(quote?.collected_at || marketStatus?.collected_at)} · {(quote?.delayed ?? marketStatus?.delayed) ? '延迟数据' : '未标记延迟'}</small></section>

@@ -1856,6 +1856,7 @@ class BuiltinDailyBackend:
             model=runtime.research_model,
             reasoning_effort=runtime.research_reasoning_effort,
             timeout_seconds=runtime.timeout_seconds,
+            cache_policy=runtime.profile_for(runtime.research_model).cache_policy,
         )
 
     def _run_llm_component(

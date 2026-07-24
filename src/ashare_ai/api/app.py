@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
-from typing import Annotated, Any, Literal, NoReturn
+from typing import Annotated, Any, Literal, NoReturn, cast
 from uuid import uuid4
 
 from fastapi import (
@@ -38,10 +39,11 @@ from ashare_ai.agents.attachments import (
 )
 from ashare_ai.agents.chat import ChatStreamError, allow_chat_request, stream_chat_response
 from ashare_ai.agents.chat_context import resolve_security_mentions
-from ashare_ai.agents.chat_observability import chat_metric_summary
+from ashare_ai.agents.chat_observability import chat_cost_summary, chat_metric_summary
 from ashare_ai.agents.chat_threads import ChatThreadService, InvalidThreadCursor
 from ashare_ai.agents.model_settings import (
     ModelConfigurationService,
+    ModelProfileDraft,
     ModelSettingsDraft,
     ModelSettingsError,
 )
@@ -76,6 +78,7 @@ from ashare_ai.api.schemas import (
     AIChatThreadPatchRequest,
     AIChatThreadRequest,
     AIChatThreadResponse,
+    AICostSummaryResponse,
     AIModelOptionsResponse,
     AppBootstrapResponse,
     AppCapabilitiesResponse,
@@ -98,6 +101,7 @@ from ashare_ai.api.schemas import (
     MarketRefreshSettingsRequest,
     ModelListResponse,
     ModelProbeResponse,
+    ModelProfileSettings,
     ModelSettingsRequest,
     ModelSettingsResponse,
     NotificationListResponse,
@@ -112,12 +116,16 @@ from ashare_ai.api.schemas import (
     QuoteResponse,
     RefreshTokenRequest,
     ReportBodyResponse,
+    ReportExecutionStatusResponse,
+    ReportExecutionSymbolStatus,
     ReportResponse,
     ReportSymbolResponse,
     ResearchRequest,
     ResearchRunResponse,
     ResearchSettingsRequest,
     ResearchSettingsResponse,
+    RunActivityItem,
+    RunActivityResponse,
     RunListResponse,
     RunResponse,
     ScoreResponse,
@@ -145,6 +153,7 @@ from ashare_ai.orchestration.exit_advice_jobs import (
     create_manual_exit_advice,
     enqueue_exit_advice,
 )
+from ashare_ai.orchestration.operation_runs import create_operation_run
 from ashare_ai.orchestration.personal_archive_jobs import enqueue_personal_archive
 from ashare_ai.orchestration.research_jobs import enqueue_research, enqueue_research_at
 from ashare_ai.orchestration.research_schedule import (
@@ -187,6 +196,7 @@ from ashare_ai.storage.models import (
     SnapshotManifestRow,
     TradePlanRow,
     UserAccount,
+    UserAssetState,
 )
 from ashare_ai.storage.objects import LocalObjectStore, ObjectStore, S3ObjectStore
 from ashare_ai.storage.personal_archive import (
@@ -199,6 +209,7 @@ from ashare_ai.storage.personal_archive import (
 )
 from ashare_ai.storage.repositories import QueryRepository
 from ashare_ai.trading.default_rules import ensure_builtin_trading_rules
+from ashare_ai.trading.sellability import position_sellability
 
 logger = logging.getLogger(__name__)
 
@@ -691,6 +702,7 @@ def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
                 "market_refresh_interval_setting": True,
                 "notifications": True,
                 "chat_context_metrics": True,
+                "ai_cost_summary": True,
                 "persistent_ai_chat": True,
                 "chat_images_seven_day_retention": True,
                 "personal_archive_export_import": True,
@@ -704,7 +716,9 @@ def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
                 "research_run": "/api/v1/research/runs/{run_id}",
                 "research_settings": "/api/v1/research/settings",
                 "report_symbols": "/api/v1/reports/{report_id}/symbols",
+                "report_execution_status": "/api/v1/reports/{report_id}/execution-status",
                 "report_trade_plans": "/api/v1/reports/{report_id}/trade-plans",
+                "run_activity": "/api/v1/runs/activity",
                 "trade_plan": "/api/v1/trade-plans/{plan_id}",
                 "exit_advice": "/api/v1/exit-advice",
                 "manual_exit_advice": "/api/v1/exit-advice/manual",
@@ -713,6 +727,7 @@ def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
                 "notification_summary": "/api/v1/notifications/summary",
                 "security_resolve": "/api/v1/securities/resolve",
                 "chat_metrics": "/api/v1/ai/chat/metrics",
+                "ai_costs": "/api/v1/ai/costs",
                 "ai_chat_threads": "/api/v1/ai/chat/threads",
                 "ai_chat_thread_index": "/api/v1/ai/chat/thread-index",
                 "personal_data_exports": "/api/v1/me/data-exports",
@@ -938,6 +953,19 @@ def submit_manual_exit_advice(
         # Codes are stable client-facing states; provider errors and position data
         # are deliberately not reflected in this public response.
         raise HTTPException(status_code=422, detail=exc.code) from exc
+    if row.operation_run_id is None:
+        operation = create_operation_run(
+            db,
+            user_id=row.user_id,
+            run_type="EXIT_ADVICE",
+            resource_id=row.advice_id,
+            trading_date=row.decision_at.astimezone(SHANGHAI).date(),
+            decision_at=row.decision_at,
+            input_hash=row.input_hash,
+            manifest={"symbol": row.symbol, "trigger_type": row.trigger_type},
+            created_at=row.created_at,
+        )
+        row.operation_run_id = operation.run_id
     _remember_idempotency(
         db,
         user_id=context.user.user_id,
@@ -1232,6 +1260,36 @@ def resolve_security(
 @app.get("/api/v1/ai/chat/metrics", response_model=list[AIChatMetricResponse])
 def ai_chat_metrics(db: DbSession, context: Current) -> list[AIChatMetricResponse]:
     return [AIChatMetricResponse(**item) for item in chat_metric_summary(db, context.user.user_id)]
+
+
+@app.get("/api/v1/ai/costs", response_model=AICostSummaryResponse)
+def ai_costs(
+    db: DbSession,
+    context: Current,
+    days: int = Query(default=30, ge=1, le=90),
+    limit: int = Query(default=30, ge=1, le=90),
+    before: date | None = None,
+    thread_id: str | None = None,
+) -> AICostSummaryResponse:
+    if thread_id is not None:
+        owned = db.scalar(
+            select(AIChatThread.thread_id).where(
+                AIChatThread.thread_id == thread_id,
+                AIChatThread.user_id == context.user.user_id,
+            )
+        )
+        if owned is None:
+            raise HTTPException(status_code=404, detail="AI chat thread not found")
+    return AICostSummaryResponse(
+        **chat_cost_summary(
+            db,
+            context.user.user_id,
+            days=days,
+            limit=limit,
+            before=before,
+            thread_id=thread_id,
+        )
+    )
 
 
 @app.get("/api/v1/ai/chat/threads", response_model=list[AIChatThreadResponse])
@@ -1865,7 +1923,11 @@ def reset_password(
 
 
 def _model_draft(payload: ModelSettingsRequest) -> ModelSettingsDraft:
-    return ModelSettingsDraft(**payload.model_dump())
+    values = payload.model_dump(exclude={"model_profiles"})
+    values["model_profiles"] = tuple(
+        ModelProfileDraft(**item.model_dump()) for item in payload.model_profiles
+    )
+    return ModelSettingsDraft(**values)
 
 
 def _model_settings_response(db: Session) -> ModelSettingsResponse:
@@ -1884,6 +1946,7 @@ def _model_settings_response(db: Session) -> ModelSettingsResponse:
             search_reasoning_effort="low",
             research_model="gpt-5.6-sol",
             research_reasoning_effort="high",
+            model_profiles=[],
             timeout_seconds=90,
             enabled=False,
             configured=False,
@@ -1906,6 +1969,10 @@ def _model_settings_response(db: Session) -> ModelSettingsResponse:
         search_reasoning_effort=runtime.search_reasoning_effort,
         research_model=runtime.research_model,
         research_reasoning_effort=runtime.research_reasoning_effort,
+        model_profiles=[
+            ModelProfileSettings.model_validate(profile.public_dict())
+            for profile in runtime.model_profiles
+        ],
         timeout_seconds=runtime.timeout_seconds,
         enabled=runtime.enabled,
         configured=bool(health["configured"]),
@@ -2259,6 +2326,50 @@ def report_symbols(report_id: str, db: DbSession, context: Current) -> list[Repo
     return result
 
 
+@app.get(
+    "/api/v1/reports/{report_id}/execution-status",
+    response_model=ReportExecutionStatusResponse,
+)
+def report_execution_status(
+    report_id: str, db: DbSession, context: Current
+) -> ReportExecutionStatusResponse:
+    report_row = db.get(ReportRow, report_id)
+    if report_row is None:
+        raise HTTPException(status_code=404, detail="report not found")
+    run = db.get(JobRun, report_row.run_id)
+    if run is None or not _owns(run, context):
+        raise HTTPException(status_code=404, detail="report not found")
+    assets = db.get(UserAssetState, context.user.user_id)
+    positions = {
+        str(item.get("symbol", "")).upper(): dict(item)
+        for item in (assets.positions if assets is not None else [])
+        if item.get("symbol")
+    }
+    symbols = list(
+        db.scalars(
+            select(ScoreRow.symbol).where(ScoreRow.run_id == run.run_id).order_by(ScoreRow.symbol)
+        )
+    )
+    as_of = datetime.now(UTC)
+    items = []
+    for symbol in symbols:
+        position = positions.get(symbol)
+        if position is None:
+            continue
+        eligibility = position_sellability(position, trading_date=as_of.astimezone(SHANGHAI).date())
+        items.append(
+            ReportExecutionSymbolStatus(
+                symbol=symbol,
+                held_quantity=eligibility.held_quantity,
+                acquired_on=eligibility.acquired_on,
+                sellable_quantity=eligibility.sellable_quantity,
+                t1_restricted=eligibility.t1_restricted,
+                blockers=list(eligibility.blockers),
+            )
+        )
+    return ReportExecutionStatusResponse(report_id=report_id, as_of=as_of, items=items)
+
+
 @app.post(
     "/api/v1/reports/{report_id}/trade-plans",
     response_model=TradePlanResponse,
@@ -2416,6 +2527,22 @@ def submit_trade_plan(
     )
     db.add(row)
     db.flush()
+    operation = create_operation_run(
+        db,
+        user_id=row.user_id,
+        run_type="TRADE_PLAN",
+        resource_id=row.plan_id,
+        trading_date=row.trading_date,
+        decision_at=row.decision_at,
+        input_hash=row.input_hash,
+        manifest={
+            "report_id": row.report_id,
+            "research_run_id": row.run_id,
+            "symbols": row.symbols,
+        },
+        created_at=row.created_at,
+    )
+    row.operation_run_id = operation.run_id
     AuditLogger(db).record(
         run.run_id,
         "TRADE_PLAN_SUBMITTED",
@@ -2922,6 +3049,107 @@ def runs(
         statement = statement.where(JobRun.run_type == run_type.upper())
     rows = db.scalars(statement.order_by(JobRun.started_at.desc()).limit(limit)).all()
     return [RunListResponse.model_validate(row) for row in rows]
+
+
+@app.get("/api/v1/runs/activity", response_model=RunActivityResponse)
+def run_activity(
+    db: DbSession,
+    context: Current,
+    cursor: str | None = None,
+    limit: int = Query(default=30, ge=1, le=100),
+    run_type: str | None = Query(default=None, alias="type"),
+    status_filter: str | None = Query(default=None, alias="status"),
+) -> RunActivityResponse:
+    statement = select(JobRun).where(JobRun.user_id == context.user.user_id)
+    allowed_types = {"DAILY", "RESEARCH", "BACKTEST", "TRADE_PLAN", "EXIT_ADVICE"}
+    if run_type:
+        requested = {item.strip().upper() for item in run_type.split(",")}
+        statement = statement.where(JobRun.run_type.in_(requested & allowed_types))
+    if status_filter:
+        statement = statement.where(JobRun.status == status_filter.upper())
+    if cursor:
+        try:
+            raw = base64.urlsafe_b64decode(cursor.encode() + b"===").decode()
+            stamp_value, cursor_run_id = raw.split("|", 1)
+            stamp = datetime.fromisoformat(stamp_value)
+        except (ValueError, UnicodeDecodeError, TypeError):
+            raise HTTPException(status_code=422, detail="invalid activity cursor") from None
+        statement = statement.where(
+            (JobRun.started_at < stamp)
+            | ((JobRun.started_at == stamp) & (JobRun.run_id < cursor_run_id))
+        )
+    rows = list(
+        db.scalars(
+            statement.order_by(JobRun.started_at.desc(), JobRun.run_id.desc()).limit(limit + 1)
+        ).all()
+    )
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    items: list[RunActivityItem] = []
+    for row in rows:
+        resource_type = cast(
+            Literal["RESEARCH", "BACKTEST", "TRADE_PLAN", "EXIT_ADVICE"],
+            {
+            "DAILY": "RESEARCH",
+            "RESEARCH": "RESEARCH",
+            "BACKTEST": "BACKTEST",
+            "TRADE_PLAN": "TRADE_PLAN",
+            "EXIT_ADVICE": "EXIT_ADVICE",
+            }.get(row.run_type, "RESEARCH"),
+        )
+        resource_id = str((row.manifest or {}).get("resource_id") or "") or None
+        resource_url = None
+        title = row.run_type.replace("_", " ")
+        symbol = None
+        if resource_type == "TRADE_PLAN" and resource_id:
+            plan = db.get(TradePlanRow, resource_id)
+            if plan:
+                symbol = plan.symbols[0] if plan.symbols else None
+                resource_url = (
+                    f"/reports?date={plan.trading_date.isoformat()}&run_id={plan.run_id}"
+                    + (f"&symbol={symbol}" if symbol else "")
+                )
+                title = "买入方案"
+        elif resource_type == "EXIT_ADVICE" and resource_id:
+            advice = db.get(ExitAdviceRow, resource_id)
+            if advice:
+                symbol = advice.symbol
+                resource_url = f"/exit-advice?advice_id={advice.advice_id}"
+                title = "卖出建议"
+        elif resource_type == "BACKTEST":
+            backtest = db.scalar(select(BacktestRun).where(BacktestRun.run_id == row.run_id))
+            if backtest:
+                resource_id = backtest.backtest_id
+                resource_url = f"/backtest?backtest_id={backtest.backtest_id}"
+                title = backtest.name
+        else:
+            report = db.scalar(select(ReportRow).where(ReportRow.run_id == row.run_id))
+            if report:
+                resource_id = report.report_id
+                resource_url = (
+                    f"/reports?date={report.trading_date.isoformat()}&run_id={row.run_id}"
+                )
+                title = "研究报告"
+        items.append(
+            RunActivityItem(
+                **RunResponse.model_validate(row).model_dump(),
+                user_id=row.user_id,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                resource_url=resource_url,
+                title=title,
+                symbol=symbol,
+            )
+        )
+    next_cursor = None
+    if has_more and rows:
+        last = rows[-1]
+        next_cursor = (
+            base64.urlsafe_b64encode(f"{last.started_at.isoformat()}|{last.run_id}".encode())
+            .decode()
+            .rstrip("=")
+        )
+    return RunActivityResponse(items=items, next_cursor=next_cursor)
 
 
 @app.get("/api/v1/runs/{run_id}", response_model=RunResponse)

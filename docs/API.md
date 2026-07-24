@@ -126,6 +126,7 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 证券解析 | GET | `/api/v1/securities/resolve` | 登录 |
 | AI 对话 | GET | `/api/v1/ai/models` | 登录 |
 | AI 对话 | GET | `/api/v1/ai/chat/metrics` | 登录 |
+| AI 成本 | GET | `/api/v1/ai/costs` | 登录、用户隔离、日期分页 |
 | AI 对话 | GET/POST | `/api/v1/ai/chat/threads` | 登录/写入 |
 | AI 对话 | GET | `/api/v1/ai/chat/thread-index` | 登录 |
 | AI 对话 | PATCH/DELETE | `/api/v1/ai/chat/threads/{thread_id}` | 写入 |
@@ -154,6 +155,7 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 报告 | GET | `/api/v1/reports/{trading_date}` | 登录 |
 | 报告 | GET | `/api/v1/reports/{report_id}/content` | 登录 |
 | 报告 | GET | `/api/v1/reports/{report_id}/symbols` | 登录 |
+| 报告 | GET | `/api/v1/reports/{report_id}/execution-status` | 登录、所有者 |
 | Trade Plan | POST/GET | `/api/v1/reports/{report_id}/trade-plans` | 写入/登录 |
 | Trade Plan | GET | `/api/v1/trade-plans/{plan_id}` | 登录 |
 | 快照 | GET | `/api/v1/snapshots` | 登录 |
@@ -162,6 +164,7 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 研究任务 | GET/PUT | `/api/v1/research/settings` | 登录/写入 |
 | 研究任务 | POST | `/api/v1/research/runs/{run_id}/cancel` | 写入 |
 | 通用运行 | GET | `/api/v1/runs` | 登录 |
+| 通用运行 | GET | `/api/v1/runs/activity` | 登录、cursor 分页 |
 | 通用运行 | GET | `/api/v1/runs/{run_id}` | 登录 |
 | 通用运行 | GET | `/api/v1/runs/{run_id}/audit` | 登录 |
 | 回测 | POST | `/api/v1/backtests` | 写入 |
@@ -283,8 +286,8 @@ Web 登录。请求体为 `LoginRequest`：
     "max_research_symbols":100,
     "max_trade_plan_symbols":15,
     "portfolio_target_count":15,
-    "features": {"watchlist_research_selection":true,"formal_watchlist_reports":true,"report_symbol_eligibility":true,"trade_plan_generation":true,"research_cancellation":true,"idempotency_key":true,"paper_portfolio_only":true,"profit_exit_monitor":true,"stop_loss_monitor":true,"buy_entry_monitor":true,"market_refresh_interval_setting":true,"notifications":true,"chat_context_metrics":true,"persistent_ai_chat":true,"chat_images_seven_day_retention":true,"personal_archive_export_import":true,"searxng_web_research":true},
-    "endpoints": {"assets":"/api/v1/assets","exit_monitor_settings":"/api/v1/assets/exit-monitor","market_refresh_settings":"/api/v1/assets/market-refresh","research_runs":"/api/v1/research/runs","research_run":"/api/v1/research/runs/{run_id}","research_settings":"/api/v1/research/settings","exit_advice":"/api/v1/exit-advice","manual_exit_advice":"/api/v1/exit-advice/manual","buy_entry_monitors":"/api/v1/buy-entry-monitors","notifications":"/api/v1/notifications","notification_summary":"/api/v1/notifications/summary","security_resolve":"/api/v1/securities/resolve","chat_metrics":"/api/v1/ai/chat/metrics","ai_chat_threads":"/api/v1/ai/chat/threads","ai_chat_thread_index":"/api/v1/ai/chat/thread-index","personal_data_exports":"/api/v1/me/data-exports","personal_data_imports":"/api/v1/me/data-imports"}
+    "features": {"watchlist_research_selection":true,"formal_watchlist_reports":true,"report_symbol_eligibility":true,"trade_plan_generation":true,"research_cancellation":true,"idempotency_key":true,"paper_portfolio_only":true,"profit_exit_monitor":true,"stop_loss_monitor":true,"buy_entry_monitor":true,"market_refresh_interval_setting":true,"notifications":true,"chat_context_metrics":true,"ai_cost_summary":true,"persistent_ai_chat":true,"chat_images_seven_day_retention":true,"personal_archive_export_import":true,"searxng_web_research":true},
+    "endpoints": {"assets":"/api/v1/assets","exit_monitor_settings":"/api/v1/assets/exit-monitor","market_refresh_settings":"/api/v1/assets/market-refresh","research_runs":"/api/v1/research/runs","research_run":"/api/v1/research/runs/{run_id}","research_settings":"/api/v1/research/settings","exit_advice":"/api/v1/exit-advice","manual_exit_advice":"/api/v1/exit-advice/manual","buy_entry_monitors":"/api/v1/buy-entry-monitors","notifications":"/api/v1/notifications","notification_summary":"/api/v1/notifications/summary","security_resolve":"/api/v1/securities/resolve","chat_metrics":"/api/v1/ai/chat/metrics","ai_costs":"/api/v1/ai/costs","ai_chat_threads":"/api/v1/ai/chat/threads","ai_chat_thread_index":"/api/v1/ai/chat/thread-index","personal_data_exports":"/api/v1/me/data-exports","personal_data_imports":"/api/v1/me/data-imports"}
   }
 }
 ```
@@ -307,9 +310,13 @@ Web 登录。请求体为 `LoginRequest`：
 
 AI 对话线程和消息均按当前用户保存。消息正文中的 `@名称`、`@6位代码` 与标准代码由服务端按已提交证券主数据逐项解析；`mention_refs` 仅是客户端提示，不能把名称绑定到不匹配的代码，重名会显式返回 `SECURITY_NAME_AMBIGUOUS`。`GET /securities/resolve?q=顺络电子` 可用于 UI 预校验。发送请求可传 `attachment_ids`、可选带时区 `decision_at` 及 `Idempotency-Key`；不传 `decision_at` 时由服务端在并行数据获取完成后冻结实时决策时点。显式历史时点只读取 PIT 合格评分与日 K，当前持仓、实时行情和新闻会在 `data_status` 中标为不可用，不会混入历史结论。
 
-助手历史在 Responses API 中编码为 `output_text`，用户/系统文本为 `input_text`，未到期的近期用户图片为 `input_image`；每张已销毁图片分别加入不可用标记。SSE 依次包含 `meta`、`stage`（`retrieval|market|news|generation`）、心跳、`delta`、`done` 或安全 `error`；错误含 `code`、`request_id` 和 `retryable`。消息与 `done` 会附加 `streaming_mode=STREAMING|DEGRADED|CACHED`、`data_status`、`response_id` 等只增字段。兼容网关不支持流式时以 `DEGRADED` 返回并通知管理员，不能伪装为流式。只有收到上游 `response.completed` 后才写入完成状态和缓存。浏览器与模型网关均仅在首个正文片段之前，对网络错误、408、429、5xx 或明确可重试错误使用同一幂等键进行有限重试；正文出现后断线会保留部分内容并标记未完成。
+助手历史在 Responses API 中编码为 `output_text`，用户/系统文本为 `input_text`，未到期的近期用户图片为 `input_image`；每张已销毁图片分别加入不可用标记。SSE 依次包含 `meta`、`stage`（`retrieval|market|news|generation`）、心跳、`delta`、`done` 或安全 `error`；错误含 `code`、`request_id` 和 `retryable`。消息与 `done` 会附加 `streaming_mode=STREAMING|DEGRADED|CACHED`、`data_status`、`response_id`、`cached_input_tokens`、`cache_write_tokens`、`reasoning_tokens`、`cache_policy` 和 `context_budget_status` 等只增字段。服务端按“窗口减输出/推理预留”保留完整最近轮次；固定 PIT 上下文或当前问题自身超预算时返回 `CHAT_CONTEXT_TOO_LARGE`，不会截断或使用未来数据。Grok 档案保存且仅内部重放规范化动态快照，快照不在消息、导出或公开 API 中出现；OpenAI 档案可使用稳定 `prompt_cache_key` 与安全的增量 Responses 续接。兼容网关不发送专属缓存字段，并在远端参数不支持时以同一幂等键安全回退。只有收到上游 `response.completed` 后才写入完成状态和缓存。浏览器与模型网关均仅在首个正文片段之前，对网络错误、408、429、5xx 或明确可重试错误使用同一幂等键进行有限重试；正文出现后断线会保留部分内容并标记未完成。
 
 `GET /ai/chat/metrics` 返回当前用户的 `answer|context|market|news|model` 聚合指标，每项包含请求数、命中数、命中率、平均延迟、平均单飞等待和降级次数；其中没有提示词、持仓、凭据或上游原始错误。最终答案缓存仅在动态上下文哈希完全相同、同用户、同模型配置和同附件上下文时命中。
+
+`GET /ai/costs?days=30&limit=30&before=YYYY-MM-DD&thread_id=...` 只返回当前用户的日聚合用量和金额估算。`days` 与 `limit` 均为 1-90，按 `bucket_date desc` 稳定排序，`next_cursor` 可作为下一页的 `before`；可选 `thread_id` 仅额外返回该线程最近完成回复的 `current_turn`，不会缩小近 30 天总计。字段包括输入、缓存读取/写入、未缓存输入、输出、缓存命中、估算支出与估算节省。金额按当前管理员维护的每百万 token 单价估算，不替代供应商账单，响应不含提示词、仓位、密钥或上游错误。
+
+管理员的 `/admin/model-settings` 请求和响应新增 `model_profiles[]`。每项包含 `model`、`cache_policy=GROK|OPENAI|COMPATIBLE`、上下文窗口、输出/推理预留及输入、缓存读取、缓存写入、输出的每百万 token 单价。历史配置缺少该字段时默认 `COMPATIBLE` 和零价格；这些档案已纳入不可变配置哈希与研究 Manifest。
 
 `POST /ai/chat/attachments` 支持 PNG、JPEG、WebP 和非动画 GIF；每条最多 4 张、单张 10 MB、合计 25 MB。服务端校验真实签名、MIME、尺寸和动画状态，不接受远程 URL。`expires_at=uploaded_at+7天` 固定不延长；到期瞬间读取返回 `410`，后台五分钟内物理清理。
 
@@ -542,7 +549,7 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 
 ### `PUT /api/v1/research/settings`
 
-新客户端完整提交 `{"automatic_reports":[报告A,报告B]}`；旧请求 `{"auto_enabled":true|false}` 继续兼容。自动研究固定使用上海时区和 `15:05` 调度时间，快照模式不可修改。启用一个槽位即运行单报告，两个均启用则同日提交两份独立任务，由默认串行 Worker 依次执行。`WATCHLIST` 在每次运行时动态读取用户当时的自选股与模拟持仓；为空时只跳过该槽位并在两小时窗口内继续重试，不阻塞另一槽位。同一用户、交易日和槽位只接受首次提交，首次提交后修改配置或自选与持仓不会在当日重复创建报告，新配置从下一交易日起生效。
+新客户端完整提交 `{"automatic_reports":[报告A,报告B]}`；旧请求 `{"auto_enabled":true|false}` 继续兼容。自动研究固定使用上海时区和 `15:05` 调度时间，快照模式不可修改。启用一个槽位即运行单报告，两个均启用则同日提交两份独立任务，由默认串行 Worker 依次执行。15:05 后即持久化启用槽位；基准数据未就绪时状态为 `DATA_READINESS_WAITING`，响应中的 `next_retry_at` 和审计事件给出下次重试时点，两小时窗口超时后失败关闭，绝不使用未就绪数据。`WATCHLIST` 在每次运行时动态读取用户当时的自选股与模拟持仓。同一用户、交易日和槽位只接受首次提交，首次提交后修改配置或自选与持仓不会在当日重复创建报告，新配置从下一交易日起生效。
 
 ### `GET /api/v1/research/settings`
 
@@ -555,6 +562,14 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 ### `GET /api/v1/runs`
 
 查询参数 `run_type`（可选，服务端转大写）和 `limit`（默认 100，范围 1–500）。返回 `RunListResponse[]`，每项在 `RunResponse` 上增加 `user_id`。
+
+### `GET /api/v1/runs/activity`
+
+返回当前用户的研究、回测、买入方案和卖出建议统一活动流，稳定按 `started_at desc, run_id desc` 排序。支持 `type`、`status`、`limit`（1–100）和不透明 `cursor`；响应为 `RunActivityResponse`，含 `items`、`next_cursor` 以及每项的 `resource_type`、`resource_id`、`resource_url` 和可空 `symbol`。既有 `/runs` 行为不变。
+
+### `GET /api/v1/reports/{report_id}/execution-status`
+
+仅返回报告涉及且属于当前用户模拟持仓的执行状态，含服务端 `as_of`、持仓数量、买入日、可卖数量、`t1_restricted` 和稳定阻断码。当天买入返回 `T1_NOT_SELLABLE`；缺少买入日时默认拒绝并返回 `MISSING_ACQUIRED_ON`。
 
 ### `GET /api/v1/runs/{run_id}`
 

@@ -1,4 +1,4 @@
-import type { AIChatAttachment, AIChatMessage, AIChatThread, AssetState, AuditEvent, BuyEntryMonitor, Candidate, DataEnvelope, ExitAdvice, FinancialSearchResult, FinancialSearchStatus, KlineBar, KlineQueryOptions, MarketPrefetchResponse, ModelSettings, ModelSettingsDraft, Notification, NotificationSummary, PersonalArchiveJob, Portfolio, Quote, Report, ReportSymbol, ResearchSettings, ResearchSubmission, Run, Score, Snapshot, TokenPair, TradePlan, User } from './types'
+import type { AIChatAttachment, AIChatMessage, AIChatThread, AICostSummary, AssetState, AuditEvent, BuyEntryMonitor, Candidate, DataEnvelope, ExitAdvice, FinancialSearchResult, FinancialSearchStatus, KlineBar, KlineQueryOptions, MarketPrefetchResponse, ModelSettings, ModelSettingsDraft, Notification, NotificationSummary, PersonalArchiveJob, Portfolio, Quote, Report, ReportExecutionStatus, ReportSymbol, ResearchSettings, ResearchSubmission, Run, RunActivityResponse, Score, Snapshot, TokenPair, TradePlan, User } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api/v1').replace(/\/$/, '')
 
@@ -95,6 +95,7 @@ export const api = {
   markNotificationsRead: (notificationIds: string[], idempotencyKey = crypto.randomUUID()) => request<NotificationSummary>('/notifications/read', { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ notification_ids: notificationIds }) }),
   markAllNotificationsRead: (idempotencyKey = crypto.randomUUID()) => request<NotificationSummary>('/notifications/read-all', { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey } }),
   aiModels: () => request<{ models: string[]; reasoning_efforts: string[]; web_search_available: boolean; cache_enabled: boolean }>('/ai/models'),
+  aiCostSummary: (options: { days?: number; limit?: number; before?: string; threadId?: string } = {}) => request<AICostSummary>(`/ai/costs${params({ days: options.days, limit: options.limit, before: options.before, thread_id: options.threadId })}`),
   aiChatThreads: () => request<AIChatThread[]>('/ai/chat/threads'),
   aiChatThreadIndex: (options: { cursor?: string; q?: string; archived?: boolean; limit?: number } = {}) => request<{ items: AIChatThread[]; next_cursor?: string | null }>(`/ai/chat/thread-index${params({ cursor: options.cursor, q: options.q, archived: options.archived ? 'true' : undefined, limit: options.limit })}`),
   createAIChatThread: (title = '新对话') => request<AIChatThread>('/ai/chat/threads', { method: 'POST', body: JSON.stringify({ title }) }),
@@ -160,6 +161,7 @@ export const api = {
   report: (date: string, runId?: string) => request<Report>(`/reports/${date}${params({ run_id: runId })}`),
   reportContent: (reportId: string) => request<{ content?: string; body?: string }>(`/reports/${reportId}/content`),
   reportSymbols: (reportId: string) => request<ReportSymbol[]>(`/reports/${reportId}/symbols`),
+  reportExecutionStatus: (reportId: string) => request<ReportExecutionStatus>(`/reports/${reportId}/execution-status`),
   reportTradePlans: (reportId: string) => request<TradePlan[]>(`/reports/${reportId}/trade-plans`),
   submitTradePlan: (reportId: string, payload: { symbols: string[]; budget_override?: number; objective?: 'RISK_ADJUSTED_RETURN' }, idempotencyKey = crypto.randomUUID()) => request<TradePlan>(`/reports/${reportId}/trade-plans`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify(payload) }),
   tradePlan: (planId: string) => request<TradePlan>(`/trade-plans/${planId}`),
@@ -170,6 +172,7 @@ export const api = {
   researchRuns: (limit = 5, tradingDate?: string, published = false) => request<Run[]>(`/research/runs${params({ limit, trading_date: tradingDate, mine: 'true', published: published ? 'true' : undefined })}`),
   cancelResearch: (runId: string) => request<Run>(`/research/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' }),
   runs: () => request<Run[] | { items: Run[] }>('/runs'),
+  runActivity: (options: { cursor?: string; type?: string; status?: string; limit?: number } = {}) => request<RunActivityResponse>(`/runs/activity${params({ cursor: options.cursor, type: options.type, status: options.status, limit: options.limit })}`),
   run: (runId: string) => request<Run>(`/runs/${runId}`),
   audit: (runId: string) => request<AuditEvent[]>(`/runs/${runId}/audit`),
   submitBacktest: (payload: { name: string; start_date: string; end_date: string; snapshot_ids: string[]; config: Record<string, unknown> }) => request<Run>('/backtests', { method: 'POST', body: JSON.stringify(payload) }),

@@ -264,7 +264,11 @@ class AgentComponentResult(FrozenModel):
     prompt_sha256: Sha256
     response_sha256: Sha256
     input_tokens: int = Field(ge=0)
+    cached_input_tokens: int = Field(default=0, ge=0)
+    cache_write_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(ge=0)
+    reasoning_tokens: int = Field(default=0, ge=0)
+    cache_policy: Literal["GROK", "OPENAI", "COMPATIBLE"] = "COMPATIBLE"
     duration_ms: int = Field(ge=0)
     retry_count: int = Field(ge=0)
 

@@ -141,13 +141,13 @@ describe('API security and market adapters', () => {
       configuration_id: 'config-1', version: 1, config_sha256: 'a'.repeat(64), source: 'database',
       provider: 'openai-compatible', base_url: 'https://gateway.example/v1', api_key_configured: true,
       search_model: 'gpt-5.6-luna', search_reasoning_effort: 'low', research_model: 'gpt-5.6-sol',
-      research_reasoning_effort: 'high', timeout_seconds: 90, enabled: true, configured: true,
+      research_reasoning_effort: 'high', model_profiles: [], timeout_seconds: 90, enabled: true, configured: true,
       reachable: true, degraded: false, status_message: 'ok',
     }))
     await api.saveModelSettings({
       base_url: 'https://gateway.example/v1', api_key: '', search_model: 'gpt-5.6-luna',
       search_reasoning_effort: 'low', research_model: 'gpt-5.6-sol', research_reasoning_effort: 'high',
-      timeout_seconds: 90, enabled: true,
+      model_profiles: [], timeout_seconds: 90, enabled: true,
     })
 
     const [, init] = vi.mocked(fetch).mock.calls[0]

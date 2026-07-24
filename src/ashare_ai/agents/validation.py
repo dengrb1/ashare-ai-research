@@ -72,7 +72,11 @@ def validate_component_payload(
             prompt_sha256=prompt_sha256,
             response_sha256=sha256_bytes(canonical_json(generation.output)),
             input_tokens=metadata.input_tokens,
+            cached_input_tokens=metadata.cached_input_tokens,
+            cache_write_tokens=metadata.cache_write_tokens,
             output_tokens=metadata.output_tokens,
+            reasoning_tokens=metadata.reasoning_tokens,
+            cache_policy=metadata.cache_policy,
             duration_ms=metadata.duration_ms,
             retry_count=metadata.retry_count,
         )

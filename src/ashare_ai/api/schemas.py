@@ -78,6 +78,24 @@ class PasswordResetRequest(BaseModel):
     password: str = Field(min_length=12, max_length=256)
 
 
+class ModelProfileSettings(BaseModel):
+    model: str = Field(min_length=1, max_length=128)
+    cache_policy: Literal["GROK", "OPENAI", "COMPATIBLE"] = "COMPATIBLE"
+    context_window_tokens: int = Field(default=128000, ge=1024, le=4_000_000)
+    output_token_reserve: int = Field(default=8192, ge=0, le=1_000_000)
+    reasoning_token_reserve: int = Field(default=0, ge=0, le=1_000_000)
+    input_price_per_million: Decimal = Field(default=Decimal("0"), ge=0)
+    cached_input_price_per_million: Decimal = Field(default=Decimal("0"), ge=0)
+    cache_write_price_per_million: Decimal = Field(default=Decimal("0"), ge=0)
+    output_price_per_million: Decimal = Field(default=Decimal("0"), ge=0)
+
+    @model_validator(mode="after")
+    def reserve_fits_window(self) -> ModelProfileSettings:
+        if self.output_token_reserve + self.reasoning_token_reserve >= self.context_window_tokens:
+            raise ValueError("output and reasoning reserves must leave input capacity")
+        return self
+
+
 class ModelSettingsRequest(BaseModel):
     base_url: str = Field(min_length=8, max_length=2048)
     api_key: str | None = Field(default=None, max_length=4096)
@@ -85,6 +103,7 @@ class ModelSettingsRequest(BaseModel):
     search_reasoning_effort: str = Field(default="low", pattern=r"^(low|medium|high|xhigh)$")
     research_model: str = Field(default="gpt-5.6-sol", min_length=1, max_length=128)
     research_reasoning_effort: str = Field(default="high", pattern=r"^(low|medium|high|xhigh)$")
+    model_profiles: list[ModelProfileSettings] = Field(default_factory=list, max_length=32)
     timeout_seconds: float = Field(default=90, ge=1, le=600)
     enabled: bool = True
 
@@ -106,6 +125,7 @@ class ModelSettingsResponse(BaseModel):
     search_reasoning_effort: str
     research_model: str
     research_reasoning_effort: str
+    model_profiles: list[ModelProfileSettings] = Field(default_factory=list)
     timeout_seconds: float
     enabled: bool
     configured: bool
@@ -139,15 +159,9 @@ class PaperPosition(BaseModel):
     # their current weight from market value and the account total instead.
     target_weight: float | None = Field(default=None, ge=0, le=1)
     acquired_on: date | None = None
-    profit_trigger_amount: Decimal | None = Field(
-        default=None, gt=0, le=Decimal("100000000000")
-    )
-    exit_trigger_price: Decimal | None = Field(
-        default=None, gt=0, le=Decimal("10000000")
-    )
-    stop_loss_price: Decimal | None = Field(
-        default=None, gt=0, le=Decimal("10000000")
-    )
+    profit_trigger_amount: Decimal | None = Field(default=None, gt=0, le=Decimal("100000000000"))
+    exit_trigger_price: Decimal | None = Field(default=None, gt=0, le=Decimal("10000000"))
+    stop_loss_price: Decimal | None = Field(default=None, gt=0, le=Decimal("10000000"))
     stop_loss_mode: Literal["AUTO_ATR20", "MANUAL", "FALLBACK_8PCT"] = "AUTO_ATR20"
     stop_loss_enabled: bool = True
 
@@ -179,9 +193,7 @@ class AssetStateRequest(BaseModel):
     positions: list[PaperPosition] = Field(max_length=15)
     total_assets: float | None = Field(default=None, gt=0, le=1_000_000_000_000)
     exit_monitor_enabled: bool | None = None
-    default_profit_trigger: Decimal | None = Field(
-        default=None, gt=0, le=Decimal("100000000000")
-    )
+    default_profit_trigger: Decimal | None = Field(default=None, gt=0, le=Decimal("100000000000"))
     stop_loss_monitor_enabled: bool | None = None
     buy_monitor_enabled: bool | None = None
     market_refresh_interval_seconds: Literal[15, 30, 60, 120] | None = None
@@ -230,9 +242,7 @@ class ExitMonitorSettingsRequest(BaseModel):
     """Narrow mobile-safe update that cannot overwrite holdings or the watchlist."""
 
     exit_monitor_enabled: bool
-    default_profit_trigger: Decimal | None = Field(
-        default=None, gt=0, le=Decimal("100000000000")
-    )
+    default_profit_trigger: Decimal | None = Field(default=None, gt=0, le=Decimal("100000000000"))
     stop_loss_monitor_enabled: bool | None = None
     buy_monitor_enabled: bool | None = None
 
@@ -245,6 +255,7 @@ class MarketRefreshSettingsRequest(BaseModel):
 
 class ExitAdviceResponse(_SanitizedErrorResponse):
     advice_id: str
+    operation_run_id: str | None = None
     user_id: str
     symbol: str
     status: str
@@ -374,9 +385,7 @@ class AIChatMessageResponse(OrmResponse):
     thread_id: str
     role: Literal["user", "assistant"]
     content: str
-    status: Literal["PENDING", "STREAMING", "COMPLETED", "FAILED", "CANCELLED"] = (
-        "COMPLETED"
-    )
+    status: Literal["PENDING", "STREAMING", "COMPLETED", "FAILED", "CANCELLED"] = "COMPLETED"
     trading_date: date
     decision_at: datetime
     available_at: datetime
@@ -391,7 +400,14 @@ class AIChatMessageResponse(OrmResponse):
     response_sha256: str | None
     cache_hit: bool
     input_tokens: int
+    cached_input_tokens: int = 0
+    cache_write_tokens: int = 0
     output_tokens: int
+    reasoning_tokens: int = 0
+    cache_policy: Literal["GROK", "OPENAI", "COMPATIBLE"] = "COMPATIBLE"
+    context_budget_status: Literal["WITHIN_BUDGET", "HISTORY_TRIMMED", "CONTEXT_TOO_LARGE"] = (
+        "WITHIN_BUDGET"
+    )
     error_code: str | None = None
     request_id: str | None = None
     streaming_mode: Literal["STREAMING", "DEGRADED", "CACHED"] = "STREAMING"
@@ -408,6 +424,42 @@ class AIChatMetricResponse(BaseModel):
     average_latency_ms: float
     average_singleflight_wait_ms: float
     degraded_count: int
+
+
+class AICostValueResponse(BaseModel):
+    requests: int
+    cache_hits: int = 0
+    input_tokens: int
+    cached_input_tokens: int
+    cache_write_tokens: int
+    uncached_input_tokens: int
+    output_tokens: int
+    estimated_spend_usd: Decimal
+    estimated_savings_usd: Decimal
+
+
+class AICostBucketResponse(AICostValueResponse):
+    bucket_date: date
+
+
+class AICostTurnResponse(BaseModel):
+    requests: int
+    cache_hit: bool
+    input_tokens: int
+    cached_input_tokens: int
+    cache_write_tokens: int
+    uncached_input_tokens: int
+    output_tokens: int
+    estimated_spend_usd: Decimal
+    estimated_savings_usd: Decimal
+
+
+class AICostSummaryResponse(BaseModel):
+    days: int
+    items: list[AICostBucketResponse]
+    next_cursor: str | None = None
+    totals: AICostValueResponse
+    current_turn: AICostTurnResponse | None = None
 
 
 class SecurityResolveCandidate(BaseModel):
@@ -561,6 +613,21 @@ class ReportSymbolResponse(BaseModel):
     industry_code: str | None = None
     plain_language_summary: str | None = None
     component_summaries: dict[str, str] = Field(default_factory=dict)
+
+
+class ReportExecutionSymbolStatus(BaseModel):
+    symbol: str
+    held_quantity: int = Field(ge=0)
+    acquired_on: date | None = None
+    sellable_quantity: int = Field(ge=0)
+    t1_restricted: bool = False
+    blockers: list[str] = Field(default_factory=list)
+
+
+class ReportExecutionStatusResponse(BaseModel):
+    report_id: str
+    as_of: datetime
+    items: list[ReportExecutionSymbolStatus] = Field(default_factory=list)
 
 
 class PortfolioResponse(OrmResponse):
@@ -753,6 +820,7 @@ class TradePlanResponse(_SanitizedErrorResponse):
     user_id: str
     report_id: str
     run_id: str
+    operation_run_id: str | None = None
     trading_date: date
     decision_at: datetime
     available_at: datetime
@@ -777,6 +845,20 @@ class TradePlanResponse(_SanitizedErrorResponse):
 
 class RunListResponse(RunResponse):
     user_id: str | None
+
+
+class RunActivityItem(RunResponse):
+    user_id: str | None = None
+    resource_type: Literal["RESEARCH", "BACKTEST", "TRADE_PLAN", "EXIT_ADVICE"]
+    resource_id: str | None = None
+    resource_url: str | None = None
+    title: str | None = None
+    symbol: str | None = None
+
+
+class RunActivityResponse(BaseModel):
+    items: list[RunActivityItem]
+    next_cursor: str | None = None
 
 
 class ResearchRunResponse(RunResponse):
