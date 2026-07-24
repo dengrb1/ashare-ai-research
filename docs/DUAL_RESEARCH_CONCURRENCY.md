@@ -1,6 +1,6 @@
 # 分支更新：双研究任务并发
 
-分支：`codex/read-codex-goal-objective`
+分支：`codex/goal-a-summary`
 
 ## 背景
 

@@ -143,8 +143,8 @@ PostgreSQL、Redis 和 API 默认仅绑定 `127.0.0.1`，Redis 强制密码认�
 
 内置流水线使用 `object-data` 内容寻址卷。仓库不再捆绑安全更新滞后的 MinIO/MC 镜像；确需
 S3 兼容时，通过 `OBJECT_STORE_ENDPOINT` 接入受维护的外部 S3 服务。需要独立并行
-Worker 时使用 `docker compose -p ashare-ai-src -f compose.yaml --profile parallel-workers up -d --scale job-worker=0`；
-1.5GB 主机不要启用该扩展配置。
+Worker 时使用 `docker compose -p ashare-ai-src -f compose.yaml --profile parallel-workers up -d --scale job-worker=0 --scale research-worker=2`；
+并行模式至少需要 4GB 可用内存，且不要让默认 `job-worker` 与研究 Worker 同时消费研究队列；1.5GB 主机不要启用该扩展配置。
 
 公网部署先复制 `.env.production.example` 为未跟踪的 `.env`，逐项填写强随机数据库、Redis、
 管理员密码和加密密钥，再复制 `.env.docker.example`。将 `TRUSTED_HOSTS` 设置为实际域名，
