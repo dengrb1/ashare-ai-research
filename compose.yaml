@@ -132,6 +132,7 @@ services:
   research-worker:
     <<: *app-service
     profiles: ["parallel-workers"]
+    scale: 2
     command: ["python", "-m", "ashare_ai.orchestration.research_worker"]
     mem_limit: 700m
     depends_on:

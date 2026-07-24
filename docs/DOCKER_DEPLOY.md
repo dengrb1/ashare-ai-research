@@ -186,7 +186,9 @@ docker ps -a
 
 ```bash
 docker compose -p ashare-ai-src -f compose.yaml --profile parallel-workers \
-  up -d --scale job-worker=0
+  up -d --build --scale job-worker=0 --scale research-worker=2
 ```
 
-切换前确认没有正在运行的研究或回测任务。小于 4GB 内存的主机建议继续使用默认串行 Worker。
+并行 profile 固定使用两个 `research-worker` 副本，每个副本串行消费一条研究任务；队列与运行产物按 `run_id` 隔离，因此两个不同研究可同时推进。禁止让默认 `job-worker` 与专用 Worker 同时消费研究队列，避免重复领取。
+
+并发模式至少需要 4GB 可用内存。两条研究各自最多 4 路 LLM 组件请求，模型网关需支持最多 8 路并发；若网关容量不足，将 `LLM_AGENT_MAX_CONCURRENCY` 降为 `2`，任务级双并发保持不变。切换前确认没有正在运行的研究或回测任务；小于 4GB 内存的主机继续使用默认串行 Worker。
