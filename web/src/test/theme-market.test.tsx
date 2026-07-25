@@ -165,6 +165,32 @@ describe('market prefetch and client cache', () => {
     })
   })
 
+  it('forces subscribed quote refresh when the page regains focus', async () => {
+    const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/assets') && (!init?.method || init.method === 'GET')) {
+        return jsonResponse({ watchlist: ['600519.SH'], positions: [] })
+      }
+      if (url.includes('/market/quotes/600519.SH')) {
+        return jsonResponse({
+          symbol: '600519.SH', name: '贵州茅台', price: 1000, change_pct: 1,
+          status: { source: 'fixture', collected_at: '2026-07-20T00:00:00Z', cached_at: '2026-07-20T00:00:00Z', delayed: false, stale: false },
+        })
+      }
+      if (url.includes('/market/quotes')) return jsonResponse([])
+      if (url.endsWith('/market/prefetch')) return jsonResponse({ quotes: [], klines: {}, errors: {} })
+      throw new Error(`unexpected request ${url}`)
+    })
+    vi.stubGlobal('fetch', mockFetch)
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+    render(<MarketProvider><MarketProbe /></MarketProvider>)
+
+    await waitFor(() => expect(mockFetch.mock.calls.some(([url]) => String(url).includes('/market/quotes/600519.SH'))).toBe(true))
+    window.dispatchEvent(new Event('focus'))
+
+    await waitFor(() => expect(mockFetch.mock.calls.some(([url]) => String(url).includes('/market/quotes/600519.SH?refresh=true'))).toBe(true))
+  })
+
   it('loads the focused quote before deferring K-line prefetch and background quotes', async () => {
     let resolveQuotes: (response: Response) => void
     const quotes = new Promise<Response>((resolve) => { resolveQuotes = resolve })

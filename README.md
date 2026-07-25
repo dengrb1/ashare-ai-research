@@ -142,9 +142,12 @@ Nginx 提供静态文件并把 `/api` 反向代理到 FastAPI；本地浏览器�
 PostgreSQL、Redis 和 API 默认仅绑定 `127.0.0.1`，Redis 强制密码认证。
 
 内置流水线使用 `object-data` 内容寻址卷。仓库不再捆绑安全更新滞后的 MinIO/MC 镜像；确需
-S3 兼容时，通过 `OBJECT_STORE_ENDPOINT` 接入受维护的外部 S3 服务。需要独立并行
-Worker 时使用 `docker compose -p ashare-ai-src -f compose.yaml --profile parallel-workers up -d --scale job-worker=0 --scale research-worker=2`；
-并行模式至少需要 4GB 可用内存，且不要让默认 `job-worker` 与研究 Worker 同时消费研究队列；1.5GB 主机不要启用该扩展配置。
+S3 兼容时，通过 `OBJECT_STORE_ENDPOINT` 接入受维护的外部 S3 服务。管理员在“系统设置”中可
+将研究拓扑保存为 `SERIAL`（仅 `job-worker` 消费研究）或 `DUAL`（固定两个 `research-worker`
+消费研究，`job-worker` 跳过研究队列）。默认 `SERIAL` 不创建 `research-worker` 容器；保存为
+`DUAL` 后，执行设置页面给出的 Compose 命令才会启用 `dual-research` profile 并启动两个副本。切回
+`SERIAL` 时该命令会停止研究 Worker。`DUAL` 至少需要 4GB 可用内存和足够模型网关并发容量。不要手工
+启用会竞争默认 Trade Plan、回测或研究队列的 legacy `parallel-workers` profile。
 
 公网部署先复制 `.env.production.example` 为未跟踪的 `.env`，逐项填写强随机数据库、Redis、
 管理员密码和加密密钥，再复制 `.env.docker.example`。将 `TRUSTED_HOSTS` 设置为实际域名，
@@ -246,6 +249,8 @@ docker compose -p ashare-ai -f compose.yaml -f compose.ghcr.yaml up -d
 - `POST /api/v1/me/data-imports/{import_id}/apply`
 - `GET|POST /api/v1/admin/users`
 - `PATCH /api/v1/admin/users/{user_id}`
+- `GET|PUT|DELETE /api/v1/admin/system-settings`
+- `DELETE /api/v1/admin/system-settings/{field}`
 - `GET /api/v1/market/quotes?symbols=600000.SH,000001.SZ`
 - `GET /api/v1/market/quotes/{symbol}`
 - `GET /api/v1/market/klines/{symbol}?period=1m|5m|15m|30m|60m|day`
@@ -364,8 +369,10 @@ WebGUI 可选择动态市场股票池、从当前用户的自选与持仓中自�
 每位用户的自动日研默认关闭；研究页的设置悬浮窗提供报告 A、B 两套独立配置，可分别启停并设置
 全市场、动态自选与持仓或手工股票范围，以及总预算、单股最高投入和最高可接受股价。开启一套即
 运行单报告，两套均开启则在同一交易日提交两份独立任务，由默认串行 Worker 依次执行；配置相同
-也按 A/B 槽位生成两份报告。调度器在上海交易日 15:05 起检查数据就绪状态，未就绪时每 5 分钟
-重试、最长 2 小时，数据就绪前不创建运行或冻结 `decision_at`。自选与持仓在实际运行时动态读取，
+也按 A/B 槽位生成两份报告。调度器在上海交易日 15:05 起检查数据就绪状态，未就绪时按配置间隔
+重试至权威交易日历确定的下一交易日 09:25（上海时间）；数据未就绪时任务会以
+`DATA_READINESS_WAITING` 持久化其冻结的 `decision_at`、范围和预算，待基准齐备后才构建快照，
+并且绝不跨入下一交易时段重建前一日快照。自选与持仓在实际运行时动态读取，
 为空只跳过对应槽位且不阻塞另一槽位。每次自动任务会把槽位、配置版本、范围和预算冻结进 Manifest
 及输入哈希；同一用户、交易日和槽位只提交一次，当日首次提交后修改的配置从下一交易日起生效。
 旧版 `auto_enabled` 设置请求仍兼容。手动任务使用独立 `MANUAL` 幂等键，

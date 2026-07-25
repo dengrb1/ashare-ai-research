@@ -7,6 +7,7 @@ from uuid import uuid4
 from sqlalchemy.orm import Session
 
 from ashare_ai.core.hashing import stable_hash
+from ashare_ai.core.system_settings import SystemConfigurationService
 from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.storage.models import JobRun
 
@@ -24,6 +25,7 @@ def create_operation_run(
     created_at: datetime | None = None,
 ) -> JobRun:
     now = created_at or datetime.now(UTC)
+    system_configuration = SystemConfigurationService().resolve(session).manifest_reference()
     run = JobRun(
         run_id=str(uuid4()),
         user_id=user_id,
@@ -34,7 +36,11 @@ def create_operation_run(
         idempotency_key=stable_hash(
             {"kind": "OPERATION_RUN", "run_type": run_type, "resource_id": resource_id}
         ),
-        manifest={**manifest, "resource_id": resource_id},
+        manifest={
+            **manifest,
+            "resource_id": resource_id,
+            "system_configuration": system_configuration,
+        },
         input_hash=input_hash,
         started_at=now,
     )
@@ -44,7 +50,11 @@ def create_operation_run(
         run.run_id,
         f"{run_type}_SUBMITTED",
         f"{run_type.replace('_', ' ').title()} submitted",
-        details={"resource_id": resource_id, "input_hash": input_hash},
+        details={
+            "resource_id": resource_id,
+            "input_hash": input_hash,
+            "system_configuration": system_configuration,
+        },
     )
     return run
 

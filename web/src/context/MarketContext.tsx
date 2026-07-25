@@ -278,6 +278,23 @@ export function MarketProvider({ children }: { children: ReactNode }) {
     return () => window.clearInterval(timer)
   }, [assetsLoading, prefetch, prefetchSymbols.length])
 
+  useEffect(() => {
+    if (assetsLoading) return
+    const refreshWhenVisible = () => {
+      if (document.visibilityState !== 'visible') return
+      // Browsers throttle background timers.  A forced quote read on return
+      // prevents an old in-memory or Redis entry from surviving a tab switch.
+      void refresh(true)
+      void prefetch()
+    }
+    window.addEventListener('focus', refreshWhenVisible)
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+    return () => {
+      window.removeEventListener('focus', refreshWhenVisible)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+    }
+  }, [assetsLoading, prefetch, refresh])
+
   const subscribe = useCallback((symbols: string[]) => {
     const normalized = symbols.filter(Boolean)
     normalized.forEach((symbol) => subscribers.current.set(symbol, (subscribers.current.get(symbol) || 0) + 1))

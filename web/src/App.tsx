@@ -15,6 +15,7 @@ import { BacktestPage } from './pages/BacktestPage'
 import { AdminPage } from './pages/AdminPage'
 import { FinancialSearchPage } from './pages/FinancialSearchPage'
 import { ModelSettingsPage } from './pages/ModelSettingsPage'
+import { SystemSettingsPage } from './pages/SystemSettingsPage'
 import { AboutPage } from './pages/AboutPage'
 import { ExitAdvicePage } from './pages/ExitAdvicePage'
 import { AIChatPage } from './pages/AIChatPage'
@@ -51,6 +52,7 @@ function AppRoutes() {
         <Route path="about" element={<AboutPage />} />
         <Route path="admin" element={<AdminPage />} />
         <Route path="admin/models" element={<ModelSettingsPage />} />
+        <Route path="admin/system-settings" element={<SystemSettingsPage />} />
       </Route>
     </Route>
     <Route path="*" element={<Navigate to="/" replace />} />

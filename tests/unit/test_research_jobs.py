@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from ashare_ai.orchestration.research_jobs import execute_research_job
+from ashare_ai.orchestration.research_jobs import _retry_waiting_research, execute_research_job
 from ashare_ai.storage.models import AuditEvent, Base, JobRun
 
 
@@ -79,6 +79,25 @@ def _factory():
     return factory
 
 
+def _waiting_factory(*, deadline: datetime):
+    factory = _factory()
+    with factory() as session:
+        run = session.get(JobRun, "research-run")
+        assert run is not None
+        run.status = "DATA_READINESS_WAITING"
+        run.active_research_key = "active-research-key"
+        run.manifest = {
+            "frozen": True,
+            "data_readiness_wait": {
+                "deadline_at": deadline.isoformat(),
+                "next_retry_at": None,
+                "attempt_count": 0,
+            },
+        }
+        session.commit()
+    return factory
+
+
 def test_research_worker_executes_existing_frozen_run() -> None:
     factory = _factory()
     pipeline = Pipeline()
@@ -133,3 +152,84 @@ def test_research_worker_persists_failure_reason() -> None:
             session.query(AuditEvent).order_by(AuditEvent.created_at.desc()).first().severity
             == "ERROR"
         )
+
+
+def test_data_readiness_wait_continues_after_the_legacy_two_hour_window() -> None:
+    deadline = datetime(2026, 7, 20, 1, 25, tzinfo=UTC)
+    factory = _waiting_factory(deadline=deadline)
+    queued: list[tuple[str, datetime]] = []
+    now = datetime(2026, 7, 17, 9, 10, tzinfo=UTC)
+
+    ready = _retry_waiting_research(
+        "research-run",
+        now=now,
+        session_factory=factory,
+        readiness=lambda _date, _checked_at: False,
+        enqueue_at=lambda run_id, retry_at: queued.append((run_id, retry_at)),
+    )
+
+    assert ready is False
+    assert queued and queued[0][0] == "research-run"
+    assert now < queued[0][1] < deadline
+    with factory() as session:
+        run = session.get(JobRun, "research-run")
+        assert run is not None and run.status == "DATA_READINESS_WAITING"
+        assert run.manifest["data_readiness_wait"]["attempt_count"] == 1
+
+
+def test_data_readiness_wait_promotes_late_data_before_next_session_cutoff() -> None:
+    deadline = datetime(2026, 7, 20, 1, 25, tzinfo=UTC)
+    factory = _waiting_factory(deadline=deadline)
+
+    ready = _retry_waiting_research(
+        "research-run",
+        now=deadline - timedelta(minutes=1),
+        session_factory=factory,
+        readiness=lambda _date, _checked_at: True,
+    )
+
+    assert ready is True
+    with factory() as session:
+        run = session.get(JobRun, "research-run")
+        assert run is not None and run.status == "PENDING"
+        assert run.manifest["data_readiness_wait"]["next_retry_at"] is None
+
+
+def test_data_readiness_wait_fails_at_next_session_cutoff() -> None:
+    deadline = datetime(2026, 7, 20, 1, 25, tzinfo=UTC)
+    factory = _waiting_factory(deadline=deadline)
+
+    ready = _retry_waiting_research(
+        "research-run",
+        now=deadline,
+        session_factory=factory,
+        readiness=lambda _date, _checked_at: False,
+    )
+
+    assert ready is False
+    with factory() as session:
+        run = session.get(JobRun, "research-run")
+        assert run is not None
+        assert run.status == "FAILED"
+        assert (
+            run.error_message
+            == "benchmark data did not synchronize before the next trading session"
+        )
+        assert run.audit_events[-1].event_type == "DATA_READINESS_TIMEOUT"
+
+
+def test_data_readiness_wait_accepts_data_that_arrives_at_cutoff() -> None:
+    deadline = datetime(2026, 7, 20, 1, 25, tzinfo=UTC)
+    factory = _waiting_factory(deadline=deadline)
+
+    ready = _retry_waiting_research(
+        "research-run",
+        now=deadline,
+        session_factory=factory,
+        readiness=lambda _date, _checked_at: True,
+    )
+
+    assert ready is True
+    with factory() as session:
+        run = session.get(JobRun, "research-run")
+        assert run is not None and run.status == "PENDING"

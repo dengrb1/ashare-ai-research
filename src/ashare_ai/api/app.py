@@ -5,7 +5,7 @@ import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal, NoReturn, cast
 from uuid import uuid4
@@ -132,6 +132,8 @@ from ashare_ai.api.schemas import (
     SecurityResolveCandidate,
     SecurityResolveResponse,
     SnapshotResponse,
+    SystemSettingsRequest,
+    SystemSettingsResponse,
     TokenResponse,
     TradePlanRequest,
     TradePlanResponse,
@@ -142,6 +144,12 @@ from ashare_ai.api.schemas import (
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.hashing import sha256_bytes, stable_hash
 from ashare_ai.core.security import safe_error_message
+from ashare_ai.core.system_settings import (
+    SECRET_SETTING_FIELDS,
+    SystemConfigurationService,
+    SystemSettingsError,
+    get_effective_settings,
+)
 from ashare_ai.core.time import SHANGHAI
 from ashare_ai.market.service import get_market_data_service
 from ashare_ai.notifications.service import InvalidNotificationCursor, NotificationService
@@ -159,6 +167,7 @@ from ashare_ai.orchestration.research_jobs import enqueue_research, enqueue_rese
 from ashare_ai.orchestration.research_schedule import (
     AKShareDataReadiness,
     FreeExchangeCalendar,
+    data_readiness_wait,
     resolve_manual_research_date,
 )
 from ashare_ai.orchestration.research_settings import ResearchSettingsService
@@ -168,6 +177,7 @@ from ashare_ai.orchestration.trade_plan_queue import (
 from ashare_ai.orchestration.trade_plan_queue import (
     enqueue_trade_plan,
 )
+from ashare_ai.orchestration.worker_status import read_heartbeats
 from ashare_ai.portfolio.user_assets import UNSET_TOTAL_ASSETS, UserAssetService
 from ashare_ai.reports.chinese_summary import component_summary, symbol_summary
 from ashare_ai.search.service import (
@@ -376,7 +386,7 @@ def _manual_research_date(requested_date: date, now: datetime) -> date:
         raise HTTPException(
             status_code=422, detail="research requested_date cannot be in the future"
         )
-    if get_settings().canonical_bundle_mode in {"file", "demo"}:
+    if get_effective_settings().canonical_bundle_mode in {"file", "demo"}:
         return requested_date
     try:
         sessions = FreeExchangeCalendar().sessions(
@@ -398,7 +408,7 @@ def _manual_research_date(requested_date: date, now: datetime) -> date:
 
 def _research_readiness_wait(trading_date: date, now: datetime) -> dict[str, str | int] | None:
     """Return durable wait metadata without changing the selected session."""
-    if get_settings().canonical_bundle_mode in {"file", "demo"}:
+    if get_effective_settings().canonical_bundle_mode in {"file", "demo"}:
         return None
     current = now.astimezone(SHANGHAI) if now.tzinfo else now.replace(tzinfo=SHANGHAI)
     try:
@@ -407,22 +417,15 @@ def _research_readiness_wait(trading_date: date, now: datetime) -> dict[str, str
         ready = False
     if ready:
         return None
-    try:
-        sessions = FreeExchangeCalendar().sessions(
-            trading_date + timedelta(days=1), trading_date + timedelta(days=10)
-        )
-        next_session = next(value for value in sessions if value > trading_date)
-        deadline = datetime.combine(next_session, time(9, 0), tzinfo=SHANGHAI)
-    except Exception:
-        deadline = current + timedelta(minutes=get_settings().daily_research_retry_limit_minutes)
-    retry_at = min(
-        current + timedelta(minutes=get_settings().daily_research_retry_minutes), deadline
+    sessions = FreeExchangeCalendar().sessions(
+        trading_date, trading_date + timedelta(days=14)
     )
-    return {
-        "deadline_at": deadline.astimezone(UTC).isoformat(),
-        "next_retry_at": retry_at.astimezone(UTC).isoformat(),
-        "attempt_count": 0,
-    }
+    return data_readiness_wait(
+        trading_date=trading_date,
+        now=current,
+        sessions=sessions,
+        retry_minutes=get_effective_settings().daily_research_retry_minutes,
+    )
 
 
 def _trade_plan_policy_payload(run: JobRun) -> dict[str, Any]:
@@ -1219,7 +1222,7 @@ def ai_model_options(db: DbSession, _: Current) -> AIModelOptionsResponse:
     return AIModelOptionsResponse(
         models=models,
         reasoning_efforts=["low", "medium", "high", "xhigh"],
-        web_search_available=bool(get_settings().searxng_base_url),
+        web_search_available=bool(get_effective_settings().searxng_base_url),
     )
 
 
@@ -1985,6 +1988,96 @@ def _model_settings_response(db: Session) -> ModelSettingsResponse:
     )
 
 
+_SYSTEM_QUEUE_KEYS = {
+    "personal_archive": ("ashare:personal-archive:pending", "ashare:personal-archive:processing"),
+    "research": ("ashare:research:pending", "ashare:research:processing"),
+    "trade_plan": ("ashare:trade-plan:pending", "ashare:trade-plan:processing"),
+    "backtest": ("ashare:backtest:pending", "ashare:backtest:processing"),
+}
+
+
+def _system_worker_snapshot(
+    topology_sha256: str,
+) -> tuple[str, bool, list[dict[str, object]], dict[str, dict[str, int]]]:
+    """Read best-effort operator data without making settings availability depend on Redis."""
+    try:
+        import redis
+
+        client = redis.Redis.from_url(get_settings().redis_url, decode_responses=True)
+        heartbeats = read_heartbeats(client)
+        queues = {
+            name: {
+                "pending": int(client.llen(pending)),
+                "processing": int(client.llen(processing)),
+            }
+            for name, (pending, processing) in _SYSTEM_QUEUE_KEYS.items()
+        }
+    except Exception:
+        heartbeats, queues = [], {
+            name: {"pending": 0, "processing": 0} for name in _SYSTEM_QUEUE_KEYS
+        }
+    job_workers = [item for item in heartbeats if item.get("role") == "job-worker"]
+    modes = {str(item.get("loaded_mode")) for item in job_workers}
+    actual_mode = (
+        next(iter(modes)) if len(modes) == 1 and modes <= {"SERIAL", "DUAL"} else "UNKNOWN"
+    )
+    matching_job = any(item.get("topology_sha256") == topology_sha256 for item in job_workers)
+    return actual_mode, not matching_job, heartbeats, queues
+
+
+def _system_settings_response(db: Session) -> SystemSettingsResponse:
+    view = SystemConfigurationService().public_view(db)
+    saved_values = cast(dict[str, Any], view["values"])
+    actual_mode, restart_required, workers, queues = _system_worker_snapshot(
+        str(view["topology_sha256"])
+    )
+    return SystemSettingsResponse.model_validate(
+        {
+            **view,
+            "actual_loaded_mode": actual_mode,
+            "restart_required": restart_required,
+            "workers": workers,
+            "queues": queues,
+            "compose_restart_command": _system_settings_restart_command(
+                str(saved_values["research_execution_mode"])
+            ),
+        }
+    )
+
+
+def _system_settings_restart_command(execution_mode: str) -> str:
+    """Return the operator command required to apply a persisted topology.
+
+    Compose profiles are evaluated before a container runs, whereas the
+    execution mode is stored in PostgreSQL.  The API deliberately has no
+    Docker socket, so it gives the operator the exact command instead.
+    """
+
+    prefix = "docker compose -p ashare-ai-src -f compose.yaml"
+    if execution_mode == "DUAL":
+        return (
+            f"{prefix} --profile dual-research up -d --force-recreate "
+            "job-worker research-worker"
+        )
+    return (
+        f"{prefix} --profile dual-research stop research-worker; "
+        f"{prefix} up -d --force-recreate job-worker"
+    )
+
+
+def _system_settings_payload(
+    payload: SystemSettingsRequest,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    values = payload.model_dump(exclude_unset=True)
+    secrets = {
+        field: value
+        for field, value in values.items()
+        if field in SECRET_SETTING_FIELDS and isinstance(value, str)
+    }
+    public = {field: value for field, value in values.items() if field not in SECRET_SETTING_FIELDS}
+    return public, secrets
+
+
 @app.get("/api/v1/admin/model-settings", response_model=ModelSettingsResponse)
 def get_model_settings(db: DbSession, context: Current) -> ModelSettingsResponse:
     _admin(context)
@@ -2032,6 +2125,100 @@ async def list_model_settings_models(
         models = await ModelConfigurationService().list_models(_model_draft(payload), db)
         return ModelListResponse(models=models)
     except ModelSettingsError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/admin/system-settings", response_model=SystemSettingsResponse)
+def get_system_settings(db: DbSession, context: Current) -> SystemSettingsResponse:
+    _admin(context)
+    try:
+        return _system_settings_response(db)
+    except SystemSettingsError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.put("/api/v1/admin/system-settings", response_model=SystemSettingsResponse)
+def put_system_settings(
+    payload: SystemSettingsRequest,
+    db: DbSession,
+    context: Writer,
+    idempotency_key: IdempotencyKey = None,
+) -> SystemSettingsResponse:
+    _admin(context)
+    public, secrets = _system_settings_payload(payload)
+    if not public and not secrets:
+        raise HTTPException(status_code=422, detail="submit at least one system setting")
+    body = payload.model_dump(mode="json", exclude_unset=True)
+    fingerprint = _idempotency_fingerprint(
+        context.user.user_id, "/api/v1/admin/system-settings", idempotency_key, body
+    )
+    replay = _find_idempotency(
+        db,
+        user_id=context.user.user_id,
+        route="/api/v1/admin/system-settings",
+        fingerprint=fingerprint,
+    )
+    if replay is not None:
+        return _system_settings_response(db)
+    try:
+        runtime = SystemConfigurationService().save(
+            db,
+            public_updates=public,
+            secret_updates=secrets,
+            user_id=context.user.user_id,
+        )
+        _remember_idempotency(
+            db,
+            user_id=context.user.user_id,
+            route="/api/v1/admin/system-settings",
+            fingerprint=fingerprint,
+            resource_type="SYSTEM_CONFIGURATION",
+            resource_id=runtime.configuration_id or "environment",
+        )
+        db.commit()
+        # Cached adapters are recreated on the next request so non-topology
+        # values (search, market and storage tuning) hot-load without a Docker
+        # restart.  Worker topology itself is intentionally boot-time only.
+        get_market_data_service.cache_clear()
+        get_financial_search_service.cache_clear()
+        logger.info(
+            "administrator saved system configuration version=%s hash=%s",
+            runtime.version,
+            runtime.config_sha256,
+        )
+        return _system_settings_response(db)
+    except SystemSettingsError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.delete("/api/v1/admin/system-settings/{field}", response_model=SystemSettingsResponse)
+def restore_system_setting(
+    field: str, db: DbSession, context: Writer
+) -> SystemSettingsResponse:
+    _admin(context)
+    try:
+        SystemConfigurationService().restore_field(db, field=field, user_id=context.user.user_id)
+        db.commit()
+        get_market_data_service.cache_clear()
+        get_financial_search_service.cache_clear()
+        return _system_settings_response(db)
+    except SystemSettingsError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.delete("/api/v1/admin/system-settings", response_model=SystemSettingsResponse)
+def restore_all_system_settings(db: DbSession, context: Writer) -> SystemSettingsResponse:
+    _admin(context)
+    try:
+        SystemConfigurationService().restore_all(db, user_id=context.user.user_id)
+        db.commit()
+        get_market_data_service.cache_clear()
+        get_financial_search_service.cache_clear()
+        return _system_settings_response(db)
+    except SystemSettingsError as exc:
+        db.rollback()
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
@@ -2220,7 +2407,7 @@ def report_content(report_id: str, db: DbSession, context: Current) -> ReportBod
     run = db.get(JobRun, row.run_id)
     if run is None or not _owns(run, context):
         raise HTTPException(status_code=404, detail="report not found")
-    settings = get_settings()
+    settings = get_effective_settings()
     if row.object_uri.startswith("s3://"):
         store: ObjectStore = S3ObjectStore(
             bucket=settings.object_store_bucket,
@@ -2691,7 +2878,13 @@ def submit_research(
     requested_date = payload.trading_date
     submitted_at = datetime.now(SHANGHAI)
     actual_research_date = _manual_research_date(requested_date, submitted_at)
-    readiness_wait = _research_readiness_wait(actual_research_date, submitted_at)
+    try:
+        readiness_wait = _research_readiness_wait(actual_research_date, submitted_at)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="authoritative trading calendar unavailable for data readiness",
+        ) from exc
     if payload.scope == "WATCHLIST":
         assets = UserAssetService(db).get(context.user.user_id)
         available_symbols = sorted(
@@ -3251,8 +3444,10 @@ def submit_backtest(
     except KeyError as exc:
         raise HTTPException(status_code=422, detail="snapshot lacks a verified file hash") from exc
     requested_config = dict(request.config)
+    runtime_settings = get_effective_settings()
+    system_configuration = SystemConfigurationService().resolve(db).manifest_reference()
     executor_config = {
-        "artifact_root": str(get_settings().lake_root.parent / "artifacts"),
+        "artifact_root": str(runtime_settings.lake_root.parent / "artifacts"),
         "snapshot_file_hashes": file_hashes,
         "requested_start_date": request.start_date.isoformat(),
         "requested_end_date": request.end_date.isoformat(),
@@ -3280,7 +3475,11 @@ def submit_backtest(
         decision_at=now,
         status="PENDING",
         idempotency_key=input_hash,
-        manifest={"snapshot_ids": request.snapshot_ids, "config": requested_config},
+        manifest={
+            "snapshot_ids": request.snapshot_ids,
+            "config": requested_config,
+            "system_configuration": system_configuration,
+        },
         input_hash=input_hash,
         started_at=now,
     )
@@ -3308,6 +3507,7 @@ def submit_backtest(
             "backtest_id": backtest.backtest_id,
             "input_hash": input_hash,
             "user_id": context.user.user_id,
+            "system_configuration": system_configuration,
         },
     )
     _remember_idempotency(

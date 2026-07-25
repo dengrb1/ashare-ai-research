@@ -150,6 +150,85 @@ class ModelListResponse(BaseModel):
     models: list[str]
 
 
+class SystemSettingsRequest(BaseModel):
+    """Partial admin update; omitted fields retain their active override."""
+
+    research_execution_mode: Literal["SERIAL", "DUAL"] | None = None
+    llm_agent_max_concurrency: int | None = Field(default=None, ge=1, le=4)
+    object_store_endpoint: str | None = Field(default=None, max_length=2048)
+    object_store_bucket: str | None = Field(default=None, min_length=1, max_length=255)
+    object_store_secure: bool | None = None
+    tushare_token: str | None = Field(default=None, min_length=1, max_length=4096)
+    object_store_access_key: str | None = Field(default=None, min_length=1, max_length=4096)
+    object_store_secret_key: str | None = Field(default=None, min_length=1, max_length=4096)
+    searxng_base_url: str | None = Field(default=None, min_length=8, max_length=2048)
+    searxng_timeout_seconds: float | None = Field(default=None, gt=0, le=60)
+    searxng_max_results: int | None = Field(default=None, ge=1, le=10)
+    market_cache_seconds: int | None = Field(default=None, ge=1, le=300)
+    market_kline_cache_seconds: int | None = Field(default=None, ge=15, le=3600)
+    market_prefetch_max_workers: int | None = Field(default=None, ge=1, le=16)
+    market_provider_max_workers: int | None = Field(default=None, ge=1, le=16)
+    market_provider_max_queue: int | None = Field(default=None, ge=1, le=64)
+    market_cache_max_entries: int | None = Field(default=None, ge=64, le=4096)
+    market_stale_seconds: int | None = Field(default=None, ge=15, le=86400)
+    market_timeout_seconds: float | None = Field(default=None, gt=0, le=120)
+    financial_search_cache_seconds: int | None = Field(default=None, ge=0, le=300)
+    financial_search_max_concurrency: int | None = Field(default=None, ge=1, le=32)
+    financial_search_rate_limit_per_minute: int | None = Field(default=None, ge=1, le=600)
+    daily_research_start_hour: int | None = Field(default=None, ge=0, le=23)
+    daily_research_start_minute: int | None = Field(default=None, ge=0, le=59)
+    daily_research_retry_minutes: int | None = Field(default=None, ge=1, le=60)
+    daily_research_retry_limit_minutes: int | None = Field(default=None, ge=5, le=1440)
+    worker_lease_seconds: int | None = Field(default=None, ge=30, le=7200)
+    canonical_bundle_mode: Literal["akshare", "file", "demo"] | None = None
+    allow_demo_data: bool | None = None
+    akshare_bundle_size: int | None = Field(default=None, ge=15, le=100)
+    akshare_history_sessions: int | None = Field(default=None, ge=65, le=500)
+    akshare_fetch_max_attempts: int | None = Field(default=None, ge=1, le=5)
+    akshare_fetch_backoff_seconds: float | None = Field(default=None, ge=0, le=60)
+    minimum_listing_days: int | None = Field(default=None, ge=0)
+    minimum_median_amount: float | None = Field(default=None, ge=0)
+
+    @field_validator("object_store_endpoint", mode="before")
+    @classmethod
+    def normalize_optional_endpoint(cls, value: object) -> object:
+        # Explicit null clears only a saved endpoint; DELETE restores the
+        # environment baseline.  Empty UI values are normalized to null.
+        return None if isinstance(value, str) and not value.strip() else value
+
+
+class WorkerHealthResponse(BaseModel):
+    worker_id: str
+    role: str
+    healthy: bool
+    loaded_mode: Literal["SERIAL", "DUAL", "UNKNOWN"] = "UNKNOWN"
+    topology_sha256: str | None = None
+    last_heartbeat_at: datetime | None = None
+
+
+class QueueSummaryResponse(BaseModel):
+    pending: int = Field(ge=0)
+    processing: int = Field(ge=0)
+
+
+class SystemSettingsResponse(BaseModel):
+    configuration_id: str | None
+    version: int
+    config_sha256: str
+    source: Literal["database", "environment"]
+    values: dict[str, Any]
+    sources: dict[str, Literal["database", "environment"]]
+    secret_configured: dict[str, bool]
+    secret_sources: dict[str, Literal["database", "environment"]]
+    read_only_environment: dict[str, Any]
+    topology_sha256: str
+    actual_loaded_mode: Literal["SERIAL", "DUAL", "UNKNOWN"] = "UNKNOWN"
+    restart_required: bool
+    workers: list[WorkerHealthResponse] = Field(default_factory=list)
+    queues: dict[str, QueueSummaryResponse] = Field(default_factory=dict)
+    compose_restart_command: str
+
+
 class PaperPosition(BaseModel):
     symbol: str = Field(pattern=r"^\d{6}\.(SH|SZ|BJ)$")
     name: str = Field(default="", max_length=64)

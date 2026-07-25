@@ -12,6 +12,7 @@ from ashare_ai.core.time import SHANGHAI
 from ashare_ai.orchestration.research_schedule import (
     _automatic_run_key,
     auto_dispatch_state,
+    data_readiness_wait,
     dispatch_auto_research,
     resolve_manual_research_date,
 )
@@ -31,7 +32,7 @@ from ashare_ai.storage.models import (
 class Calendar:
     def sessions(self, start_date: date, end_date: date) -> tuple[date, ...]:
         del start_date, end_date
-        return (date(2026, 7, 14), date(2026, 7, 15))
+        return (date(2026, 7, 14), date(2026, 7, 15), date(2026, 7, 16))
 
 
 class Ready:
@@ -82,7 +83,7 @@ def test_manual_resolver_does_not_fallback_when_post_close_data_is_not_ready() -
         )
 
 
-def test_auto_dispatch_state_enforces_window_and_readiness() -> None:
+def test_auto_dispatch_state_waits_for_late_after_close_data() -> None:
     sessions = (date(2026, 7, 15),)
     assert auto_dispatch_state(
         now=datetime(2026, 7, 15, 15, 4, tzinfo=SHANGHAI),
@@ -98,7 +99,32 @@ def test_auto_dispatch_state_enforces_window_and_readiness() -> None:
         now=datetime(2026, 7, 15, 17, 6, tzinfo=SHANGHAI),
         sessions=sessions,
         data_ready=True,
-    ) == "RETRY_EXPIRED"
+    ) == "READY"
+
+
+def test_data_readiness_wait_uses_authoritative_next_session_cutoff() -> None:
+    wait = data_readiness_wait(
+        trading_date=date(2026, 7, 17),
+        now=datetime(2026, 7, 17, 17, 10, tzinfo=SHANGHAI),
+        sessions=(date(2026, 7, 17), date(2026, 7, 20)),
+        retry_minutes=5,
+    )
+
+    assert wait == {
+        "deadline_at": "2026-07-20T01:25:00+00:00",
+        "next_retry_at": "2026-07-17T09:15:00+00:00",
+        "attempt_count": 0,
+    }
+
+
+def test_data_readiness_wait_rejects_a_calendar_without_next_session() -> None:
+    with pytest.raises(RuntimeError, match="next session"):
+        data_readiness_wait(
+            trading_date=date(2026, 7, 17),
+            now=datetime(2026, 7, 17, 17, 10, tzinfo=SHANGHAI),
+            sessions=(date(2026, 7, 17),),
+            retry_minutes=5,
+        )
 
 
 def test_slot_a_keeps_legacy_keys_during_upgrade() -> None:

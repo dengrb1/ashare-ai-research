@@ -19,6 +19,7 @@ import httpx
 
 from ashare_ai.adapters.symbols import normalize_symbol as canonical_symbol
 from ashare_ai.core.config import Settings, get_settings
+from ashare_ai.core.system_settings import get_effective_settings
 from ashare_ai.core.time import SHANGHAI
 
 PERIODS = {
@@ -1226,4 +1227,4 @@ class MarketDataService:
 
 @lru_cache(maxsize=1)
 def get_market_data_service() -> MarketDataService:
-    return MarketDataService()
+    return MarketDataService(settings=get_effective_settings())

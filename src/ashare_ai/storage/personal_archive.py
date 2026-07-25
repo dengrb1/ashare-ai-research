@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 from ashare_ai import __version__
 from ashare_ai.core.config import Settings, get_settings
 from ashare_ai.core.hashing import canonical_json, sha256_bytes, stable_hash
+from ashare_ai.core.system_settings import get_effective_settings
 from ashare_ai.storage.models import (
     AgentCall,
     AIChatMessage,
@@ -711,7 +712,7 @@ def _sanitize_export_record(
 
 def _read_domain_object(uri: str) -> bytes | None:
     try:
-        settings = get_settings()
+        settings = get_effective_settings()
         if uri.startswith("s3://"):
             store = S3ObjectStore(
                 bucket=settings.object_store_bucket,

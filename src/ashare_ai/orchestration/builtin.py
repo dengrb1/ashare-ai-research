@@ -19,7 +19,6 @@ from sqlalchemy.orm import Session
 from ashare_ai.agents.protocols import AgentRequest, StructuredLLMClient
 from ashare_ai.agents.validation import run_component_agent
 from ashare_ai.backtest.engine import BacktestSignal
-from ashare_ai.core.config import get_settings
 from ashare_ai.core.contracts import (
     AgentComponentResult,
     Candidate,
@@ -30,6 +29,7 @@ from ashare_ai.core.contracts import (
     PointInTimeRecord,
 )
 from ashare_ai.core.hashing import canonical_json, sha256_bytes, stable_hash
+from ashare_ai.core.system_settings import get_effective_settings
 from ashare_ai.core.time import SHANGHAI
 from ashare_ai.features.fundamental import FundamentalFeatures, extract_fundamental_features
 from ashare_ai.features.sentiment import SentimentFeatures, extract_sentiment_features
@@ -331,7 +331,7 @@ class BuiltinDailyBackend:
         canonical_builder: AKShareCanonicalBundleBuilder | None = None,
         allow_demo_data: bool | None = None,
     ) -> None:
-        settings = get_settings()
+        settings = get_effective_settings()
         self._settings = settings
         self._injected_llm_client = llm_client
         self._configured_llm_client: StructuredLLMClient | None = None

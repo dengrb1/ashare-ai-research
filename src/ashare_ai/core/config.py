@@ -91,7 +91,15 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-5.6-sol"
     llm_reasoning_effort: str = "high"
     llm_timeout_seconds: float = Field(default=90.0, gt=0, le=600)
-    llm_agent_max_concurrency: int = Field(default=4, ge=1, le=16)
+    # This is intentionally bounded to the per-research-run capacity exposed
+    # by the administrator control plane.  DUAL mode has two fixed research
+    # workers, so its aggregate maximum is always two times this value.
+    llm_agent_max_concurrency: int = Field(default=4, ge=1, le=4)
+    research_execution_mode: Literal["SERIAL", "DUAL"] = "SERIAL"
+    # The model gateway is an infrastructure capacity, not a user-editable
+    # model credential.  It remains environment/Compose managed and lets the
+    # control plane fail closed before enabling two research consumers.
+    model_gateway_max_concurrency: int = Field(default=8, ge=1, le=128)
     model_settings_encryption_keys: str | None = None
     personal_data_encryption_keys: str | None = None
     model_allowed_hosts: str | None = None

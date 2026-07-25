@@ -4,7 +4,7 @@
 基础路径：`/api/v1`  
 契约来源：`src/ashare_ai/api/app.py`、`src/ashare_ai/api/schemas.py` 及 `src/ashare_ai/search/service.py`
 
-本文档描述当前代码实际注册的公开 HTTP API。当前 OpenAPI 中有 55 个操作；另外保留了 5 个不在 OpenAPI 展示的兼容别名。接口只用于研究、评分、报告、回测和模拟组合，不执行真实下单。
+本文档描述当前代码实际注册的公开 HTTP API。接口只用于研究、评分、报告、回测和模拟组合，不执行真实下单。
 
 ## 1. 基本约定
 
@@ -147,6 +147,8 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 模型设置 | GET/PUT | `/api/v1/admin/model-settings` | 管理员 |
 | 模型设置 | POST | `/api/v1/admin/model-settings/test` | 管理员、写入 |
 | 模型设置 | POST | `/api/v1/admin/model-settings/models` | 管理员、写入 |
+| 系统设置 | GET/PUT/DELETE | `/api/v1/admin/system-settings` | 管理员；PUT 幂等、写入 |
+| 系统设置 | DELETE | `/api/v1/admin/system-settings/{field}` | 管理员、写入 |
 | 研究结果 | GET | `/api/v1/scores/{trading_date}` | 登录 |
 | 研究结果 | GET | `/api/v1/scores/{trading_date}/{symbol}` | 登录 |
 | 研究结果 | GET | `/api/v1/scores/{trading_date}/{symbol}/lineage` | 登录 |
@@ -438,6 +440,28 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 
 `POST /api/v1/admin/model-settings/test` 返回 `ModelProbeResponse`：`reachable`、`message`、`model`、`checked_at`。`POST /api/v1/admin/model-settings/models` 返回 `{"models":["..."]}`。
 
+### 系统设置中心
+
+`GET /api/v1/admin/system-settings` 返回有效的公开设置、每项来源（`database|environment`）、不可变配置版本/哈希、敏感项是否已配置、环境只读状态、Worker 心跳、已加载执行模式及各队列 `pending/processing` 摘要。它绝不返回 Tushare、对象存储或模型密钥，也不返回数据库/Redis 地址、认证参数、Fernet 密钥、卷路径或 Docker 配额。
+
+`PUT /api/v1/admin/system-settings` 接收 `SystemSettingsRequest` 的任意非空子集，支持 `Idempotency-Key`。每次成功保存均创建一个新的不可变 PostgreSQL 版本；同一个键与同一请求体重试不会创建第二个版本，同键不同请求体返回 `409`。可编辑公开字段包括：
+
+- `research_execution_mode=SERIAL|DUAL` 与 `llm_agent_max_concurrency=1..4`；
+- 对象存储 endpoint/bucket/TLS，SearXNG 地址/超时/结果数；
+- 行情、金融检索缓存与并发/限流；
+- 每日研究启动与重试间隔、旧版重试窗口兼容值、Worker lease、AKShare 参数、数据包模式、演示数据开关、最低上市日和成交额；旧版窗口仅保持读取/写入兼容，自动补数统一在权威交易日历确定的下一交易日 09:25（上海时间）截止；
+- 可写但永不回显的 `tushare_token`、`object_store_access_key`、`object_store_secret_key`。
+
+敏感值使用 `MODEL_SETTINGS_ENCRYPTION_KEYS` 的 Fernet 加密；缺少该环境变量时保存敏感项返回 `422`。`DELETE /api/v1/admin/system-settings/{field}` 仅恢复该字段至环境变量基线，`DELETE /api/v1/admin/system-settings` 恢复全部覆盖；两者同样新增审计版本。
+
+`SERIAL` 模式下只有 `job-worker` 领取研究队列，默认 Compose 也不会创建 `research-worker` 容器；`DUAL` 模式下固定两个 `research-worker` 副本领取不同 `run_id`，`job-worker` 仍串行处理个人档案、Trade Plan、回测、调度和清理但跳过研究队列。切换模式会检查活动研究和回测，存在活动任务返回 `422`。启用 `DUAL` 还要求至少 4GB 可用内存及环境变量 `MODEL_GATEWAY_MAX_CONCURRENCY >= 2 * llm_agent_max_concurrency`；不满足时返回带修正建议的 `422`。执行模式和 LLM 并发只在 Worker 启动时读取，保存后响应中的 `restart_required=true` 表示执行响应中 `compose_restart_command` 给出的命令；保存为 `DUAL` 时它会启用 `dual-research` profile，保存为 `SERIAL` 时它会停止现有研究 Worker：
+
+```bash
+docker compose -p ashare-ai-src -f compose.yaml --profile dual-research up -d --force-recreate job-worker research-worker
+```
+
+其他系统设置会在下一次 API 请求、Worker 轮询或任务启动时加载。系统设置 API 不拥有 Docker socket，不能直接重启或扩缩容容器。
+
 ## 7. 研究结果、报告和 Trade Plan
 
 所有结果查询都支持可选查询参数 `run_id`，用于选择指定运行。省略时服务端按当前用户可见范围选择最新合适结果；管理员可跨用户查询，但不能读取不存在或无权限的运行。
@@ -528,7 +552,7 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
   -H "Authorization: Bearer <ACCESS_TOKEN>"
 ```
 
-提交相同的用户、日期、范围、标的和预算且已有进行中任务时返回既有运行，状态码为 `200`，其中包括 `DATA_READINESS_WAITING`。队列不可用返回 `503`；交易时段、未来日期或不安全的历史实时重建返回 `409`。收盘后若股票日线已到而任一策略基准（CSI300、CSI500、CSI1000）尚未覆盖目标日，仍创建 `202` 任务，状态为 `DATA_READINESS_WAITING`；轮询研究详情会返回“等待基准数据同步”以及新增的 `next_retry_at`。系统在冻结的原始范围、预算、价格上限、幂等键和活动键不变的前提下按固定间隔重试；在下一交易日开盘前仍不完整时以脱敏操作性原因终止，且绝不回退到开盘后的上一日实时快照。实时 AKShare 模式只允许冻结当日已就绪数据，或在下一交易日开盘前/非交易日冻结最近已完成交易日；冻结文件模式仍可按文件覆盖日期运行历史研究。
+提交相同的用户、日期、范围、标的和预算且已有进行中任务时返回既有运行，状态码为 `200`，其中包括 `DATA_READINESS_WAITING`。队列不可用返回 `503`；交易时段、未来日期或不安全的历史实时重建返回 `409`。收盘后若股票日线已到而任一策略基准（CSI300、CSI500、CSI1000）尚未覆盖目标日，仍创建 `202` 任务，状态为 `DATA_READINESS_WAITING`；轮询研究详情会返回“等待基准数据同步”以及新增的 `next_retry_at`。系统在冻结的原始范围、预算、价格上限、幂等键和活动键不变的前提下按固定间隔重试；在权威交易日历确定的下一交易日 09:25（上海时间）前仍不完整时以脱敏操作性原因终止，且绝不回退到下一交易时段的上一日实时快照。实时 AKShare 模式只允许冻结当日已就绪数据，或在下一交易日安全截止前/非交易日冻结最近已完成交易日；冻结文件模式仍可按文件覆盖日期运行历史研究。
 
 ### `GET /api/v1/research/runs`
 
@@ -549,7 +573,7 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 
 ### `PUT /api/v1/research/settings`
 
-新客户端完整提交 `{"automatic_reports":[报告A,报告B]}`；旧请求 `{"auto_enabled":true|false}` 继续兼容。自动研究固定使用上海时区和 `15:05` 调度时间，快照模式不可修改。启用一个槽位即运行单报告，两个均启用则同日提交两份独立任务，由默认串行 Worker 依次执行。15:05 后即持久化启用槽位；基准数据未就绪时状态为 `DATA_READINESS_WAITING`，响应中的 `next_retry_at` 和审计事件给出下次重试时点，两小时窗口超时后失败关闭，绝不使用未就绪数据。`WATCHLIST` 在每次运行时动态读取用户当时的自选股与模拟持仓。同一用户、交易日和槽位只接受首次提交，首次提交后修改配置或自选与持仓不会在当日重复创建报告，新配置从下一交易日起生效。
+新客户端完整提交 `{"automatic_reports":[报告A,报告B]}`；旧请求 `{"auto_enabled":true|false}` 继续兼容。自动研究固定使用上海时区和 `15:05` 调度时间，快照模式不可修改。启用一个槽位即运行单报告，两个均启用则同日提交两份独立任务，由默认串行 Worker 依次执行。15:05 后即持久化启用槽位；基准数据未就绪时状态为 `DATA_READINESS_WAITING`，响应中的 `next_retry_at` 和审计事件给出下次重试时点。任务会按权威交易日历持续重试到下一交易日 09:25（上海时间），届时仍未就绪才失败关闭，绝不使用未就绪或下一交易时段数据。`WATCHLIST` 在每次运行时动态读取用户当时的自选股与模拟持仓。同一用户、交易日和槽位只接受首次提交，首次提交后修改配置或自选与持仓不会在当日重复创建报告，新配置从下一交易日起生效。
 
 ### `GET /api/v1/research/settings`
 
@@ -618,7 +642,7 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 
 ## 10. 行情接口
 
-实时行情是交互数据，不写入研究或回测快照。行情响应中的 `status` 包含：
+实时行情是交互数据，不写入研究或回测快照。Web 在恢复可见或重新聚焦时会强制刷新已订阅报价；日线和分钟线在页面可见时分别至少每 5 分钟和 30 秒重验。行情响应中的 `status` 包含：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
@@ -732,7 +756,7 @@ curl -sS "$BASE_URL/api/v1/search/financial?q=%E8%B4%B5%E5%B7%9E%E8%8C%85%E5%8F%
 
 提交研究、回测或 Trade Plan 后，先保存返回的 `run_id`、`backtest_id` 或 `plan_id`，再使用对应详情接口查询。研究任务使用 `/research/runs/{run_id}`，不要用缺少 `phase/progress` 的通用 `/runs/{run_id}` 代替。不要依赖长连接或固定等待时间。常见研究状态包括 `PENDING`、`QUEUED`、`RUNNING`、`PROCESSING`、`SUCCEEDED`、`FAILED`、`FUSED`、`CANCEL_REQUESTED` 和 `CANCELLED`；具体 `phase` 和进度以响应为准。
 
-研究、回测、报告 Trade Plan、手动退出研究、通知已读与买入监控设置支持 `Idempotency-Key` 请求头（1–128 字符）。服务端只持久化 Key 的 SHA-256，并按“用户 + 路由 + Key + 请求体哈希”去重：同 Key、同请求返回首次创建的资源和 `200`；同 Key、不同请求返回 `409`。首次接受仍返回 `202`（同步设置接口除外）。手机客户端应为每次用户意图生成随机 Key，在网络重试中原样复用，并保存返回的资源 ID继续轮询。
+研究、回测、报告 Trade Plan、手动退出研究、通知已读、买入监控设置及管理员系统设置支持 `Idempotency-Key` 请求头（1–128 字符）。服务端只持久化 Key 的 SHA-256，并按“用户 + 路由 + Key + 请求体哈希”去重：同 Key、同请求返回首次创建的资源和 `200`；同 Key、不同请求返回 `409`。首次接受仍返回 `202`（同步设置接口除外）。手机客户端应为每次用户意图生成随机 Key，在网络重试中原样复用，并保存返回的资源 ID继续轮询。
 
 ## 13. 兼容别名和开发工具
 

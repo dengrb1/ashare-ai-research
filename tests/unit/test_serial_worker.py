@@ -13,6 +13,16 @@ def test_research_queue_uses_its_delayed_queue() -> None:
     assert research.delayed == "ashare:research:delayed"
 
 
+def test_dual_job_worker_does_not_build_a_research_consumer() -> None:
+    queues = serial_worker.build_queues(object(), execution_mode="DUAL")
+
+    assert [spec.kind for spec, _queue in queues] == [
+        "personal-archive",
+        "trade-plan",
+        "backtest",
+    ]
+
+
 def test_serial_worker_promotes_due_delayed_jobs_before_claiming(monkeypatch) -> None:
     events: list[str] = []
 

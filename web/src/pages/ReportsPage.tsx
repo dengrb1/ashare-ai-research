@@ -3,9 +3,10 @@ import { useSearchParams } from 'react-router-dom'
 import { api } from '../api'
 import { CandlestickChart } from '../components/CandlestickChart'
 import { Empty, ErrorNotice, formatNumber, formatTime, Loading, Panel, StatusPill, today } from '../components/Ui'
+import { useMarket, useQuoteSubscription } from '../context/MarketContext'
 import { usePageRefresh } from '../context/RefreshContext'
 import { getKlineRangePlan, KLINE_PERIODS, KLINE_RANGES, trimBarsToRange } from '../marketKlines'
-import type { Candidate, KlineBar, KlineRange, MarketDataStatus, Quote, Report, ReportExecutionStatus, ReportSymbol, Run, Score, TradePlan } from '../types'
+import type { Candidate, KlineBar, KlineRange, MarketDataStatus, Report, ReportExecutionStatus, ReportSymbol, Run, Score, TradePlan } from '../types'
 import { resolvePublishedResearchRun } from '../researchRuns'
 
 function displayReportHtml(content: string) {
@@ -36,6 +37,8 @@ function labelCode(value: unknown) {
 }
 
 const PLAN_ACTIVE = new Set(['PENDING', 'QUEUED', 'RUNNING', 'PROCESSING'])
+const DAILY_MARKET_REFRESH_MS = 5 * 60 * 1000
+const INTRADAY_MARKET_REFRESH_MS = 30 * 1000
 
 const REASON_LABELS: Record<string, string> = {
   CRITICAL_EVENT_RISK: '重大事件风险，禁止买入',
@@ -71,6 +74,7 @@ function fallbackReportSymbol(candidate: Candidate): ReportSymbol {
 }
 
 export function ReportsPage() {
+  const { quotes, loadKline } = useMarket()
   const [searchParams, setSearchParams] = useSearchParams()
   const [date, setDate] = useState(searchParams.get('date') || today())
   const requestedDate = searchParams.get('date') || undefined
@@ -87,16 +91,18 @@ export function ReportsPage() {
   const [tradePlans, setTradePlans] = useState<TradePlan[]>([])
   const [score, setScore] = useState<Score | null>(null)
   const [lineage, setLineage] = useState<Record<string, unknown> | null>(null)
-  const [quote, setQuote] = useState<Quote | null>(null)
   const [bars, setBars] = useState<KlineBar[]>([])
   const [marketStatus, setMarketStatus] = useState<MarketDataStatus | null>(null)
   const [period, setPeriod] = useState('day')
   const [range, setRange] = useState<KlineRange>('1m')
+  const [marketClock, setMarketClock] = useState(() => Date.now())
   const [loading, setLoading] = useState(true)
   const [marketLoading, setMarketLoading] = useState(false)
   const [planSubmitting, setPlanSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [marketError, setMarketError] = useState('')
+  const quote = quotes[symbol] || null
+  useQuoteSubscription(symbol ? [symbol] : [])
 
   const load = useCallback(async () => {
     setLoading(true); setError(''); setContent('')
@@ -140,30 +146,56 @@ export function ReportsPage() {
   usePageRefresh(load)
   useEffect(() => { void load() }, [load])
 
-  const rangePlan = useMemo(() => getKlineRangePlan(range), [range])
+  const rangePlan = useMemo(() => getKlineRangePlan(range, new Date(marketClock)), [marketClock, range])
+  useEffect(() => {
+    if (!symbol || !report) return
+    const refreshClock = () => setMarketClock(Date.now())
+    const timer = window.setInterval(
+      refreshClock,
+      period === 'day' ? DAILY_MARKET_REFRESH_MS : INTRADAY_MARKET_REFRESH_MS,
+    )
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') refreshClock()
+    }
+    window.addEventListener('focus', refreshWhenVisible)
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', refreshWhenVisible)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+    }
+  }, [period, report, symbol])
+
   useEffect(() => {
     if (!symbol || !report) return
     let alive = true
-    setMarketLoading(true); setMarketError(''); setQuote(null); setBars([]); setMarketStatus(null); setScore(null); setLineage(null)
+    setMarketLoading(true); setMarketError(''); setMarketStatus(null); setScore(null); setLineage(null)
     void Promise.allSettled([
-      api.quotes([symbol]),
-      api.kline(symbol, period, 1200, { start: rangePlan.start, end: rangePlan.end }),
+      loadKline(symbol, period, {
+        range,
+        start: rangePlan.start,
+        end: rangePlan.end,
+        chunk: 'report-latest',
+        limit: 1200,
+        refresh: true,
+      }),
       api.score(date, symbol, report.run_id),
       api.scoreLineage(date, symbol, report.run_id),
-    ]).then(([quoteResult, klineResult, scoreResult, lineageResult]) => {
+    ]).then(([klineResult, scoreResult, lineageResult]) => {
       if (!alive) return
-      if (quoteResult.status === 'fulfilled') setQuote(quoteResult.value[0] || null)
       if (klineResult.status === 'fulfilled') {
         setBars(trimBarsToRange(klineResult.value.bars, rangePlan))
         setMarketStatus(klineResult.value.status || null)
+        setMarketError(klineResult.value.error || '')
       }
       if (scoreResult.status === 'fulfilled') setScore(scoreResult.value)
       if (lineageResult.status === 'fulfilled') setLineage(lineageResult.value)
-      const failed = [quoteResult, klineResult].filter((item) => item.status === 'rejected')
-      if (failed.length) setMarketError('实时行情或 K 线加载失败；冻结评分与研究结论不受影响。')
+      if (klineResult.status === 'rejected') {
+        setMarketError('实时 K 线加载失败；冻结评分与研究结论不受影响。')
+      }
     }).finally(() => { if (alive) setMarketLoading(false) })
     return () => { alive = false }
-  }, [date, period, rangePlan, report, symbol])
+  }, [date, loadKline, period, range, rangePlan, report, symbol])
 
   const selectedCandidate = candidates.find((item) => item.symbol === symbol)
   const selectedResearch = reportSymbols.find((item) => item.symbol === symbol)

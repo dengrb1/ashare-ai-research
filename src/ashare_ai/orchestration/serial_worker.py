@@ -10,11 +10,13 @@ from typing import Any
 
 from ashare_ai.agents.attachments import AttachmentService
 from ashare_ai.core.config import get_settings
+from ashare_ai.core.system_settings import SystemConfigurationService, SystemRuntimeSettings
 from ashare_ai.core.time import SHANGHAI
 from ashare_ai.notifications.service import NotificationService
 from ashare_ai.orchestration.personal_archive_jobs import cleanup_expired_archives
 from ashare_ai.orchestration.redis_queue import RedisLeasedQueue
 from ashare_ai.orchestration.runner import seconds_until_next_tick
+from ashare_ai.orchestration.worker_status import publish_heartbeat
 from ashare_ai.storage.database import SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -54,8 +56,16 @@ def execute_isolated(kind: str, job_id: str) -> int:
     return completed.returncode
 
 
-def build_queues(client: Any) -> list[tuple[QueueSpec, RedisLeasedQueue]]:
-    lease_seconds = get_settings().worker_lease_seconds
+def build_queues(
+    client: Any,
+    *,
+    execution_mode: str | None = None,
+    lease_seconds: int | None = None,
+) -> list[tuple[QueueSpec, RedisLeasedQueue]]:
+    settings = get_settings()
+    mode = execution_mode or getattr(settings, "research_execution_mode", "SERIAL")
+    active_specs = tuple(spec for spec in QUEUE_SPECS if mode != "DUAL" or spec.kind != "research")
+    effective_lease = lease_seconds or settings.worker_lease_seconds
     return [
         (
             spec,
@@ -64,22 +74,45 @@ def build_queues(client: Any) -> list[tuple[QueueSpec, RedisLeasedQueue]]:
                 pending=spec.pending,
                 processing=spec.processing,
                 delayed=spec.delayed,
-                lease_seconds=lease_seconds,
+                lease_seconds=effective_lease,
             ),
         )
-        for spec in QUEUE_SPECS
+        for spec in active_specs
     ]
+
+
+def _load_worker_runtime() -> SystemRuntimeSettings | None:
+    try:
+        with SessionLocal() as session:
+            return SystemConfigurationService().resolve(session)
+    except Exception:
+        # Before migrations have completed a worker must not invent an
+        # override.  It uses the environment's safe SERIAL default instead.
+        logger.exception("could not load persisted worker topology; using environment baseline")
+        return None
 
 
 def run_loop(*, max_iterations: int | None = None) -> None:
     import redis
 
-    client = redis.Redis.from_url(get_settings().redis_url, decode_responses=True)
-    queues = build_queues(client)
+    runtime = _load_worker_runtime()
+    settings = runtime.settings if runtime is not None else get_settings()
+    client = redis.Redis.from_url(settings.redis_url, decode_responses=True)
+    queues = (
+        build_queues(
+            client,
+            execution_mode=runtime.execution_mode,
+            lease_seconds=runtime.settings.worker_lease_seconds,
+        )
+        if runtime is not None
+        else build_queues(client)
+    )
     next_schedule_check = 0.0
     next_attachment_cleanup = 0.0
     iterations = 0
     while max_iterations is None or iterations < max_iterations:
+        if runtime is not None:
+            publish_heartbeat(client, role="job-worker", runtime=runtime)
         now_monotonic = time.monotonic()
         if now_monotonic >= next_attachment_cleanup:
             with SessionLocal() as session:

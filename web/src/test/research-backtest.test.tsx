@@ -22,6 +22,10 @@ function researchWrapper(children: React.ReactNode) {
   return <MemoryRouter><RefreshProvider><MarketProvider>{children}</MarketProvider></RefreshProvider></MemoryRouter>
 }
 
+function reportWrapper(children: React.ReactNode, entry: string) {
+  return <MemoryRouter initialEntries={[entry]}><RefreshProvider><MarketProvider>{children}</MarketProvider></RefreshProvider></MemoryRouter>
+}
+
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
@@ -189,7 +193,7 @@ describe('research observation mode and precise reports', () => {
       if (url.endsWith('/reports/report-1/content')) return jsonResponse({ content: '<!doctype html><html><body><h1>研究报告正文</h1><p>PLACEHOLDER_3</p></body></html>' })
       throw new Error(`unexpected request ${url}`)
     }))
-    render(<MemoryRouter initialEntries={['/reports?date=2026-07-17&run_id=run-1']}><RefreshProvider><ReportsPage /></RefreshProvider></MemoryRouter>)
+    render(reportWrapper(<ReportsPage />, '/reports?date=2026-07-17&run_id=run-1'))
     const frame = await screen.findByTitle(/A 股每日研究报告正文/)
     expect(frame).toHaveAttribute('sandbox', '')
     expect(frame.getAttribute('srcdoc')).toContain('<h1>研究报告正文</h1>')
@@ -209,7 +213,7 @@ describe('research observation mode and precise reports', () => {
       throw new Error(`unexpected request ${url} ${init?.method}`)
     })
     vi.stubGlobal('fetch', mockFetch)
-    render(<MemoryRouter initialEntries={['/reports?date=2026-07-17&run_id=run-1']}><RefreshProvider><ReportsPage /></RefreshProvider></MemoryRouter>)
+    render(reportWrapper(<ReportsPage />, '/reports?date=2026-07-17&run_id=run-1'))
     expect(await screen.findByText(/历史样本中风险调整后表现最优/)).toBeInTheDocument()
     expect(screen.getByRole('radio', { name: /600000.SH/ })).toHaveAttribute('aria-checked', 'true')
     await userEvent.click(screen.getByRole('button', { name: '生成购买建议' }))
@@ -220,6 +224,42 @@ describe('research observation mode and precise reports', () => {
     expect(screen.getByText('触发止盈或止损退出')).toBeInTheDocument()
     expect(screen.getByText('基本面质量稳定')).toBeInTheDocument()
     expect(screen.getByText('市场波动风险')).toBeInTheDocument()
+  })
+
+  it('revalidates the report K-line when the page regains focus', async () => {
+    let klineCalls = 0
+    const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/assets') && (!init?.method || init.method === 'GET')) return jsonResponse({ watchlist: [], positions: [] })
+      if (url.includes('/reports/2026-07-17')) return jsonResponse({ report_id: 'report-live', run_id: 'run-live', trading_date: '2026-07-17', report_type: 'DAILY_RESEARCH' })
+      if (url.includes('/research/runs?')) return jsonResponse([{ run_id: 'run-live', trading_date: '2026-07-17', status: 'SUCCEEDED' }])
+      if (url.endsWith('/reports/report-live/symbols')) return jsonResponse([{
+        symbol: '600000.SH', name: '浦发银行', research_status: 'FORMAL', advice_eligible: true,
+        exclusion_reasons: [], data_quality: {}, score: { symbol: '600000.SH', total_score: 82 },
+      }])
+      if (url.includes('/candidates/2026-07-17')) return jsonResponse([{ symbol: '600000.SH', rank: 1, total_score: 82, event_risk_multiplier: 1 }])
+      if (url.endsWith('/reports/report-live/content')) return jsonResponse({ content: '<html><body>报告</body></html>' })
+      if (url.endsWith('/reports/report-live/trade-plans')) return jsonResponse([])
+      if (url.endsWith('/reports/report-live/execution-status')) return jsonResponse({ items: [] })
+      if (url.includes('/market/quotes/600000.SH')) return jsonResponse({ symbol: '600000.SH', name: '浦发银行', price: 10.1, change_pct: 0, status: { source: 'fixture', collected_at: '2026-07-20T00:00:00Z', cached_at: '2026-07-20T00:00:00Z', delayed: false, stale: false } })
+      if (url.includes('/market/quotes')) return jsonResponse([])
+      if (url.includes('/market/klines/600000.SH')) {
+        klineCalls += 1
+        return jsonResponse({ symbol: '600000.SH', period: 'day', adjustment: 'hfq', bars: [{ timestamp: '2026-07-17T07:00:00Z', open: 10, high: 10.3, low: 9.8, close: 10 + klineCalls, volume: 1000 }], status: { source: 'fixture', collected_at: '2026-07-20T00:00:00Z', cached_at: '2026-07-20T00:00:00Z', delayed: false, stale: false } })
+      }
+      if (url.includes('/scores/2026-07-17/600000.SH/lineage')) return jsonResponse({ formula_version: 'composite-v2' })
+      if (url.includes('/scores/2026-07-17/600000.SH')) return jsonResponse({ symbol: '600000.SH', total_score: 82, base_total_score: 78, fundamental_score: 80, technical_score: 84, sentiment_score: 76, quality_confidence_score: 88, dividend_bonus: 4, event_risk_multiplier: 1, formula_version: 'composite-v2' })
+      throw new Error(`unexpected request ${url}`)
+    })
+    vi.stubGlobal('fetch', mockFetch)
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+    render(reportWrapper(<ReportsPage />, '/reports?date=2026-07-17&run_id=run-live'))
+
+    await waitFor(() => expect(klineCalls).toBeGreaterThan(0))
+    const initialCalls = klineCalls
+    await new Promise((resolve) => window.setTimeout(resolve, 1))
+    window.dispatchEvent(new Event('focus'))
+    await waitFor(() => expect(klineCalls).toBeGreaterThan(initialCalls))
   })
 
   it('reuses a successful NO_BUY plan while showing live market and frozen score details', async () => {
@@ -250,14 +290,15 @@ describe('research observation mode and precise reports', () => {
       if (url.endsWith('/reports/report-1/content')) return jsonResponse({ content: '<html><body>报告</body></html>' })
       if (url.endsWith('/reports/report-1/trade-plans') && init?.method === 'POST') throw new Error('must reuse successful plan')
       if (url.endsWith('/reports/report-1/trade-plans')) return jsonResponse([noBuyPlan])
-      if (url.includes('/market/quotes')) return jsonResponse([{ symbol: '600000.SH', name: '浦发银行', price: 10.1, change_pct: -.5, source: 'AKShare', collected_at: '2026-07-18T07:00:00Z', delayed: true }])
+      if (url.includes('/market/quotes/600000.SH')) return jsonResponse({ symbol: '600000.SH', name: '浦发银行', price: 10.1, change_pct: -.5, source: 'AKShare', collected_at: '2026-07-18T07:00:00Z', delayed: true })
+      if (url.includes('/market/quotes')) return jsonResponse([])
       if (url.includes('/market/klines/600000.SH')) return jsonResponse({ symbol: '600000.SH', period: 'day', adjustment: 'hfq', bars: [{ timestamp: '2026-07-17T07:00:00Z', open: 10, high: 10.3, low: 9.8, close: 10.1, volume: 1000 }], status: { source: 'AKShare', collected_at: '2026-07-18T07:00:00Z', cached_at: '2026-07-18T07:00:01Z', delayed: true } })
       if (url.includes('/scores/2026-07-17/600000.SH/lineage')) return jsonResponse({ formula_version: 'composite-v2' })
       if (url.includes('/scores/2026-07-17/600000.SH')) return jsonResponse({ symbol: '600000.SH', total_score: 82, base_total_score: 78, fundamental_score: 80, technical_score: 84, sentiment_score: 76, quality_confidence_score: 88, dividend_bonus: 4, event_risk_multiplier: .8, formula_version: 'composite-v2' })
       throw new Error(`unexpected request ${url}`)
     })
     vi.stubGlobal('fetch', mockFetch)
-    render(<MemoryRouter initialEntries={['/reports?date=2026-07-17&run_id=run-1']}><RefreshProvider><ReportsPage /></RefreshProvider></MemoryRouter>)
+    render(reportWrapper(<ReportsPage />, '/reports?date=2026-07-17&run_id=run-1'))
 
     expect(await screen.findByText('浦发银行 · 10.1')).toBeInTheDocument()
     expect(screen.getAllByText('AKShare').length).toBeGreaterThan(0)
@@ -285,12 +326,12 @@ describe('research observation mode and precise reports', () => {
       throw new Error(`unexpected request ${url}`)
     })
     vi.stubGlobal('fetch', mockFetch)
-    render(<MemoryRouter initialEntries={['/reports?date=2026-07-17&run_id=run-fused']}><RefreshProvider><ReportsPage /></RefreshProvider></MemoryRouter>)
+    render(reportWrapper(<ReportsPage />, '/reports?date=2026-07-17&run_id=run-fused'))
 
     expect(await screen.findByText('全局风控熔断，禁止生成交易方案')).toBeInTheDocument()
     expect(screen.getByRole('radio', { name: /600000.SH/ })).toBeInTheDocument()
     expect(await screen.findByText('composite-v2')).toBeInTheDocument()
-    expect(screen.getByText(/实时行情或 K 线加载失败/)).toBeInTheDocument()
+    expect(screen.getByText(/实时 K 线加载失败/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '生成购买建议' })).toBeDisabled()
     expect(mockFetch.mock.calls.some(([url, init]) => String(url).endsWith('/trade-plans') && init?.method === 'POST')).toBe(false)
   })
@@ -314,7 +355,7 @@ describe('research observation mode and precise reports', () => {
       throw new Error(`unexpected request ${url}`)
     })
     vi.stubGlobal('fetch', mockFetch)
-    render(<MemoryRouter initialEntries={['/reports?date=2026-07-17&run_id=run-limited']}><RefreshProvider><ReportsPage /></RefreshProvider></MemoryRouter>)
+    render(reportWrapper(<ReportsPage />, '/reports?date=2026-07-17&run_id=run-limited'))
 
     expect(await screen.findByText('数据受限')).toBeInTheDocument()
     expect(screen.getByText(/缺少官方披露/)).toBeInTheDocument()

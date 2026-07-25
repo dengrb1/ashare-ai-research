@@ -1,5 +1,41 @@
 export type Role = 'admin' | 'researcher' | 'user'
 
+export type ResearchExecutionMode = 'SERIAL' | 'DUAL'
+
+export interface WorkerHealth {
+  worker_id: string
+  role: string
+  healthy: boolean
+  loaded_mode: ResearchExecutionMode | 'UNKNOWN'
+  topology_sha256?: string | null
+  last_heartbeat_at?: string | null
+}
+
+export interface QueueSummary {
+  pending: number
+  processing: number
+}
+
+export interface SystemSettings {
+  configuration_id: string | null
+  version: number
+  config_sha256: string
+  source: 'database' | 'environment'
+  values: Record<string, string | number | boolean | null>
+  sources: Record<string, 'database' | 'environment'>
+  secret_configured: Record<string, boolean>
+  secret_sources: Record<string, 'database' | 'environment'>
+  read_only_environment: Record<string, string | number | boolean | null>
+  topology_sha256: string
+  actual_loaded_mode: ResearchExecutionMode | 'UNKNOWN'
+  restart_required: boolean
+  workers: WorkerHealth[]
+  queues: Record<string, QueueSummary>
+  compose_restart_command: string
+}
+
+export type SystemSettingsDraft = Partial<Record<string, string | number | boolean | null>>
+
 export interface User {
   id?: string
   user_id?: string

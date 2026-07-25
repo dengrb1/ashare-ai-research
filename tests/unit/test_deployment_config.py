@@ -24,8 +24,9 @@ def test_compose_declares_low_memory_control_plane() -> None:
     assert "minio" not in services["api"]["depends_on"]
     assert "minio" not in services
     assert "minio-init" not in services
-    assert services["research-worker"]["profiles"] == ["parallel-workers"]
+    assert services["research-worker"]["profiles"] == ["dual-research"]
     assert services["research-worker"]["scale"] == 2
+    assert "healthcheck" in services["research-worker"]
     assert services["job-worker"]["mem_limit"] == "700m"
     assert "scale" not in services["job-worker"]
     assert services["api"]["mem_limit"] == "320m"

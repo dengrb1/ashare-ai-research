@@ -223,6 +223,45 @@ class ActiveModelConfiguration(Base):
     configuration: Mapped[ModelConfigurationVersion] = relationship()
 
 
+class SystemConfigurationVersion(Base):
+    """Immutable administrator-owned operational configuration revision.
+
+    Public overrides are JSON for forward-compatible settings evolution.
+    Secrets are serialized as one Fernet ciphertext, never as JSON columns or
+    response fields, so an ORM repr cannot accidentally expose credentials.
+    """
+
+    __tablename__ = "system_configuration_versions"
+    __table_args__ = (
+        UniqueConstraint("version", name="uq_system_configuration_version"),
+        UniqueConstraint("config_sha256", name="uq_system_configuration_hash"),
+    )
+
+    configuration_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    public_values: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    encrypted_secret_values: Mapped[str | None] = mapped_column(Text)
+    encryption_key_id: Mapped[str | None] = mapped_column(String(64))
+    config_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("user_accounts.user_id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ActiveSystemConfiguration(Base):
+    """Pointer to the one active immutable system configuration revision."""
+
+    __tablename__ = "active_system_configuration"
+
+    scope: Mapped[str] = mapped_column(String(32), primary_key=True, default="default")
+    configuration_id: Mapped[str] = mapped_column(
+        ForeignKey("system_configuration_versions.configuration_id"), nullable=False
+    )
+    activated_by: Mapped[str | None] = mapped_column(ForeignKey("user_accounts.user_id"))
+    activated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    configuration: Mapped[SystemConfigurationVersion] = relationship()
+
+
 class SecurityMaster(Base):
     __tablename__ = "security_master"
     __table_args__ = (

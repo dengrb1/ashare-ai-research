@@ -44,6 +44,7 @@ const TITLES: Record<string, [string, string]> = {
   '/about': ['关于本系统', '系统定位、研究链路与使用边界'],
   '/admin': ['用户管理', '账户、角色与访问控制'],
   '/admin/models': ['模型设置', '加密凭据、模型分工、连通性与版本状态'],
+  '/admin/system-settings': ['系统设置', '持久化运行配置与 Worker 执行拓扑'],
 }
 
 export function titleForPathname(pathname: string): [string, string] {
@@ -104,7 +105,7 @@ export function AppShell() {
           <NavLink key={item.to} to={item.to!} end={item.end} onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}>
             <span>{item.icon}</span>{item.label}
           </NavLink>)}
-        {isAdmin && <><NavLink to="/admin" end onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}><span>⚙</span>用户管理</NavLink><NavLink to="/admin/models" onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}><span>◉</span>模型设置</NavLink></>}
+        {isAdmin && <><NavLink to="/admin" end onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}><span>⚙</span>用户管理</NavLink><NavLink to="/admin/system-settings" onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}><span>⌘</span>系统设置</NavLink><NavLink to="/admin/models" onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}><span>◉</span>模型设置</NavLink></>}
       </nav>
       <div className="sidebar-foot">
         <div className={`feed-state ${delayed ? 'delayed' : ''}`}><i />{delayed ? '行情非实时' : `${source} 行情正常`}</div>

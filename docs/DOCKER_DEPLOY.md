@@ -182,13 +182,13 @@ docker ps -a
 
 ## 9. 默认 Worker 与并行扩展
 
-默认 `job-worker` 串行处理研究、交易方案、卖出建议和回测，适合小内存服务器。只在资源充足时启用独立 Worker：
+默认 `job-worker` 串行处理研究、交易方案、卖出建议和回测，适合小内存服务器。此时 `research-worker` 属于未启用的 `dual-research` profile，不会创建容器。通过系统设置保存 `DUAL`，确认没有活动研究或回测后，再执行页面返回的命令（或等效命令）：
 
 ```bash
-docker compose -p ashare-ai-src -f compose.yaml --profile parallel-workers \
-  up -d --build --scale job-worker=0 --scale research-worker=2
+docker compose -p ashare-ai-src -f compose.yaml --profile dual-research \
+  up -d --force-recreate job-worker research-worker
 ```
 
-并行 profile 固定使用两个 `research-worker` 副本，每个副本串行消费一条研究任务；队列与运行产物按 `run_id` 隔离，因此两个不同研究可同时推进。禁止让默认 `job-worker` 与专用 Worker 同时消费研究队列，避免重复领取。
+该 profile 固定使用两个 `research-worker` 副本，每个副本串行消费一条研究任务；队列与运行产物按 `run_id` 隔离，因此两个不同研究可同时推进。`job-worker` 也会按保存的 `DUAL` 模式跳过研究队列，避免竞争领取。切回 `SERIAL` 后，按页面命令停止研究 Worker 并重建 `job-worker`。
 
 并发模式至少需要 4GB 可用内存。两条研究各自最多 4 路 LLM 组件请求，模型网关需支持最多 8 路并发；若网关容量不足，将 `LLM_AGENT_MAX_CONCURRENCY` 降为 `2`，任务级双并发保持不变。切换前确认没有正在运行的研究或回测任务；小于 4GB 内存的主机继续使用默认串行 Worker。

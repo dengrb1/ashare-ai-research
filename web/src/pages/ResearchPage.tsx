@@ -212,7 +212,7 @@ export function ResearchPage() {
           <div className="automatic-budget-fields"><label>总预算（元）<input type="number" min="1" value={draft.totalBudget} onChange={(event) => updateAutomaticDraft(draft.slot, { totalBudget: event.target.value })} /></label><label>单股最高投入（元）<input type="number" min="1" value={draft.perSymbolBudget} onChange={(event) => updateAutomaticDraft(draft.slot, { perSymbolBudget: event.target.value })} /></label><label>最高可接受股价（元）<input type="number" min="0.01" step="0.01" value={draft.maxStockPrice} onChange={(event) => updateAutomaticDraft(draft.slot, { maxStockPrice: event.target.value })} placeholder="不限" /></label></div>
         </article>)}</div>
         {settingsError && <div className="failure-box" role="alert"><strong>无法保存</strong><p>{settingsError}</p></div>}
-        <footer><p>上海交易日 15:05 同时提交启用的配置，由串行 Worker 依次执行。</p><div><button type="button" className="secondary" onClick={() => setSettingsOpen(false)}>取消</button><button type="button" className="primary" disabled={settingsSaving} onClick={() => void saveAutomaticSettings()}>{settingsSaving ? '正在保存…' : '保存设置'}</button></div></footer>
+        <footer><p>上海交易日 15:05 同时提交启用的配置；数据延迟时会等待至下一交易日 09:25，由串行 Worker 依次执行。</p><div><button type="button" className="secondary" onClick={() => setSettingsOpen(false)}>取消</button><button type="button" className="primary" disabled={settingsSaving} onClick={() => void saveAutomaticSettings()}>{settingsSaving ? '正在保存…' : '保存设置'}</button></div></footer>
       </section>
     </div>}
     <Panel title="发起每日研究" eyebrow="NEW RESEARCH RUN" className="full-span">

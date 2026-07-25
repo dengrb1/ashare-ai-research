@@ -127,6 +127,7 @@ def test_auto_submission_persists_visible_data_readiness_wait() -> None:
         enqueue_at=lambda item, available_at: delayed.append((item, available_at)),
         data_ready=False,
         submitted_at=submitted_at,
+        sessions=(date(2026, 7, 24), date(2026, 7, 27)),
     )
 
     assert run_id and delayed[0][0] == run_id
@@ -135,4 +136,5 @@ def test_auto_submission_persists_visible_data_readiness_wait() -> None:
         assert run is not None and run.status == "DATA_READINESS_WAITING"
         wait = run.manifest["data_readiness_wait"]
         assert wait["next_retry_at"] and wait["deadline_at"]
+        assert wait["deadline_at"] == "2026-07-27T01:25:00+00:00"
         assert run.audit_events[0].event_type == "DATA_READINESS_WAITING"

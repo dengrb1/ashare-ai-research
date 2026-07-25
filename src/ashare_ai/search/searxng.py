@@ -5,7 +5,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from ashare_ai.core.config import Settings, get_settings
+from ashare_ai.core.config import Settings
+from ashare_ai.core.system_settings import get_effective_settings
 
 _FORBIDDEN_ENGINES = {"baidu", "sogou"}
 _ALLOWED_ENGINES = {"google", "bing", "duckduckgo"}
@@ -15,7 +16,7 @@ class SearXNGSearchClient:
     """Small read-only adapter around a configured SearXNG JSON endpoint."""
 
     def __init__(self, settings: Settings | None = None) -> None:
-        self.settings = settings or get_settings()
+        self.settings = settings or get_effective_settings()
         parsed = urlsplit(self.settings.searxng_base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError("SEARXNG_BASE_URL must be an HTTP(S) origin")
