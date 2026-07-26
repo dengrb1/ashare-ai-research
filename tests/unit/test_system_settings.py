@@ -16,6 +16,18 @@ from ashare_ai.core.system_settings import SystemConfigurationService, SystemSet
 from ashare_ai.storage.models import Base, SystemConfigurationVersion, UserAccount
 
 
+class _UnlockRedis:
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+
+    def set(self, key: str, value: str, *, ex: int) -> None:
+        assert ex == 600
+        self.values[key] = value
+
+    def get(self, key: str) -> str | None:
+        return self.values.get(key)
+
+
 def _service() -> tuple[Session, SystemConfigurationService]:
     engine = create_engine("sqlite+pysqlite://")
     Base.metadata.create_all(engine)
@@ -65,9 +77,6 @@ def test_system_settings_version_overrides_restore_and_never_expose_secret() -> 
 
 def test_dual_mode_rejects_insufficient_gateway_capacity(monkeypatch) -> None:
     session, service = _service()
-    monkeypatch.setattr(
-        "ashare_ai.core.system_settings._memory_available_bytes", lambda: 8 * 1024**3
-    )
     service.settings.model_gateway_max_concurrency = 7
 
     try:
@@ -121,6 +130,14 @@ def test_system_settings_api_requires_admin_csrf_and_is_idempotent(monkeypatch) 
                     created_at=now,
                     updated_at=now,
                 ),
+                UserAccount(
+                    username="system-admin-two",
+                    password_hash=hash_password("system-admin-two-password"),
+                    role="ADMIN",
+                    enabled=True,
+                    created_at=now,
+                    updated_at=now,
+                ),
             ]
         )
         session.commit()
@@ -128,6 +145,10 @@ def test_system_settings_api_requires_admin_csrf_and_is_idempotent(monkeypatch) 
     monkeypatch.setattr("ashare_ai.core.system_settings.get_settings", lambda: settings)
     monkeypatch.setattr(
         "ashare_ai.api.app._system_worker_snapshot", lambda _hash: ("SERIAL", False, [], {})
+    )
+    unlock_redis = _UnlockRedis()
+    monkeypatch.setattr(
+        "ashare_ai.api.system_settings_unlock._redis_client", lambda: unlock_redis
     )
 
     def override_db():
@@ -138,22 +159,74 @@ def test_system_settings_api_requires_admin_csrf_and_is_idempotent(monkeypatch) 
     try:
         anonymous = TestClient(app)
         assert anonymous.get("/api/v1/admin/system-settings").status_code == 401
+        assert anonymous.get("/api/v1/admin/system-resources").status_code == 401
         user = TestClient(app)
         assert user.post(
             "/api/v1/auth/login",
             json={"username": "system-user", "password": "system-user-password"},
         ).status_code == 200
         assert user.get("/api/v1/admin/system-settings").status_code == 403
+        assert user.get("/api/v1/admin/system-resources").status_code == 403
 
         client = TestClient(app)
         assert client.post(
             "/api/v1/auth/login",
             json={"username": "system-admin", "password": "system-admin-password"},
         ).status_code == 200
+        resources = client.get("/api/v1/admin/system-resources")
+        assert resources.status_code == 200
+        assert resources.json()["scope"] in {"HOST", "CONTAINER"}
+        assert "redis_url" not in resources.text
         payload = {"market_cache_seconds": 23, "tushare_token": "must-not-return"}
         assert client.put("/api/v1/admin/system-settings", json=payload).status_code == 403
         csrf = client.cookies.get("ashare_csrf")
         headers = {"x-csrf-token": csrf, "Idempotency-Key": "system-settings-once"}
+        assert client.put(
+            "/api/v1/admin/system-settings", json=payload, headers=headers
+        ).status_code == 403
+        unlocked = client.post(
+            "/api/v1/admin/system-settings/unlock",
+            json={"password": "system-admin-password"},
+            headers={"x-csrf-token": csrf},
+        )
+        assert unlocked.status_code == 200
+        headers["X-System-Settings-Unlock"] = unlocked.json()["unlock_token"]
+
+        other_session = TestClient(app)
+        assert other_session.post(
+            "/api/v1/auth/login",
+            json={"username": "system-admin", "password": "system-admin-password"},
+        ).status_code == 200
+        other_csrf = other_session.cookies.get("ashare_csrf")
+        assert other_session.put(
+            "/api/v1/admin/system-settings",
+            json={"market_cache_seconds": 22},
+            headers={
+                "x-csrf-token": other_csrf,
+                "X-System-Settings-Unlock": unlocked.json()["unlock_token"],
+            },
+        ).status_code == 403
+
+        second_admin = TestClient(app)
+        assert second_admin.post(
+            "/api/v1/auth/login",
+            json={
+                "username": "system-admin-two",
+                "password": "system-admin-two-password",
+            },
+        ).status_code == 200
+        second_csrf = second_admin.cookies.get("ashare_csrf")
+        assert second_admin.post(
+            "/api/v1/admin/system-settings/unlock",
+            json={"password": "system-admin-password"},
+            headers={"x-csrf-token": second_csrf},
+        ).status_code == 401
+        assert second_admin.post(
+            "/api/v1/admin/system-settings/unlock",
+            json={"password": "system-admin-two-password"},
+            headers={"x-csrf-token": second_csrf},
+        ).status_code == 200
+
         first = client.put("/api/v1/admin/system-settings", json=payload, headers=headers)
         second = client.put("/api/v1/admin/system-settings", json=payload, headers=headers)
         assert first.status_code == second.status_code == 200
@@ -165,5 +238,20 @@ def test_system_settings_api_requires_admin_csrf_and_is_idempotent(monkeypatch) 
             json={"market_cache_seconds": 24},
             headers=headers,
         ).status_code == 409
+        restore_headers = {
+            "x-csrf-token": csrf,
+            "X-System-Settings-Unlock": unlocked.json()["unlock_token"],
+        }
+        assert client.delete(
+            "/api/v1/admin/system-settings/market_cache_seconds",
+            headers=restore_headers,
+        ).status_code == 200
+        assert client.delete(
+            "/api/v1/admin/system-settings", headers=restore_headers
+        ).status_code == 200
+        unlock_redis.values.clear()
+        assert client.delete(
+            "/api/v1/admin/system-settings", headers=restore_headers
+        ).status_code == 403
     finally:
         app.dependency_overrides.clear()

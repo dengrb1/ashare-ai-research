@@ -7,10 +7,8 @@ to its Compose/.env value without copying deployment secrets into PostgreSQL.
 
 from __future__ import annotations
 
-import ctypes
 import hashlib
 import json
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -121,43 +119,6 @@ class SystemRuntimeSettings:
             "config_sha256": self.config_sha256,
             "topology_sha256": self.topology_sha256,
         }
-
-
-def _memory_available_bytes() -> int:
-    """Return host available RAM without adding a platform-specific dependency."""
-
-    try:
-        import psutil  # type: ignore[import-untyped]
-
-        return int(psutil.virtual_memory().available)
-    except (ImportError, OSError):
-        pass
-    if os.name == "nt":
-        class MemoryStatus(ctypes.Structure):
-            _fields_ = [
-                ("dwLength", ctypes.c_ulong),
-                ("dwMemoryLoad", ctypes.c_ulong),
-                ("ullTotalPhys", ctypes.c_ulonglong),
-                ("ullAvailPhys", ctypes.c_ulonglong),
-                ("ullTotalPageFile", ctypes.c_ulonglong),
-                ("ullAvailPageFile", ctypes.c_ulonglong),
-                ("ullTotalVirtual", ctypes.c_ulonglong),
-                ("ullAvailVirtual", ctypes.c_ulonglong),
-                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-            ]
-
-        status = MemoryStatus()
-        status.dwLength = ctypes.sizeof(MemoryStatus)
-        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-            return int(status.ullAvailPhys)
-    try:
-        with open("/proc/meminfo", encoding="utf-8") as handle:
-            for line in handle:
-                if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) * 1024
-    except OSError:
-        pass
-    return 0
 
 
 class SystemConfigurationService:
@@ -430,12 +391,6 @@ class SystemConfigurationService:
         self, session: Session, current: SystemRuntimeSettings, target: Settings
     ) -> None:
         if target.research_execution_mode == "DUAL":
-            available = _memory_available_bytes()
-            if available < 4 * 1024**3:
-                raise SystemSettingsError(
-                    "DUAL mode requires at least 4 GB available memory; "
-                    "free memory or keep SERIAL mode"
-                )
             required_gateway_capacity = 2 * target.llm_agent_max_concurrency
             if target.model_gateway_max_concurrency < required_gateway_capacity:
                 raise SystemSettingsError(

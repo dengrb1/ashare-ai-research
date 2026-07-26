@@ -132,8 +132,11 @@ from ashare_ai.api.schemas import (
     SecurityResolveCandidate,
     SecurityResolveResponse,
     SnapshotResponse,
+    SystemResourcesResponse,
     SystemSettingsRequest,
     SystemSettingsResponse,
+    SystemSettingsUnlockRequest,
+    SystemSettingsUnlockResponse,
     TokenResponse,
     TradePlanRequest,
     TradePlanResponse,
@@ -141,6 +144,7 @@ from ashare_ai.api.schemas import (
     UserResponse,
     UserUpdateRequest,
 )
+from ashare_ai.api.system_settings_unlock import issue_unlock, require_settings_unlock
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.hashing import sha256_bytes, stable_hash
 from ashare_ai.core.security import safe_error_message
@@ -154,6 +158,7 @@ from ashare_ai.core.time import SHANGHAI
 from ashare_ai.market.service import get_market_data_service
 from ashare_ai.notifications.service import InvalidNotificationCursor, NotificationService
 from ashare_ai.observability.audit import AuditLogger
+from ashare_ai.observability.runtime_resources import sample_runtime_resources
 from ashare_ai.orchestration.backtest_jobs import enqueue_backtest
 from ashare_ai.orchestration.daily import load_pipeline
 from ashare_ai.orchestration.exit_advice_jobs import (
@@ -253,6 +258,9 @@ Current = Annotated[AuthContext, Depends(get_auth_context)]
 Writer = Annotated[AuthContext, Depends(get_write_context)]
 IdempotencyKey = Annotated[
     str | None, Header(alias="Idempotency-Key", min_length=1, max_length=128)
+]
+SystemSettingsUnlockToken = Annotated[
+    str | None, Header(alias="X-System-Settings-Unlock")
 ]
 
 
@@ -2137,14 +2145,40 @@ def get_system_settings(db: DbSession, context: Current) -> SystemSettingsRespon
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+@app.get("/api/v1/admin/system-resources", response_model=SystemResourcesResponse)
+def get_system_resources(context: Current) -> SystemResourcesResponse:
+    _admin(context)
+    try:
+        _, _, workers, _ = _system_worker_snapshot("")
+        return SystemResourcesResponse.model_validate(sample_runtime_resources(workers))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="runtime resources unavailable") from exc
+
+
+@app.post(
+    "/api/v1/admin/system-settings/unlock",
+    response_model=SystemSettingsUnlockResponse,
+)
+def unlock_system_settings(
+    payload: SystemSettingsUnlockRequest,
+    request: Request,
+    context: Writer,
+) -> SystemSettingsUnlockResponse:
+    _admin(context)
+    token, expires_at = issue_unlock(request, context, payload.password)
+    return SystemSettingsUnlockResponse(unlock_token=token, expires_at=expires_at)
+
+
 @app.put("/api/v1/admin/system-settings", response_model=SystemSettingsResponse)
 def put_system_settings(
     payload: SystemSettingsRequest,
     db: DbSession,
     context: Writer,
     idempotency_key: IdempotencyKey = None,
+    unlock_token: SystemSettingsUnlockToken = None,
 ) -> SystemSettingsResponse:
     _admin(context)
+    require_settings_unlock(context, unlock_token)
     public, secrets = _system_settings_payload(payload)
     if not public and not secrets:
         raise HTTPException(status_code=422, detail="submit at least one system setting")
@@ -2194,9 +2228,13 @@ def put_system_settings(
 
 @app.delete("/api/v1/admin/system-settings/{field}", response_model=SystemSettingsResponse)
 def restore_system_setting(
-    field: str, db: DbSession, context: Writer
+    field: str,
+    db: DbSession,
+    context: Writer,
+    unlock_token: SystemSettingsUnlockToken = None,
 ) -> SystemSettingsResponse:
     _admin(context)
+    require_settings_unlock(context, unlock_token)
     try:
         SystemConfigurationService().restore_field(db, field=field, user_id=context.user.user_id)
         db.commit()
@@ -2209,8 +2247,13 @@ def restore_system_setting(
 
 
 @app.delete("/api/v1/admin/system-settings", response_model=SystemSettingsResponse)
-def restore_all_system_settings(db: DbSession, context: Writer) -> SystemSettingsResponse:
+def restore_all_system_settings(
+    db: DbSession,
+    context: Writer,
+    unlock_token: SystemSettingsUnlockToken = None,
+) -> SystemSettingsResponse:
     _admin(context)
+    require_settings_unlock(context, unlock_token)
     try:
         SystemConfigurationService().restore_all(db, user_id=context.user.user_id)
         db.commit()

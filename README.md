@@ -142,11 +142,12 @@ Nginx 提供静态文件并把 `/api` 反向代理到 FastAPI；本地浏览器�
 PostgreSQL、Redis 和 API 默认仅绑定 `127.0.0.1`，Redis 强制密码认证。
 
 内置流水线使用 `object-data` 内容寻址卷。仓库不再捆绑安全更新滞后的 MinIO/MC 镜像；确需
-S3 兼容时，通过 `OBJECT_STORE_ENDPOINT` 接入受维护的外部 S3 服务。管理员在“系统设置”中可
-将研究拓扑保存为 `SERIAL`（仅 `job-worker` 消费研究）或 `DUAL`（固定两个 `research-worker`
+S3 兼容时，通过 `OBJECT_STORE_ENDPOINT` 接入受维护的外部 S3 服务。管理员在“系统设置”中可查看
+运行环境内存、CPU、磁盘及 API/Worker 占用；所有修改与恢复操作均须由当前登录管理员输入自己的账户密码解锁，
+解锁证明仅保留 10 分钟且绑定当前会话。管理员可将研究拓扑保存为 `SERIAL`（仅 `job-worker` 消费研究）或 `DUAL`（固定两个 `research-worker`
 消费研究，`job-worker` 跳过研究队列）。默认 `SERIAL` 不创建 `research-worker` 容器；保存为
 `DUAL` 后，执行设置页面给出的 Compose 命令才会启用 `dual-research` profile 并启动两个副本。切回
-`SERIAL` 时该命令会停止研究 Worker。`DUAL` 至少需要 4GB 可用内存和足够模型网关并发容量。不要手工
+`SERIAL` 时该命令会停止研究 Worker。`DUAL` 内存容量按实测基线和两个 Worker 的容器预算分级提醒，不再使用固定 4GB 阈值拒绝保存；模型网关并发容量仍是硬性门禁。不要手工
 启用会竞争默认 Trade Plan、回测或研究队列的 legacy `parallel-workers` profile。
 
 公网部署先复制 `.env.production.example` 为未跟踪的 `.env`，逐项填写强随机数据库、Redis、

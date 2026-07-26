@@ -5,6 +5,8 @@ from pathlib import Path
 
 import yaml
 
+from ashare_ai.observability.runtime_resources import DEFAULT_WORKER_LIMIT_BYTES, MIB
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -28,6 +30,8 @@ def test_compose_declares_low_memory_control_plane() -> None:
     assert services["research-worker"]["scale"] == 2
     assert "healthcheck" in services["research-worker"]
     assert services["job-worker"]["mem_limit"] == "700m"
+    assert services["research-worker"]["mem_limit"] == "700m"
+    assert DEFAULT_WORKER_LIMIT_BYTES == 700 * MIB
     assert "scale" not in services["job-worker"]
     assert services["api"]["mem_limit"] == "320m"
     assert "healthcheck" in services["api"]

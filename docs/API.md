@@ -149,6 +149,8 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 模型设置 | POST | `/api/v1/admin/model-settings/models` | 管理员、写入 |
 | 系统设置 | GET/PUT/DELETE | `/api/v1/admin/system-settings` | 管理员；PUT 幂等、写入 |
 | 系统设置 | DELETE | `/api/v1/admin/system-settings/{field}` | 管理员、写入 |
+| 系统设置解锁 | POST | `/api/v1/admin/system-settings/unlock` | 管理员、写入；当前账户密码二次验证 |
+| 系统资源 | GET | `/api/v1/admin/system-resources` | 管理员；运行环境只读指标 |
 | 研究结果 | GET | `/api/v1/scores/{trading_date}` | 登录 |
 | 研究结果 | GET | `/api/v1/scores/{trading_date}/{symbol}` | 登录 |
 | 研究结果 | GET | `/api/v1/scores/{trading_date}/{symbol}/lineage` | 登录 |
@@ -442,7 +444,9 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 
 ### 系统设置中心
 
-`GET /api/v1/admin/system-settings` 返回有效的公开设置、每项来源（`database|environment`）、不可变配置版本/哈希、敏感项是否已配置、环境只读状态、Worker 心跳、已加载执行模式及各队列 `pending/processing` 摘要。它绝不返回 Tushare、对象存储或模型密钥，也不返回数据库/Redis 地址、认证参数、Fernet 密钥、卷路径或 Docker 配额。
+`GET /api/v1/admin/system-settings` 返回有效的公开设置、每项来源（`database|environment`）、不可变配置版本/哈希、敏感项是否已配置、环境只读状态、Worker 心跳、已加载执行模式及各队列 `pending/processing` 摘要。它绝不返回 Tushare、对象存储或模型密钥，也不返回数据库/Redis 地址、认证参数、Fernet 密钥或卷路径。Worker 心跳可以包含清洗后的内存、内存上限和 CPU 指标。
+
+`GET /api/v1/admin/system-resources` 返回服务器或 Docker VM 的内存、CPU、运行文件系统磁盘指标，以及 API/Worker 的清洗后资源占用。Docker Desktop 下总览是整个 Docker VM，并不等于当前 Compose 项目的服务合计；服务表只展示能够通过应用心跳安全采集的 Python 服务。`scope` 明确区分 `HOST|CONTAINER`。`topology_estimate` 返回 DUAL 的 Worker 数、估算来源、单 Worker 典型占用、典型新增量、最大预算、预计剩余内存和 `NORMAL|WARNING|CRITICAL` 等级；顶层 `warnings` 同时包含内存、CPU 和磁盘提醒。该接口不使用 Docker socket，不返回路径、容器环境变量或未经清洗的运行时配置。
 
 `PUT /api/v1/admin/system-settings` 接收 `SystemSettingsRequest` 的任意非空子集，支持 `Idempotency-Key`。每次成功保存均创建一个新的不可变 PostgreSQL 版本；同一个键与同一请求体重试不会创建第二个版本，同键不同请求体返回 `409`。可编辑公开字段包括：
 
@@ -454,7 +458,9 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 
 敏感值使用 `MODEL_SETTINGS_ENCRYPTION_KEYS` 的 Fernet 加密；缺少该环境变量时保存敏感项返回 `422`。`DELETE /api/v1/admin/system-settings/{field}` 仅恢复该字段至环境变量基线，`DELETE /api/v1/admin/system-settings` 恢复全部覆盖；两者同样新增审计版本。
 
-`SERIAL` 模式下只有 `job-worker` 领取研究队列，默认 Compose 也不会创建 `research-worker` 容器；`DUAL` 模式下固定两个 `research-worker` 副本领取不同 `run_id`，`job-worker` 仍串行处理个人档案、Trade Plan、回测、调度和清理但跳过研究队列。切换模式会检查活动研究和回测，存在活动任务返回 `422`。启用 `DUAL` 还要求至少 4GB 可用内存及环境变量 `MODEL_GATEWAY_MAX_CONCURRENCY >= 2 * llm_agent_max_concurrency`；不满足时返回带修正建议的 `422`。执行模式和 LLM 并发只在 Worker 启动时读取，保存后响应中的 `restart_required=true` 表示执行响应中 `compose_restart_command` 给出的命令；保存为 `DUAL` 时它会启用 `dual-research` profile，保存为 `SERIAL` 时它会停止现有研究 Worker：
+所有系统设置写操作必须先调用 `POST /api/v1/admin/system-settings/unlock`，请求体为 `{"password":"<CURRENT_ADMIN_PASSWORD>"}`。服务端只验证当前登录管理员自己的密码；成功返回只可用于当前 `user_id + session_id` 的 `unlock_token` 和 `expires_at`，有效期 10 分钟。客户端把令牌放入 `X-System-Settings-Unlock`，不得持久化或记录。缺失、过期、跨用户或跨会话令牌返回 `403` 与 `SYSTEM_SETTINGS_LOCKED`；解锁存储不可用返回 `503`。该安全强化要求旧管理客户端在 PUT/DELETE 前增加解锁步骤，Web Cookie 仍需 CSRF，App Bearer 会话不模拟 Cookie。
+
+`SERIAL` 模式下只有 `job-worker` 领取研究队列，默认 Compose 也不会创建 `research-worker` 容器；`DUAL` 模式下固定两个 `research-worker` 副本领取不同 `run_id`，`job-worker` 仍串行处理个人档案、Trade Plan、回测、调度和清理但跳过研究队列。切换模式会检查活动研究和回测，存在活动任务返回 `422`。内存不再使用固定 4GB 门槛拒绝切换，而由系统资源接口按实测基线和两个 700 MiB Worker 最大预算提供分级提醒；`MODEL_GATEWAY_MAX_CONCURRENCY >= 2 * llm_agent_max_concurrency` 仍是硬性门禁。执行模式和 LLM 并发只在 Worker 启动时读取，保存后响应中的 `restart_required=true` 表示执行响应中 `compose_restart_command` 给出的命令；保存为 `DUAL` 时它会启用 `dual-research` profile，保存为 `SERIAL` 时它会停止现有研究 Worker：
 
 ```bash
 docker compose -p ashare-ai-src -f compose.yaml --profile dual-research up -d --force-recreate job-worker research-worker

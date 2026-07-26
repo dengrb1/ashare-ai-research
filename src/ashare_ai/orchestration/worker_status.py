@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ashare_ai.core.system_settings import SystemRuntimeSettings
+from ashare_ai.observability.runtime_resources import sample_current_service
 
 HEARTBEAT_TTL_SECONDS = 90
 _PREFIX = "ashare:workers:"
@@ -22,6 +23,7 @@ def worker_id(role: str) -> str:
 
 def publish_heartbeat(client: Any, *, role: str, runtime: SystemRuntimeSettings) -> str:
     identifier = worker_id(role)
+    resources = sample_current_service(service_id=identifier, role=role)
     payload = {
         "worker_id": identifier,
         "role": role,
@@ -30,6 +32,9 @@ def publish_heartbeat(client: Any, *, role: str, runtime: SystemRuntimeSettings)
         "topology_sha256": runtime.topology_sha256,
         "config_sha256": runtime.config_sha256,
         "last_heartbeat_at": datetime.now(UTC).isoformat(),
+        "memory_used_bytes": resources["memory_used_bytes"],
+        "memory_limit_bytes": resources["memory_limit_bytes"],
+        "cpu_percent": resources["cpu_percent"],
     }
     # Queue test doubles and a temporary Redis outage must not turn an
     # otherwise safe worker into a consumer with unknown behaviour.

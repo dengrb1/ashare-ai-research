@@ -36,6 +36,49 @@ export interface SystemSettings {
 
 export type SystemSettingsDraft = Partial<Record<string, string | number | boolean | null>>
 
+export interface SystemResourceUsage {
+  total_bytes: number
+  used_bytes: number
+  available_bytes: number
+  percent: number
+}
+
+export interface SystemServiceResource {
+  service_id: string
+  role: string
+  healthy: boolean
+  memory_used_bytes?: number | null
+  memory_limit_bytes?: number | null
+  cpu_percent?: number | null
+  collected_at?: string | null
+}
+
+export interface SystemResources {
+  collected_at: string
+  scope: 'HOST' | 'CONTAINER'
+  scope_label: string
+  memory: SystemResourceUsage
+  cpu: { percent: number; logical_cores: number }
+  disk: SystemResourceUsage
+  services: SystemServiceResource[]
+  topology_estimate: {
+    worker_replicas: number
+    typical_per_worker_bytes: number
+    typical_increment_bytes: number
+    maximum_increment_bytes: number
+    projected_available_bytes: number
+    level: 'NORMAL' | 'WARNING' | 'CRITICAL'
+    messages: string[]
+  }
+  level: 'NORMAL' | 'WARNING' | 'CRITICAL'
+  warnings: string[]
+}
+
+export interface SystemSettingsUnlock {
+  unlock_token: string
+  expires_at: string
+}
+
 export interface User {
   id?: string
   user_id?: string

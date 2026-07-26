@@ -191,4 +191,4 @@ docker compose -p ashare-ai-src -f compose.yaml --profile dual-research \
 
 该 profile 固定使用两个 `research-worker` 副本，每个副本串行消费一条研究任务；队列与运行产物按 `run_id` 隔离，因此两个不同研究可同时推进。`job-worker` 也会按保存的 `DUAL` 模式跳过研究队列，避免竞争领取。切回 `SERIAL` 后，按页面命令停止研究 Worker 并重建 `job-worker`。
 
-并发模式至少需要 4GB 可用内存。两条研究各自最多 4 路 LLM 组件请求，模型网关需支持最多 8 路并发；若网关容量不足，将 `LLM_AGENT_MAX_CONCURRENCY` 降为 `2`，任务级双并发保持不变。切换前确认没有正在运行的研究或回测任务；小于 4GB 内存的主机继续使用默认串行 Worker。
+设置页会按运行环境实时内存、Worker 实测基线和两个 700 MiB Worker 最大预算展示 `NORMAL/WARNING/CRITICAL` 提醒；内存状态本身不拒绝保存 DUAL。两条研究各自最多 4 路 LLM 组件请求，模型网关需支持最多 8 路并发；若网关容量不足，将 `LLM_AGENT_MAX_CONCURRENCY` 降为 `2`，任务级双并发保持不变。切换前仍须确认没有正在运行的研究或回测任务；内存余量紧张时优先使用默认串行 Worker。

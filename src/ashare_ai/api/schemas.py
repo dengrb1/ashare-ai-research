@@ -197,6 +197,15 @@ class SystemSettingsRequest(BaseModel):
         return None if isinstance(value, str) and not value.strip() else value
 
 
+class SystemSettingsUnlockRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=256)
+
+
+class SystemSettingsUnlockResponse(BaseModel):
+    unlock_token: str
+    expires_at: datetime
+
+
 class WorkerHealthResponse(BaseModel):
     worker_id: str
     role: str
@@ -204,6 +213,9 @@ class WorkerHealthResponse(BaseModel):
     loaded_mode: Literal["SERIAL", "DUAL", "UNKNOWN"] = "UNKNOWN"
     topology_sha256: str | None = None
     last_heartbeat_at: datetime | None = None
+    memory_used_bytes: int | None = Field(default=None, ge=0)
+    memory_limit_bytes: int | None = Field(default=None, ge=0)
+    cpu_percent: float | None = Field(default=None, ge=0)
 
 
 class QueueSummaryResponse(BaseModel):
@@ -227,6 +239,52 @@ class SystemSettingsResponse(BaseModel):
     workers: list[WorkerHealthResponse] = Field(default_factory=list)
     queues: dict[str, QueueSummaryResponse] = Field(default_factory=dict)
     compose_restart_command: str
+
+
+class ResourceMetricResponse(BaseModel):
+    total_bytes: int = Field(ge=0)
+    used_bytes: int = Field(ge=0)
+    available_bytes: int = Field(ge=0)
+    percent: float = Field(ge=0, le=100)
+
+
+class CpuMetricResponse(BaseModel):
+    percent: float = Field(ge=0)
+    logical_cores: int = Field(ge=1)
+
+
+class ServiceResourceResponse(BaseModel):
+    service_id: str
+    role: str
+    healthy: bool
+    memory_used_bytes: int | None = Field(default=None, ge=0)
+    memory_limit_bytes: int | None = Field(default=None, ge=0)
+    cpu_percent: float | None = Field(default=None, ge=0)
+    collected_at: datetime | None = None
+
+
+class DualMemoryEstimateResponse(BaseModel):
+    worker_replicas: int = Field(ge=1)
+    estimate_source: Literal["research-worker", "job-worker", "fallback"]
+    typical_per_worker_bytes: int = Field(ge=0)
+    typical_increment_bytes: int = Field(ge=0)
+    maximum_increment_bytes: int = Field(ge=0)
+    projected_available_bytes: int
+    level: Literal["NORMAL", "WARNING", "CRITICAL"]
+    messages: list[str] = Field(default_factory=list)
+
+
+class SystemResourcesResponse(BaseModel):
+    collected_at: datetime
+    scope: Literal["HOST", "CONTAINER"]
+    scope_label: str
+    memory: ResourceMetricResponse
+    cpu: CpuMetricResponse
+    disk: ResourceMetricResponse
+    services: list[ServiceResourceResponse] = Field(default_factory=list)
+    topology_estimate: DualMemoryEstimateResponse
+    level: Literal["NORMAL", "WARNING", "CRITICAL"]
+    warnings: list[str] = Field(default_factory=list)
 
 
 class PaperPosition(BaseModel):

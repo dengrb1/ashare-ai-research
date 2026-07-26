@@ -31,7 +31,7 @@ docker compose -p ashare-ai-src -f compose.yaml --profile dual-research \
 ```
 
   - `job-worker` 在 DUAL 中跳过研究队列，专用 Worker 是唯一研究消费者
-  - 注明并发模式至少需要 4GB 可用内存
+  - 说明设置页按实时占用、典型新增量和两个 700 MiB Worker 最大预算分级提醒，不使用固定内存门槛拒绝保存
   - 说明两条研究各自最多 4 路 LLM 组件请求，网关需支持最多 8 路；容量不足时可将 `LLM_AGENT_MAX_CONCURRENCY` 降为 `2`，任务级双并发不变
 
 - `README.md`

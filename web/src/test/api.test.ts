@@ -156,6 +156,38 @@ describe('API security and market adapters', () => {
     expect(String(init?.body)).toContain('"api_key":""')
   })
 
+  it('reads system resources and protects every settings mutation with an unlock token', async () => {
+    const resources = {
+      collected_at: '2026-07-26T08:00:00Z', scope: 'CONTAINER', scope_label: 'Docker',
+      memory: { total_bytes: 100, used_bytes: 40, available_bytes: 60, percent: 40 },
+      cpu: { percent: 12, logical_cores: 8 },
+      disk: { total_bytes: 200, used_bytes: 50, available_bytes: 150, percent: 25 },
+      services: [],
+      topology_estimate: { worker_replicas: 1, typical_per_worker_bytes: 20, typical_increment_bytes: 20, maximum_increment_bytes: 40, projected_available_bytes: 40, level: 'NORMAL', messages: [] },
+    }
+    const settings = { values: {}, workers: [], queues: {} }
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse(resources))
+      .mockResolvedValueOnce(jsonResponse({ unlock_token: 'unlock-secret', expires_at: '2026-07-26T08:10:00Z' }))
+      .mockResolvedValueOnce(jsonResponse(settings))
+      .mockResolvedValueOnce(jsonResponse(settings))
+      .mockResolvedValueOnce(jsonResponse(settings))
+
+    expect(await api.systemResources()).toMatchObject({ scope: 'CONTAINER', cpu: { logical_cores: 8 } })
+    expect(await api.unlockSystemSettings('current-password')).toMatchObject({ unlock_token: 'unlock-secret' })
+    await api.saveSystemSettings({ market_cache_seconds: 30 }, 'unlock-secret', 'save-key')
+    await api.restoreSystemSetting('market_cache_seconds', 'unlock-secret')
+    await api.restoreAllSystemSettings('unlock-secret')
+
+    expect(String(vi.mocked(fetch).mock.calls[0][0])).toContain('/admin/system-resources')
+    expect(JSON.parse(String(vi.mocked(fetch).mock.calls[1][1]?.body))).toEqual({ password: 'current-password' })
+    expect(vi.mocked(fetch).mock.calls[1][1]?.method).toBe('POST')
+    for (const call of vi.mocked(fetch).mock.calls.slice(2)) {
+      expect(new Headers(call[1]?.headers).get('X-System-Settings-Unlock')).toBe('unlock-secret')
+    }
+    expect(new Headers(vi.mocked(fetch).mock.calls[2][1]?.headers).get('Idempotency-Key')).toBe('save-key')
+  })
+
   it('persists user asset state with CSRF protection', async () => {
     vi.mocked(fetch).mockResolvedValue(jsonResponse({ watchlist: ['600000.SH'], positions: [] }))
     await api.saveAssets({ watchlist: ['600000.SH'], positions: [] })

@@ -196,6 +196,10 @@ pandas==2.3.3
     #   akshare
     #   ashare-ai-research (pyproject.toml)
     #   tushare
+psutil==7.2.2
+    # via
+    #   -c requirements.lock
+    #   ashare-ai-research (pyproject.toml)
 psycopg[binary]==3.3.4
     # via
     #   -c requirements.lock
