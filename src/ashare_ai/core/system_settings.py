@@ -50,6 +50,7 @@ PUBLIC_SETTING_FIELDS = frozenset(
         "market_cache_max_entries",
         "market_stale_seconds",
         "market_timeout_seconds",
+        "market_hedge_delay_seconds",
         "financial_search_cache_seconds",
         "financial_search_max_concurrency",
         "financial_search_rate_limit_per_minute",

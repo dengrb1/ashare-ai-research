@@ -26,6 +26,7 @@ const SEARCH_MARKET_FIELDS: Field[] = [
   { key: 'market_cache_max_entries', label: '行情缓存条目', kind: 'number' },
   { key: 'market_stale_seconds', label: '行情陈旧阈值（秒）', kind: 'number' },
   { key: 'market_timeout_seconds', label: '行情请求超时（秒）', kind: 'number' },
+  { key: 'market_hedge_delay_seconds', label: '日线竞速延迟（秒）', kind: 'number' },
   { key: 'financial_search_cache_seconds', label: '金融搜索缓存（秒）', kind: 'number' },
   { key: 'financial_search_max_concurrency', label: '金融搜索并发', kind: 'number' },
   { key: 'financial_search_rate_limit_per_minute', label: '金融搜索限流（每分钟）', kind: 'number' },

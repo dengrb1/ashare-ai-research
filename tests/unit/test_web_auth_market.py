@@ -16,8 +16,10 @@ from ashare_ai.api.auth import hash_password
 from ashare_ai.api.dependencies import get_db
 from ashare_ai.core.config import Settings
 from ashare_ai.market.service import (
+    AKShareMarketProvider,
     MarketDataService,
     SinaMarketProvider,
+    TencentHfqDailyMarketProvider,
     _intraday_series_is_stale,
 )
 from ashare_ai.storage.models import (
@@ -867,6 +869,163 @@ def test_daily_kline_uses_independent_five_minute_cache() -> None:
     current[0] += timedelta(seconds=2)
     service.klines("600519.SH", "day", limit=160)
     assert provider.kline_calls["600519.SH"] == 2
+
+
+def _daily_bar(close: float = 10.5) -> list[dict[str, object]]:
+    return [
+        {
+            "timestamp": "2026-07-14T00:00:00+08:00",
+            "open": 10.0,
+            "high": 11.0,
+            "low": 9.0,
+            "close": close,
+            "volume": 100.0,
+            "amount": 1000.0,
+            "turnover_rate": 1.0,
+        }
+    ]
+
+
+def test_daily_kline_hedges_slow_akshare_and_caches_only_winner(monkeypatch) -> None:
+    primary = AKShareMarketProvider(timeout_seconds=2)
+    tencent = TencentHfqDailyMarketProvider()
+    calls = {"primary": 0, "tencent": 0}
+
+    def slow_primary(*_args):
+        calls["primary"] += 1
+        time.sleep(0.25)
+        return _daily_bar(10.4)
+
+    def fast_tencent(*_args):
+        calls["tencent"] += 1
+        return _daily_bar(10.6)
+
+    monkeypatch.setattr(primary, "klines", slow_primary)
+    monkeypatch.setattr(tencent, "klines", fast_tencent)
+    service = MarketDataService(
+        primary=primary,
+        fallback=tencent,
+        settings=Settings(
+            market_timeout_seconds=1,
+            market_hedge_delay_seconds=0.1,
+            market_kline_cache_seconds=300,
+        ),
+        clock=lambda: datetime(2026, 7, 15, 2, tzinfo=UTC),
+        redis_client=None,
+    )
+
+    first = service.klines(
+        "600519.SH",
+        "day",
+        limit=10,
+        start=datetime(2026, 7, 1, tzinfo=UTC),
+        end=datetime(2026, 7, 14, 23, tzinfo=UTC),
+    )
+    cached = service.klines(
+        "600519.SH",
+        "day",
+        limit=10,
+        start=datetime(2026, 7, 1, 12, tzinfo=UTC),
+        end=datetime(2026, 7, 14, 12, tzinfo=UTC),
+    )
+
+    assert first["status"]["source"] == "tencent"
+    assert first["bars"][0]["close"] == 10.6
+    assert cached["status"]["cache_hit"] is True
+    assert calls == {"primary": 1, "tencent": 1}
+
+
+def test_daily_kline_does_not_hedge_fast_akshare(monkeypatch) -> None:
+    primary = AKShareMarketProvider(timeout_seconds=2)
+    tencent = TencentHfqDailyMarketProvider()
+    tencent_calls = 0
+
+    monkeypatch.setattr(primary, "klines", lambda *_args: _daily_bar())
+
+    def unexpected_tencent(*_args):
+        nonlocal tencent_calls
+        tencent_calls += 1
+        return _daily_bar()
+
+    monkeypatch.setattr(tencent, "klines", unexpected_tencent)
+    service = MarketDataService(
+        primary=primary,
+        fallback=tencent,
+        settings=Settings(market_timeout_seconds=1, market_hedge_delay_seconds=0.1),
+        clock=lambda: datetime(2026, 7, 15, 2, tzinfo=UTC),
+        redis_client=None,
+    )
+
+    result = service.klines(
+        "600519.SH",
+        "day",
+        limit=10,
+        start=datetime(2026, 7, 1, tzinfo=UTC),
+        end=datetime(2026, 7, 14, 23, tzinfo=UTC),
+    )
+
+    assert result["status"]["source"] == "akshare"
+    assert tencent_calls == 0
+
+
+def test_intraday_kline_cache_uses_refresh_bucket_and_exact_filtering() -> None:
+    class IntradayProvider(PrefetchProvider):
+        def klines(self, symbol, period, start, end, limit):
+            del symbol, period, start, end, limit
+            self.kline_calls["600519.SH"] = self.kline_calls.get("600519.SH", 0) + 1
+            return [
+                {
+                    "timestamp": "2026-07-15T10:00:10+08:00",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.0,
+                    "close": 10.5,
+                    "volume": 100.0,
+                }
+            ]
+
+    provider = IntradayProvider()
+    service = MarketDataService(
+        primary=provider,
+        fallback=EmptyFallback(),
+        settings=Settings(market_cache_seconds=15, market_timeout_seconds=1),
+        clock=lambda: datetime(2026, 7, 15, 2, 0, 12, tzinfo=UTC),
+        redis_client=None,
+    )
+    first = service.klines(
+        "600519.SH",
+        "5m",
+        limit=10,
+        start=datetime(2026, 7, 15, 1, 59, 46, tzinfo=UTC),
+        end=datetime(2026, 7, 15, 2, 0, 14, tzinfo=UTC),
+    )
+    second = service.klines(
+        "600519.SH",
+        "5m",
+        limit=10,
+        start=datetime(2026, 7, 15, 1, 59, 47, tzinfo=UTC),
+        end=datetime(2026, 7, 15, 2, 0, 13, tzinfo=UTC),
+    )
+
+    assert first["bars"] and second["bars"]
+    assert second["status"]["cache_hit"] is True
+    assert provider.kline_calls["600519.SH"] == 1
+
+
+def test_market_status_reports_compatible_process_and_hedge_fields() -> None:
+    service = MarketDataService(
+        primary=PrefetchProvider(),
+        fallback=EmptyFallback(),
+        settings=Settings(market_hedge_delay_seconds=0.7),
+        redis_client=None,
+    )
+
+    status = service.status()
+
+    assert status["provider_process_mode"] == "IN_PROCESS"
+    assert status["provider_process_state"] == "READY"
+    assert status["provider_process_degraded"] is False
+    assert status["hedge_delay_seconds"] == 0.7
 
 
 def test_kline_timeout_degrades_to_recent_cache() -> None:

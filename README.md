@@ -304,8 +304,11 @@ Web、API、PostgreSQL 和 Redis 默认只绑定 `127.0.0.1`；物理手机联�
 生成模拟组合；组合接口会返回明确的观察模式状态，不会回退到同日旧组合。每日研究页按
 交易日展示最近 5 次运行及阶段、进度、失败原因和报告入口。
 
-行情以 AKShare 为主。实时快照使用共享 15 秒缓存与单次上游请求合并；日 K 使用独立的
-300 秒缓存。`POST /api/v1/market/prefetch` 单次最多接受 50 个去重后的标准代码，默认并发
+行情以 AKShare 为主。API 启动时会预热一个可复用的隔离行情进程，NumPy、Pandas 和
+PyArrow 不会进入 API 父进程，也不会在每次请求时重复导入。实时快照使用共享 15 秒缓存与
+单次上游请求合并；日 K 使用独立的 300 秒缓存。日线 AKShare 超过配置的短延迟阈值时会
+并发请求腾讯 HFQ 日线并采用首个有效结果，分钟线仍保持 AKShare HFQ 主路径。
+`POST /api/v1/market/prefetch` 单次最多接受 50 个去重后的标准代码，默认并发
 数为 4；默认并行执行一批报价和逐股票后复权日 K 请求。传入 `include_quotes=false` 时只预热
 日 K，供首页在报价请求完成后的空闲时段使用，避免重复读取报价。单个股票失败只写入 `errors`，不会
 丢弃其他成功结果。该接口要求登录和 CSRF 请求头。AKShare 异常时，
@@ -325,6 +328,7 @@ MARKET_PROVIDER_MAX_QUEUE=8
 MARKET_CACHE_MAX_ENTRIES=512
 MARKET_STALE_SECONDS=900
 MARKET_TIMEOUT_SECONDS=10
+MARKET_HEDGE_DELAY_SECONDS=0.5
 ```
 
 交互式金融搜索采用“AI 解析意图 + 确定性数据源取数”：标准证券代码和内置名称走直接

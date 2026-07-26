@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import queue
 import re
 import secrets
 import subprocess
@@ -9,7 +11,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import suppress
 from datetime import UTC, date, datetime, timedelta
@@ -36,6 +38,34 @@ PERIODS = {
 }
 MAX_PREFETCH_SYMBOLS = 50
 _PROVIDER_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="market-provider")
+
+
+def _market_subprocess_env() -> dict[str, str]:
+    allowed = {
+        "ARROW_IO_THREADS",
+        "HOME",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "LANG",
+        "LC_ALL",
+        "MALLOC_ARENA_MAX",
+        "MKL_NUM_THREADS",
+        "NO_PROXY",
+        "NUMEXPR_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "PATH",
+        "PYTHONPATH",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_FILE",
+        "SYSTEMROOT",
+        "TZ",
+        "WINDIR",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    }
+    return {key: value for key, value in os.environ.items() if key in allowed}
 
 
 class MarketProvider(Protocol):
@@ -179,6 +209,130 @@ def _mark_kline_cache_hit(value: dict[str, Any]) -> dict[str, Any]:
     return {**value, "status": {**status, "cache_hit": True}}
 
 
+def _kline_cache_key(
+    symbol: str,
+    period: str,
+    limit: int,
+    start: datetime | None,
+    end: datetime | None,
+    *,
+    bucket_seconds: int,
+) -> str:
+    """Match cache identity to supplier precision, not browser timestamp noise."""
+
+    if period == "daily":
+        start_key = _timestamp(start).date().isoformat() if start is not None else "default"
+        end_key = _timestamp(end).date().isoformat() if end is not None else "latest"
+    else:
+        def bucket(value: datetime | None, fallback: str) -> str:
+            if value is None:
+                return fallback
+            instant = _timestamp(value)
+            seconds = int(instant.timestamp())
+            return datetime.fromtimestamp(
+                seconds - seconds % max(1, bucket_seconds), tz=instant.tzinfo
+            ).isoformat()
+
+        start_key = bucket(start, "default")
+        end_key = bucket(end, "latest")
+    return f"klines:{symbol}:{period}:{limit}:{start_key}:{end_key}:hfq"
+
+
+def _canonical_kline_bounds(
+    period: str,
+    start: datetime | None,
+    end: datetime | None,
+    *,
+    bucket_seconds: int,
+) -> tuple[datetime | None, datetime | None]:
+    if period == "daily":
+        lower = (
+            _timestamp(start).replace(hour=0, minute=0, second=0, microsecond=0)
+            if start is not None
+            else None
+        )
+        upper = (
+            _timestamp(end).replace(hour=23, minute=59, second=59, microsecond=999999)
+            if end is not None
+            else None
+        )
+        return lower, upper
+
+    def floor(value: datetime) -> datetime:
+        instant = _timestamp(value)
+        seconds = int(instant.timestamp())
+        return datetime.fromtimestamp(
+            seconds - seconds % max(1, bucket_seconds), tz=instant.tzinfo
+        )
+
+    lower = floor(start) if start is not None else None
+    upper = (
+        floor(end) + timedelta(seconds=max(1, bucket_seconds), microseconds=-1)
+        if end is not None
+        else None
+    )
+    return lower, upper
+
+
+def _filter_kline_range(
+    value: dict[str, Any], start: datetime | None, end: datetime | None, limit: int
+) -> dict[str, Any]:
+    """A canonical cache bucket may be wider than this caller's exact range."""
+
+    lower = _timestamp(start) if start is not None else None
+    upper = _timestamp(end) if end is not None else None
+    daily = value.get("period") == "day"
+
+    def included(item: dict[str, Any]) -> bool:
+        timestamp = _timestamp(item.get("timestamp"))
+        if daily:
+            return (lower is None or timestamp.date() >= lower.date()) and (
+                upper is None or timestamp.date() <= upper.date()
+            )
+        return (lower is None or timestamp >= lower) and (upper is None or timestamp <= upper)
+
+    bars = [
+        item
+        for item in value.get("bars", [])
+        if isinstance(item, dict)
+        and included(item)
+    ]
+    return {**value, "bars": bars[-limit:]}
+
+
+def _validated_kline_bars(
+    bars: object,
+    period: str,
+    start: datetime | None,
+    end: datetime | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    if not isinstance(bars, list) or not bars or len(bars) > limit:
+        raise RuntimeError("provider returned invalid bars")
+    lower = _timestamp(start) if start is not None else None
+    upper = _timestamp(end) if end is not None else None
+    validated: list[dict[str, Any]] = []
+    for raw in bars:
+        if not isinstance(raw, dict):
+            raise RuntimeError("provider returned invalid bars")
+        timestamp = _timestamp(raw.get("timestamp"))
+        if period == "daily":
+            outside = (lower is not None and timestamp.date() < lower.date()) or (
+                upper is not None and timestamp.date() > upper.date()
+            )
+        else:
+            outside = (lower is not None and timestamp < lower) or (
+                upper is not None and timestamp > upper
+            )
+        if outside:
+            raise RuntimeError("provider returned bars outside the requested range")
+        numeric_fields = ("open", "high", "low", "close", "volume")
+        if any(_number(raw.get(field)) is None for field in numeric_fields):
+            raise RuntimeError("provider returned non-finite bars")
+        validated.append(raw)
+    return sorted(validated, key=lambda item: _timestamp(item["timestamp"]))[-limit:]
+
+
 class _AKShareInProcessProvider:
     source = "akshare"
 
@@ -257,49 +411,205 @@ class _AKShareInProcessProvider:
         return bars
 
 
-class AKShareMarketProvider:
-    """Run AKShare outside the long-lived API process.
+class _PriorityGate:
+    """Serialize provider IPC while letting foreground work overtake queued prefetches."""
 
-    Importing AKShare pulls NumPy, Pandas and PyArrow into the process. A short
-    child keeps those heaps out of API and worker parents while preserving the
-    provider and fallback contract.
-    """
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._active = False
+        self._foreground_waiters = 0
+
+    def acquire(self, *, background: bool) -> None:
+        with self._condition:
+            if not background:
+                self._foreground_waiters += 1
+            try:
+                while self._active or (background and self._foreground_waiters):
+                    self._condition.wait()
+                self._active = True
+            finally:
+                if not background:
+                    self._foreground_waiters -= 1
+
+    def release(self) -> None:
+        with self._condition:
+            self._active = False
+            self._condition.notify_all()
+
+
+class AKShareMarketProvider:
+    """Keep AKShare's heavy runtime in one supervised, reusable child process."""
 
     source = "akshare"
 
     def __init__(self, *, timeout_seconds: float) -> None:
         self.timeout_seconds = max(1.0, timeout_seconds - 0.5)
+        self._process: subprocess.Popen[str] | None = None
+        self._responses: queue.Queue[str | None] = queue.Queue()
+        self._reader: threading.Thread | None = None
+        self._process_guard = threading.RLock()
+        self._gate = _PriorityGate()
+        self._request_id = 0
+        self._state = "COLD"
+        self._last_error: str | None = None
 
-    def _request(self, payload: dict[str, Any], *, maximum_items: int) -> list[dict[str, Any]]:
-        encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    @property
+    def state(self) -> str:
+        with self._process_guard:
+            return self._state
+
+    @property
+    def last_error(self) -> str | None:
+        with self._process_guard:
+            return self._last_error
+
+    @staticmethod
+    def _read_stdout(
+        process: subprocess.Popen[str], responses: queue.Queue[str | None]
+    ) -> None:
+        stream = process.stdout
+        if stream is None:
+            responses.put(None)
+            return
         try:
-            completed = subprocess.run(
-                [sys.executable, "-m", "ashare_ai.market.akshare_worker"],
-                input=encoded,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                timeout=self.timeout_seconds,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise TimeoutError("akshare provider timed out") from exc
-        if completed.returncode != 0:
-            raise RuntimeError("akshare provider process failed")
-        if len(completed.stdout.encode("utf-8")) > 8 * 1024 * 1024:
-            raise RuntimeError("akshare provider response is too large")
+            while True:
+                line = stream.readline(8 * 1024 * 1024 + 1)
+                if not line:
+                    break
+                if len(line.encode("utf-8")) > 8 * 1024 * 1024:
+                    break
+                responses.put(line.rstrip("\r\n"))
+        finally:
+            responses.put(None)
+
+    def _discard_process_locked(self, *, reason: str | None = None) -> None:
+        process = self._process
+        self._process = None
+        self._reader = None
+        self._responses = queue.Queue()
+        self._state = "DEGRADED" if reason else "COLD"
+        self._last_error = reason
+        if process is None:
+            return
+        with suppress(Exception):
+            if process.poll() is None:
+                process.terminate()
+        with suppress(Exception):
+            process.wait(timeout=1)
+        with suppress(Exception):
+            if process.poll() is None:
+                process.kill()
+
+    def start(self) -> bool:
+        """Warm the child without allowing a provider outage to stop the API."""
+
+        with self._process_guard:
+            if (
+                self._process is not None
+                and self._process.poll() is None
+                and self._state == "READY"
+            ):
+                return True
+            self._discard_process_locked()
+            try:
+                process = subprocess.Popen(
+                    [sys.executable, "-m", "ashare_ai.market.akshare_worker"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    encoding="utf-8",
+                    bufsize=1,
+                    close_fds=True,
+                    env=_market_subprocess_env(),
+                )
+                self._process = process
+                self._state = "WARMING"
+                responses = self._responses
+                reader = threading.Thread(
+                    target=self._read_stdout,
+                    args=(process, responses),
+                    name="akshare-provider-reader",
+                    daemon=True,
+                )
+                self._reader = reader
+                reader.start()
+                ready = self._responses.get(timeout=self.timeout_seconds)
+                if ready != '{"ready":true}':
+                    raise RuntimeError("akshare provider warmup failed")
+                self._state = "READY"
+                self._last_error = None
+                return True
+            except Exception:
+                self._discard_process_locked(reason="warmup failed")
+                return False
+
+    def close(self) -> None:
+        with self._process_guard:
+            self._discard_process_locked()
+
+    def _request(
+        self, payload: dict[str, Any], *, maximum_items: int, background: bool = False
+    ) -> list[dict[str, Any]]:
+        self._gate.acquire(background=background)
         try:
-            response = json.loads(completed.stdout)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("akshare provider returned invalid JSON") from exc
-        if not isinstance(response, dict) or response.get("ok") is not True:
-            raise RuntimeError("akshare provider returned an error")
-        items = response.get("items")
-        if not isinstance(items, list) or len(items) > maximum_items:
-            raise RuntimeError("akshare provider returned invalid items")
-        if not all(isinstance(item, dict) for item in items):
-            raise RuntimeError("akshare provider returned invalid items")
-        return cast(list[dict[str, Any]], items)
+            if not self.start():
+                raise RuntimeError("akshare provider unavailable")
+            encoded_payload = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+            if len(encoded_payload.encode("utf-8")) > 64 * 1024:
+                raise ValueError("akshare provider request is too large")
+            with self._process_guard:
+                process = self._process
+                if process is None or process.stdin is None or process.poll() is not None:
+                    self._discard_process_locked(reason="provider process exited")
+                    raise RuntimeError("akshare provider process failed")
+                self._request_id += 1
+                request_id = self._request_id
+                encoded = json.dumps(
+                    {"id": request_id, "payload": json.loads(encoded_payload)},
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                )
+                try:
+                    process.stdin.write(encoded + "\n")
+                    process.stdin.flush()
+                except Exception as exc:
+                    self._discard_process_locked(reason="provider pipe failed")
+                    raise RuntimeError("akshare provider process failed") from exc
+            try:
+                raw_response = self._responses.get(timeout=self.timeout_seconds)
+            except queue.Empty as exc:
+                with self._process_guard:
+                    self._discard_process_locked(reason="provider timed out")
+                raise TimeoutError("akshare provider timed out") from exc
+            if raw_response is None:
+                with self._process_guard:
+                    self._discard_process_locked(reason="provider process exited")
+                raise RuntimeError("akshare provider process failed")
+            try:
+                response = json.loads(raw_response)
+            except json.JSONDecodeError as exc:
+                with self._process_guard:
+                    self._discard_process_locked(reason="invalid provider response")
+                raise RuntimeError("akshare provider returned invalid JSON") from exc
+            if not isinstance(response, dict) or response.get("id") != request_id:
+                with self._process_guard:
+                    self._discard_process_locked(reason="provider protocol mismatch")
+                raise RuntimeError("akshare provider returned an invalid response")
+            if response.get("ok") is not True:
+                raise RuntimeError("akshare provider returned an error")
+            items = response.get("items")
+            if not isinstance(items, list) or len(items) > maximum_items:
+                with self._process_guard:
+                    self._discard_process_locked(reason="invalid provider items")
+                raise RuntimeError("akshare provider returned invalid items")
+            if not all(isinstance(item, dict) for item in items):
+                with self._process_guard:
+                    self._discard_process_locked(reason="invalid provider items")
+                raise RuntimeError("akshare provider returned invalid items")
+            return cast(list[dict[str, Any]], items)
+        finally:
+            self._gate.release()
 
     def quotes(self, symbols: list[str]) -> list[dict[str, Any]]:
         normalized = sorted({normalize_symbol(symbol) for symbol in symbols})
@@ -328,6 +638,27 @@ class AKShareMarketProvider:
                 "limit": limit,
             },
             maximum_items=limit,
+        )
+
+    def background_klines(
+        self,
+        symbol: str,
+        period: str,
+        start: datetime | None,
+        end: datetime | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        return self._request(
+            {
+                "operation": "klines",
+                "symbol": normalize_symbol(symbol),
+                "period": period,
+                "start": start.isoformat() if start is not None else None,
+                "end": end.isoformat() if end is not None else None,
+                "limit": limit,
+            },
+            maximum_items=limit,
+            background=True,
         )
 
 
@@ -684,6 +1015,15 @@ class MarketDataService:
             )
         )
 
+    def start(self) -> bool:
+        if isinstance(self.primary, AKShareMarketProvider):
+            return self.primary.start()
+        return True
+
+    def close(self) -> None:
+        if isinstance(self.primary, AKShareMarketProvider):
+            self.primary.close()
+
     def _lock(self, key: str) -> threading.Lock:
         with self._guard:
             return self._locks.setdefault(key, threading.Lock())
@@ -781,14 +1121,7 @@ class MarketDataService:
             while len(self._cache) > self.settings.market_cache_max_entries:
                 self._cache.popitem(last=False)
 
-    def _call(self, function: Any, *args: Any) -> Any:
-        """Use a shared bounded pool and retain timed-out slots until completion.
-
-        Cancelling a Python thread cannot stop an already running provider call. A
-        semaphore therefore stays acquired until its future has actually finished,
-        bounding both concurrent calls and any residual work after a timeout.
-        """
-
+    def _submit_call(self, function: Any, *args: Any) -> Future[Any]:
         if not self._provider_slots.acquire(blocking=False):
             raise TimeoutError("market provider queue is saturated")
         try:
@@ -797,11 +1130,104 @@ class MarketDataService:
             self._provider_slots.release()
             raise
         future.add_done_callback(lambda _: self._provider_slots.release())
+        return future
+
+    def _call(self, function: Any, *args: Any) -> Any:
+        """Use a shared bounded pool and retain timed-out slots until completion.
+
+        Cancelling a Python thread cannot stop an already running provider call. A
+        semaphore therefore stays acquired until its future has actually finished,
+        bounding both concurrent calls and any residual work after a timeout.
+        """
+
+        future = self._submit_call(function, *args)
         try:
             return future.result(timeout=self.settings.market_timeout_seconds)
         except FutureTimeoutError as exc:
             future.cancel()
             raise TimeoutError("market provider timeout") from exc
+
+    def _hedged_daily_kline(
+        self,
+        tencent: TencentHfqDailyMarketProvider,
+        symbol: str,
+        start: datetime | None,
+        end: datetime | None,
+        limit: int,
+        *,
+        background: bool,
+    ) -> tuple[MarketProvider, list[dict[str, Any]], datetime]:
+        """Start Tencent only when the warmed AKShare request misses its latency budget."""
+
+        primary_call = (
+            self.primary.background_klines
+            if background and isinstance(self.primary, AKShareMarketProvider)
+            else self.primary.klines
+        )
+        started = time.monotonic()
+        deadline = started + self.settings.market_timeout_seconds
+        primary_collected = self.clock()
+        primary_future = self._submit_call(
+            primary_call, symbol, "daily", start, end, limit
+        )
+        futures: dict[Future[Any], tuple[MarketProvider, datetime]] = {
+            primary_future: (self.primary, primary_collected)
+        }
+        stale: list[tuple[MarketProvider, list[dict[str, Any]], datetime]] = []
+        errors: list[str] = []
+        try:
+            bars = _validated_kline_bars(
+                primary_future.result(timeout=self.settings.market_hedge_delay_seconds),
+                "daily",
+                start,
+                end,
+                limit,
+            )
+            if not _intraday_series_is_stale(bars, "daily", end, primary_collected):
+                return self.primary, bars, primary_collected
+            stale.append((self.primary, bars, primary_collected))
+        except FutureTimeoutError:
+            pass
+        except Exception as exc:
+            errors.append(f"{self.primary.source}: {exc}")
+
+        if not primary_future.done():
+            futures[primary_future] = (self.primary, primary_collected)
+        else:
+            futures.pop(primary_future, None)
+        tencent_collected = self.clock()
+        try:
+            tencent_future = self._submit_call(
+                tencent.klines, symbol, "daily", start, end, limit
+            )
+            futures[tencent_future] = (tencent, tencent_collected)
+        except Exception as exc:
+            errors.append(f"{tencent.source}: {exc}")
+        while futures:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            completed, _ = wait(
+                tuple(futures), timeout=remaining, return_when=FIRST_COMPLETED
+            )
+            if not completed:
+                break
+            for future in completed:
+                provider, collected = futures.pop(future)
+                try:
+                    bars = _validated_kline_bars(
+                        future.result(), "daily", start, end, limit
+                    )
+                    if not _intraday_series_is_stale(
+                        bars, "daily", end, collected
+                    ):
+                        return provider, bars, collected
+                    stale.append((provider, bars, collected))
+                except Exception as exc:
+                    errors.append(f"{provider.source}: {exc}")
+        if stale:
+            return max(stale, key=lambda item: _timestamp(item[1][-1]["timestamp"]))
+        raise RuntimeError("; ".join(errors) or "daily providers timed out")
 
     def _status(
         self,
@@ -1055,39 +1481,112 @@ class MarketDataService:
         start: datetime | None = None,
         end: datetime | None = None,
         force_refresh: bool = False,
+        background: bool = False,
     ) -> dict[str, Any]:
         normalized = normalize_symbol(symbol)
         provider_period = PERIODS.get(period.casefold())
         if provider_period is None:
             raise ValueError(f"unsupported period: {period}")
-        key = f"klines:{normalized}:{provider_period}:{limit}:{start}:{end}:hfq"
+        key = _kline_cache_key(
+            normalized,
+            provider_period,
+            limit,
+            start,
+            end,
+            bucket_seconds=self.settings.market_cache_seconds,
+        )
+        fetch_start, fetch_end = _canonical_kline_bounds(
+            provider_period,
+            start,
+            end,
+            bucket_seconds=self.settings.market_cache_seconds,
+        )
         now = self.clock()
         cached = self._get(key, now)
         if not force_refresh and cached is not None and self._fresh(cached, now):
-            return _mark_kline_cache_hit(cast(dict[str, Any], cached["value"]))
+            return _mark_kline_cache_hit(
+                _filter_kline_range(cast(dict[str, Any], cached["value"]), start, end, limit)
+            )
         with self._lock(key):
             now = self.clock()
             cached = self._get(key, now)
             if not force_refresh and cached is not None and self._fresh(cached, now):
-                return _mark_kline_cache_hit(cast(dict[str, Any], cached["value"]))
+                return _mark_kline_cache_hit(
+                    _filter_kline_range(
+                        cast(dict[str, Any], cached["value"]), start, end, limit
+                    )
+                )
             redis_client, refresh_token, claimed = self._claim_refresh(key)
             if not claimed:
                 deadline = time.monotonic() + self.settings.market_timeout_seconds
                 while time.monotonic() < deadline:
                     shared = self._get_shared(key)
                     if shared is not None and self._fresh(shared, self.clock()):
-                        return _mark_kline_cache_hit(cast(dict[str, Any], shared["value"]))
+                        return _mark_kline_cache_hit(
+                            _filter_kline_range(
+                                cast(dict[str, Any], shared["value"]), start, end, limit
+                            )
+                        )
                     time.sleep(0.05)
             errors: list[str] = []
             stale_primary_bars: list[dict[str, Any]] | None = None
             stale_candidate: tuple[MarketProvider, list[dict[str, Any]]] | None = None
             try:
-                for provider in (self.primary, *self.fallbacks):
+                preloaded: tuple[MarketProvider, list[dict[str, Any]], datetime] | None = None
+                providers_to_call: list[MarketProvider] = [self.primary, *self.fallbacks]
+                tencent = next(
+                    (
+                        provider
+                        for provider in self.fallbacks
+                        if isinstance(provider, TencentHfqDailyMarketProvider)
+                    ),
+                    None,
+                )
+                if (
+                    provider_period == "daily"
+                    and isinstance(self.primary, AKShareMarketProvider)
+                    and tencent is not None
+                ):
                     try:
-                        collected = self.clock()
-                        bars = self._call(
-                            provider.klines, normalized, provider_period, start, end, limit
+                        preloaded = self._hedged_daily_kline(
+                            tencent,
+                            normalized,
+                            fetch_start,
+                            fetch_end,
+                            limit,
+                            background=background,
                         )
+                    except Exception as exc:
+                        errors.append(f"daily hedge: {exc}")
+                    providers_to_call = [
+                        provider
+                        for provider in self.fallbacks
+                        if provider is not tencent
+                    ]
+                attempts = ([preloaded[0]] if preloaded is not None else []) + providers_to_call
+                for provider in attempts:
+                    try:
+                        if preloaded is not None and provider is preloaded[0]:
+                            _, bars, collected = preloaded
+                            preloaded = None
+                        else:
+                            collected = self.clock()
+                            provider_call = (
+                                provider.background_klines
+                                if background and isinstance(provider, AKShareMarketProvider)
+                                else provider.klines
+                            )
+                            bars = self._call(
+                                provider_call,
+                                normalized,
+                                provider_period,
+                                fetch_start,
+                                fetch_end,
+                                limit,
+                            )
+                            bars = _validated_kline_bars(
+                                bars, provider_period, fetch_start, fetch_end, limit
+                            )
                         if not bars:
                             raise RuntimeError("provider returned no bars")
                         source = provider.source
@@ -1139,7 +1638,7 @@ class MarketDataService:
                                 "value": value,
                             },
                         )
-                        return value
+                        return _filter_kline_range(value, start, end, limit)
                     except Exception as exc:
                         errors.append(f"{provider.source}: {exc}")
                 if provider_period == "daily" and stale_candidate is not None:
@@ -1180,7 +1679,7 @@ class MarketDataService:
                                         "value": value,
                                     },
                                 )
-                                return value
+                                return _filter_kline_range(value, start, end, limit)
                         except Exception as exc:
                             errors.append(f"daily close alignment: {exc}")
                 stale_bars = stale_primary_bars or (
@@ -1195,7 +1694,7 @@ class MarketDataService:
                 )
                 if stale_bars is not None:
                     fallback_at = self.clock()
-                    return {
+                    value = {
                         "symbol": normalized,
                         "period": "day" if provider_period == "daily" else f"{provider_period}m",
                         "adjustment": "hfq",
@@ -1208,15 +1707,18 @@ class MarketDataService:
                             message="K 线最新数据停留在上一交易日，实时备用源不可用",
                         ),
                     }
+                    return _filter_kline_range(value, start, end, limit)
                 if cached is not None and self._usable_stale(cached, now):
                     value = dict(cached["value"])
+                    raw_status = value.get("status")
+                    cached_status = dict(raw_status) if isinstance(raw_status, dict) else {}
                     value["status"] = {
-                        **value["status"],
+                        **cached_status,
                         "delayed": True,
                         "stale": True,
                         "message": "; ".join(errors),
                     }
-                    return value
+                    return _filter_kline_range(value, start, end, limit)
                 raise RuntimeError("; ".join(errors) or "market data unavailable")
             finally:
                 if claimed:
@@ -1258,7 +1760,9 @@ class MarketDataService:
         ) as pool:
             quote_future = pool.submit(self.quotes, normalized) if include_quotes else None
             kline_futures = {
-                pool.submit(self.klines, symbol, period, limit=limit): (symbol, period)
+                pool.submit(
+                    self.klines, symbol, period, limit=limit, background=True
+                ): (symbol, period)
                 for symbol in normalized
                 for period in requested_periods
             }
@@ -1300,10 +1804,38 @@ class MarketDataService:
             "stale_seconds": self.settings.market_stale_seconds,
             "adjustment": "hfq",
             "live_data_isolated_from_snapshots": True,
+            "provider_process_mode": (
+                "REUSABLE" if isinstance(self.primary, AKShareMarketProvider) else "IN_PROCESS"
+            ),
+            "provider_process_state": (
+                self.primary.state
+                if isinstance(self.primary, AKShareMarketProvider)
+                else "READY"
+            ),
+            "provider_process_degraded": (
+                self.primary.last_error is not None
+                if isinstance(self.primary, AKShareMarketProvider)
+                else False
+            ),
+            "hedge_delay_seconds": self.settings.market_hedge_delay_seconds,
             "quotes": quote_status,
         }
 
 
+_ACTIVE_MARKET_SERVICE: MarketDataService | None = None
+
+
 @lru_cache(maxsize=1)
 def get_market_data_service() -> MarketDataService:
-    return MarketDataService(settings=get_effective_settings())
+    global _ACTIVE_MARKET_SERVICE
+    service = MarketDataService(settings=get_effective_settings())
+    _ACTIVE_MARKET_SERVICE = service
+    return service
+
+
+def reset_market_data_service() -> None:
+    global _ACTIVE_MARKET_SERVICE
+    if _ACTIVE_MARKET_SERVICE is not None:
+        _ACTIVE_MARKET_SERVICE.close()
+    _ACTIVE_MARKET_SERVICE = None
+    get_market_data_service.cache_clear()

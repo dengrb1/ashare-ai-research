@@ -1,61 +1,167 @@
 from __future__ import annotations
 
 import json
-import subprocess
+import queue
+import threading
+import time
 from datetime import datetime
 from typing import Any
 
 import pytest
 
 from ashare_ai.market.akshare_worker import handle_request
-from ashare_ai.market.service import AKShareMarketProvider, _number
+from ashare_ai.market.service import AKShareMarketProvider, _number, _PriorityGate
 
 
-def test_parent_provider_uses_bounded_non_shell_process(monkeypatch) -> None:
-    observed: dict[str, Any] = {}
+class _Output:
+    def __init__(self) -> None:
+        self.lines: queue.Queue[str] = queue.Queue()
+        self.lines.put('{"ready":true}\n')
 
-    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        observed.update({"command": command, **kwargs})
-        return subprocess.CompletedProcess(
-            command,
-            0,
-            stdout=json.dumps(
-                {
-                    "ok": True,
-                    "items": [{"symbol": "600519.SH", "price": 100.0}],
-                }
-            ),
-            stderr="",
-        )
-
-    monkeypatch.setattr("ashare_ai.market.service.subprocess.run", run)
-    rows = AKShareMarketProvider(timeout_seconds=3).quotes(["600519.sh"])
-
-    assert rows == [{"symbol": "600519.SH", "price": 100.0}]
-    assert observed["command"][1:] == ["-m", "ashare_ai.market.akshare_worker"]
-    assert "shell" not in observed
-    assert observed["timeout"] == 2.5
-    assert json.loads(str(observed["input"])) == {
-        "operation": "quotes",
-        "symbols": ["600519.SH"],
-    }
+    def readline(self, _limit: int) -> str:
+        return self.lines.get(timeout=2)
 
 
-def test_parent_provider_hides_child_error_and_enforces_timeout(monkeypatch) -> None:
-    def failed(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess([], 1, stdout="", stderr="secret-token")
+class _Input:
+    def __init__(self, process: _Process) -> None:
+        self.process = process
 
-    monkeypatch.setattr("ashare_ai.market.service.subprocess.run", failed)
-    with pytest.raises(RuntimeError, match="provider process failed") as exc_info:
-        AKShareMarketProvider(timeout_seconds=3).quotes(["600519.SH"])
-    assert "secret-token" not in str(exc_info.value)
+    def write(self, value: str) -> int:
+        envelope = json.loads(value)
+        self.process.requests.append(envelope)
+        if self.process.respond:
+            symbol = envelope["payload"].get("symbols", ["600519.SH"])[0]
+            self.process.stdout.lines.put(
+                json.dumps(
+                    {
+                        "id": envelope["id"] + self.process.response_id_offset,
+                        "ok": True,
+                        "items": [{"symbol": symbol, "price": 100.0}],
+                    }
+                )
+                + "\n"
+            )
+        return len(value)
 
-    def timed_out(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        raise subprocess.TimeoutExpired([], 2.5)
+    def flush(self) -> None:
+        return None
 
-    monkeypatch.setattr("ashare_ai.market.service.subprocess.run", timed_out)
+
+class _Process:
+    def __init__(self, *, respond: bool = True, response_id_offset: int = 0) -> None:
+        self.respond = respond
+        self.response_id_offset = response_id_offset
+        self.stdout = _Output()
+        self.stdin = _Input(self)
+        self.requests: list[dict[str, Any]] = []
+        self.returncode: int | None = None
+        self.terminated = False
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = -15
+        self.stdout.lines.put("")
+
+    def wait(self, timeout: float) -> int:
+        del timeout
+        return self.returncode or 0
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+
+def test_parent_provider_reuses_bounded_non_shell_process(monkeypatch) -> None:
+    processes: list[_Process] = []
+    observed: list[tuple[list[str], dict[str, Any]]] = []
+
+    def popen(command: list[str], **kwargs: Any) -> _Process:
+        observed.append((command, kwargs))
+        process = _Process()
+        processes.append(process)
+        return process
+
+    monkeypatch.setenv("ADMIN_PASSWORD", "must-not-reach-market-child")
+    monkeypatch.setattr("ashare_ai.market.service.subprocess.Popen", popen)
+    provider = AKShareMarketProvider(timeout_seconds=3)
+    assert provider.quotes(["600519.sh"]) == [
+        {"symbol": "600519.SH", "price": 100.0}
+    ]
+    assert provider.quotes(["000001.sz"])[0]["symbol"] == "000001.SZ"
+
+    assert len(processes) == 1
+    assert observed[0][0][1:] == ["-m", "ashare_ai.market.akshare_worker"]
+    assert "shell" not in observed[0][1]
+    assert "ADMIN_PASSWORD" not in observed[0][1]["env"]
+    assert observed[0][1]["close_fds"] is True
+    assert [item["id"] for item in processes[0].requests] == [1, 2]
+    provider.close()
+    assert processes[0].terminated is True
+
+
+def test_parent_provider_timeout_reaps_child_and_restarts(monkeypatch) -> None:
+    processes = [_Process(respond=False), _Process()]
+    monkeypatch.setattr(
+        "ashare_ai.market.service.subprocess.Popen", lambda *_args, **_kwargs: processes.pop(0)
+    )
+    provider = AKShareMarketProvider(timeout_seconds=3)
+    provider.timeout_seconds = 0.02
+    first = processes[0]
     with pytest.raises(TimeoutError, match="provider timed out"):
-        AKShareMarketProvider(timeout_seconds=3).quotes(["600519.SH"])
+        provider.quotes(["600519.SH"])
+    assert first.terminated is True
+    assert provider.quotes(["600519.SH"])[0]["price"] == 100.0
+
+
+def test_parent_provider_reaps_protocol_mismatch(monkeypatch) -> None:
+    process = _Process(response_id_offset=1)
+    monkeypatch.setattr(
+        "ashare_ai.market.service.subprocess.Popen", lambda *_args, **_kwargs: process
+    )
+    provider = AKShareMarketProvider(timeout_seconds=2)
+
+    with pytest.raises(RuntimeError, match="invalid response"):
+        provider.quotes(["600519.SH"])
+
+    assert process.terminated is True
+    assert provider.state == "DEGRADED"
+
+
+def test_foreground_request_overtakes_queued_prefetch() -> None:
+    gate = _PriorityGate()
+    gate.acquire(background=True)
+    order: list[str] = []
+    background_waiting = threading.Event()
+    foreground_waiting = threading.Event()
+
+    def waiter(name: str, *, background: bool, waiting: threading.Event) -> None:
+        waiting.set()
+        gate.acquire(background=background)
+        order.append(name)
+        gate.release()
+
+    background = threading.Thread(
+        target=waiter,
+        args=("background",),
+        kwargs={"background": True, "waiting": background_waiting},
+    )
+    foreground = threading.Thread(
+        target=waiter,
+        args=("foreground",),
+        kwargs={"background": False, "waiting": foreground_waiting},
+    )
+    background.start()
+    background_waiting.wait(timeout=1)
+    foreground.start()
+    foreground_waiting.wait(timeout=1)
+    time.sleep(0.01)
+    gate.release()
+    background.join(timeout=1)
+    foreground.join(timeout=1)
+
+    assert order == ["foreground", "background"]
 
 
 def test_child_contract_filters_quotes_and_validates_kline_limit() -> None:

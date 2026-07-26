@@ -172,6 +172,7 @@ class SystemSettingsRequest(BaseModel):
     market_cache_max_entries: int | None = Field(default=None, ge=64, le=4096)
     market_stale_seconds: int | None = Field(default=None, ge=15, le=86400)
     market_timeout_seconds: float | None = Field(default=None, gt=0, le=120)
+    market_hedge_delay_seconds: float | None = Field(default=None, ge=0.1, le=3.0)
     financial_search_cache_seconds: int | None = Field(default=None, ge=0, le=300)
     financial_search_max_concurrency: int | None = Field(default=None, ge=1, le=32)
     financial_search_rate_limit_per_minute: int | None = Field(default=None, ge=1, le=600)

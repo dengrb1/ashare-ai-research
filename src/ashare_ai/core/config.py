@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     market_cache_max_entries: int = Field(default=512, ge=64, le=4096)
     market_stale_seconds: int = Field(default=900, ge=15, le=86_400)
     market_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    market_hedge_delay_seconds: float = Field(default=0.5, ge=0.1, le=3.0)
     financial_search_provider: str = "neodata-financial-search"
     neodata_financial_search_path: Path | None = None
     neodata_financial_search_mode: Literal["auto", "cli", "embedded"] = "auto"

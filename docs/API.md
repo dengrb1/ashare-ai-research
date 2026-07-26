@@ -696,7 +696,7 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 
 ### `GET /api/v1/market/status`
 
-返回当前行情服务状态对象，主要字段包括 `primary`、`fallback`、`fallbacks`、`cache_seconds`、`kline_cache_seconds`、`prefetch_max_workers`、`prefetch_max_symbols`、`stale_seconds`、`adjustment`、`live_data_isolated_from_snapshots` 和可选 `quotes` 缓存状态。
+返回当前行情服务状态对象，主要字段包括 `primary`、`fallback`、`fallbacks`、`cache_seconds`、`kline_cache_seconds`、`prefetch_max_workers`、`prefetch_max_symbols`、`stale_seconds`、`adjustment`、`live_data_isolated_from_snapshots` 和可选 `quotes` 缓存状态。兼容新增的 `provider_process_mode`、`provider_process_state`、`provider_process_degraded` 与 `hedge_delay_seconds` 用于观察可复用 AKShare 隔离进程和日线延迟竞速；这些字段不暴露 PID、命令行、环境变量或内部错误。
 
 ## 11. 财务检索
 

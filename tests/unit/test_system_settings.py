@@ -59,6 +59,7 @@ def test_system_settings_version_overrides_restore_and_never_expose_secret() -> 
     assert service.resolve(session).settings.tushare_token == "database-secret"
     view = service.public_view(session)
     assert view["values"]["market_cache_seconds"] == 25
+    assert view["values"]["market_hedge_delay_seconds"] == 0.5
     assert view["sources"]["market_cache_seconds"] == "database"
     assert view["secret_configured"]["tushare_token"] is True
     assert "database-secret" not in str(view)

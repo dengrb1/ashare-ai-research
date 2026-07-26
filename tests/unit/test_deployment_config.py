@@ -33,7 +33,7 @@ def test_compose_declares_low_memory_control_plane() -> None:
     assert services["research-worker"]["mem_limit"] == "700m"
     assert DEFAULT_WORKER_LIMIT_BYTES == 700 * MIB
     assert "scale" not in services["job-worker"]
-    assert services["api"]["mem_limit"] == "320m"
+    assert services["api"]["mem_limit"] == "384m"
     assert "healthcheck" in services["api"]
     assert "healthcheck" in services["web"]
     assert "healthcheck" in services["postgres"]

@@ -155,7 +155,7 @@ from ashare_ai.core.system_settings import (
     get_effective_settings,
 )
 from ashare_ai.core.time import SHANGHAI
-from ashare_ai.market.service import get_market_data_service
+from ashare_ai.market.service import get_market_data_service, reset_market_data_service
 from ashare_ai.notifications.service import InvalidNotificationCursor, NotificationService
 from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.observability.runtime_resources import sample_runtime_resources
@@ -238,7 +238,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         ModelConfigurationService().bootstrap_from_environment(session)
         AttachmentService(session).cleanup_expired()
         session.commit()
-    yield
+    market = get_market_data_service()
+    if not market.start():
+        logger.warning("AKShare market provider warmup failed; fallbacks remain available")
+    try:
+        yield
+    finally:
+        reset_market_data_service()
 
 
 _api_settings = get_settings()
@@ -2213,7 +2219,8 @@ def put_system_settings(
         # Cached adapters are recreated on the next request so non-topology
         # values (search, market and storage tuning) hot-load without a Docker
         # restart.  Worker topology itself is intentionally boot-time only.
-        get_market_data_service.cache_clear()
+        reset_market_data_service()
+        get_market_data_service().start()
         get_financial_search_service.cache_clear()
         logger.info(
             "administrator saved system configuration version=%s hash=%s",
@@ -2238,7 +2245,8 @@ def restore_system_setting(
     try:
         SystemConfigurationService().restore_field(db, field=field, user_id=context.user.user_id)
         db.commit()
-        get_market_data_service.cache_clear()
+        reset_market_data_service()
+        get_market_data_service().start()
         get_financial_search_service.cache_clear()
         return _system_settings_response(db)
     except SystemSettingsError as exc:
@@ -2257,7 +2265,8 @@ def restore_all_system_settings(
     try:
         SystemConfigurationService().restore_all(db, user_id=context.user.user_id)
         db.commit()
-        get_market_data_service.cache_clear()
+        reset_market_data_service()
+        get_market_data_service().start()
         get_financial_search_service.cache_clear()
         return _system_settings_response(db)
     except SystemSettingsError as exc:
