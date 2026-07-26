@@ -446,7 +446,7 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 
 `GET /api/v1/admin/system-settings` 返回有效的公开设置、每项来源（`database|environment`）、不可变配置版本/哈希、敏感项是否已配置、环境只读状态、Worker 心跳、已加载执行模式及各队列 `pending/processing` 摘要。它绝不返回 Tushare、对象存储或模型密钥，也不返回数据库/Redis 地址、认证参数、Fernet 密钥或卷路径。Worker 心跳可以包含清洗后的内存、内存上限和 CPU 指标。
 
-`GET /api/v1/admin/system-resources` 返回服务器或 Docker VM 的内存、CPU、运行文件系统磁盘指标，以及 API/Worker 的清洗后资源占用。Docker Desktop 下总览是整个 Docker VM，并不等于当前 Compose 项目的服务合计；服务表只展示能够通过应用心跳安全采集的 Python 服务。`scope` 明确区分 `HOST|CONTAINER`。`topology_estimate` 返回 DUAL 的 Worker 数、估算来源、单 Worker 典型占用、典型新增量、最大预算、预计剩余内存和 `NORMAL|WARNING|CRITICAL` 等级；顶层 `warnings` 同时包含内存、CPU 和磁盘提醒。该接口不使用 Docker socket，不返回路径、容器环境变量或未经清洗的运行时配置。
+`GET /api/v1/admin/system-resources` 返回服务器或 Docker VM 的内存、CPU、运行文件系统磁盘指标，以及 API/Worker 的清洗后资源占用。Docker Desktop 下总览是整个 Docker VM，并不等于当前 Compose 项目的服务合计；服务表只展示能够通过应用心跳安全采集的 Python 服务。服务的 `memory_used_bytes` 是扣除 cgroup `inactive_file` 后的工作集，可选的 `memory_cache_bytes` 单独表示这部分可回收文件缓存。`scope` 明确区分 `HOST|CONTAINER`。`topology_estimate` 返回 DUAL 的 Worker 数、估算来源、单 Worker 典型占用、典型新增量、最大预算、预计剩余内存和 `NORMAL|WARNING|CRITICAL` 等级；顶层 `warnings` 同时包含内存、CPU 和磁盘提醒。该接口不使用 Docker socket，不返回路径、容器环境变量或未经清洗的运行时配置。
 
 `PUT /api/v1/admin/system-settings` 接收 `SystemSettingsRequest` 的任意非空子集，支持 `Idempotency-Key`。每次成功保存均创建一个新的不可变 PostgreSQL 版本；同一个键与同一请求体重试不会创建第二个版本，同键不同请求体返回 `409`。可编辑公开字段包括：
 

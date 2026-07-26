@@ -30,6 +30,10 @@ def load_handler(kind: str) -> Callable[[str], Any]:
         from ashare_ai.orchestration.personal_archive_jobs import run_personal_archive_job
 
         return run_personal_archive_job
+    if kind == "maintenance":
+        from ashare_ai.orchestration.maintenance_jobs import run_maintenance_job
+
+        return run_maintenance_job
     raise ValueError(f"unsupported job kind: {kind}")
 
 
@@ -44,6 +48,7 @@ def main() -> None:
             "backtest",
             "exit-review",
             "personal-archive",
+            "maintenance",
         ),
     )
     parser.add_argument("job_id")

@@ -37,12 +37,37 @@ def cgroup_memory(
 ) -> tuple[int | None, int | None]:
     """Return current and limited cgroup memory for v2 or v1."""
 
+    usage, limit, _inactive_file = cgroup_memory_details(roots)
+    return usage, limit
+
+
+def _read_memory_stat(path: Path) -> int:
+    try:
+        values = {
+            fields[0]: int(fields[1])
+            for line in path.read_text(encoding="ascii").splitlines()
+            if len(fields := line.split()) == 2 and fields[1].isdigit()
+        }
+    except OSError:
+        return 0
+    return max(0, values.get("inactive_file", values.get("total_inactive_file", 0)))
+
+
+def cgroup_memory_details(
+    roots: tuple[Path, ...] = (Path("/sys/fs/cgroup"),),
+) -> tuple[int | None, int | None, int]:
+    """Return cgroup usage, limit and reclaimable inactive file cache."""
+
     candidates = (
-        ("memory.current", "memory.max"),
-        ("memory/memory.usage_in_bytes", "memory/memory.limit_in_bytes"),
+        ("memory.current", "memory.max", "memory.stat"),
+        (
+            "memory/memory.usage_in_bytes",
+            "memory/memory.limit_in_bytes",
+            "memory/memory.stat",
+        ),
     )
     for root in roots:
-        for usage_name, limit_name in candidates:
+        for usage_name, limit_name, stat_name in candidates:
             usage = _read_memory_value(root / usage_name)
             limit = _read_memory_value(root / limit_name)
             if usage is None and limit is None:
@@ -50,12 +75,15 @@ def cgroup_memory(
             # v1 represents an unlimited cgroup with an enormous sentinel.
             if limit is not None and limit >= 1 << 60:
                 limit = None
-            return usage, limit
-    return None, None
+            return usage, limit, _read_memory_stat(root / stat_name)
+    return None, None, 0
 
 
 def sample_current_service(*, service_id: str, role: str) -> dict[str, object]:
-    memory_used, memory_limit = cgroup_memory()
+    memory_current, memory_limit, memory_cache = cgroup_memory_details()
+    memory_used = (
+        max(0, memory_current - memory_cache) if memory_current is not None else None
+    )
     if memory_used is None:
         try:
             memory_used = int(_PROCESS.memory_info().rss)
@@ -71,6 +99,7 @@ def sample_current_service(*, service_id: str, role: str) -> dict[str, object]:
         "role": role,
         "healthy": True,
         "memory_used_bytes": memory_used,
+        "memory_cache_bytes": memory_cache if memory_current is not None else None,
         "memory_limit_bytes": memory_limit,
         "cpu_percent": cpu_percent,
         "collected_at": datetime.now(UTC).isoformat(),
@@ -177,6 +206,7 @@ def sample_runtime_resources(workers: list[dict[str, object]]) -> dict[str, Any]
                 "role": worker.get("role"),
                 "healthy": bool(worker.get("healthy")),
                 "memory_used_bytes": worker.get("memory_used_bytes"),
+                "memory_cache_bytes": worker.get("memory_cache_bytes"),
                 "memory_limit_bytes": worker.get("memory_limit_bytes"),
                 "cpu_percent": worker.get("cpu_percent"),
                 "collected_at": worker.get("last_heartbeat_at"),

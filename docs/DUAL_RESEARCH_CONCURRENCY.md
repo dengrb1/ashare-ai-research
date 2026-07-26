@@ -4,7 +4,7 @@
 
 ## 背景
 
-默认 `job-worker` 完全串行消费研究、交易方案、卖出建议和回测任务，且 Compose 不会创建 `research-worker` 容器。研究队列与运行产物本身已按 `run_id` 隔离，因此可以在不改研究语义的前提下，在管理员保存 `DUAL` 拓扑后用两个研究 Worker 同时推进不同研究任务。
+默认 `job-worker` 完全串行消费研究、交易方案和回测任务，独立 `exit-advice-worker` 消费卖出建议，且 Compose 不会创建 `research-worker` 容器。研究队列与运行产物本身已按 `run_id` 隔离，因此可以在不改研究语义的前提下，在管理员保存 `DUAL` 拓扑后用两个研究 Worker 同时推进不同研究任务。
 
 ## 本次变更
 

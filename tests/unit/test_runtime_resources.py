@@ -4,9 +4,21 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from redis.exceptions import ConnectionError as RedisConnectionError
+
 from ashare_ai.observability import runtime_resources
-from ashare_ai.observability.runtime_resources import MIB, cgroup_memory, sample_runtime_resources
-from ashare_ai.orchestration.worker_status import publish_heartbeat, read_heartbeats
+from ashare_ai.observability.runtime_resources import (
+    MIB,
+    cgroup_memory,
+    cgroup_memory_details,
+    sample_current_service,
+    sample_runtime_resources,
+)
+from ashare_ai.orchestration.worker_status import (
+    publish_heartbeat,
+    publish_service_heartbeat,
+    read_heartbeats,
+)
 
 
 def test_cgroup_memory_reads_v2_and_v1(tmp_path: Path) -> None:
@@ -21,6 +33,23 @@ def test_cgroup_memory_reads_v2_and_v1(tmp_path: Path) -> None:
     (v1 / "memory.usage_in_bytes").write_text("321", encoding="ascii")
     (v1 / "memory.limit_in_bytes").write_text("654", encoding="ascii")
     assert cgroup_memory((tmp_path / "v1",)) == (321, 654)
+
+
+def test_cgroup_working_set_excludes_inactive_file(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "v2"
+    root.mkdir()
+    (root / "memory.current").write_text("1000", encoding="ascii")
+    (root / "memory.max").write_text("2000", encoding="ascii")
+    (root / "memory.stat").write_text(
+        "anon 600\ninactive_file 250\nactive_file 100\n", encoding="ascii"
+    )
+    assert cgroup_memory_details((root,)) == (1000, 2000, 250)
+    monkeypatch.setattr(
+        runtime_resources, "cgroup_memory_details", lambda: (1000, 2000, 250)
+    )
+    service = sample_current_service(service_id="worker", role="job-worker")
+    assert service["memory_used_bytes"] == 750
+    assert service["memory_cache_bytes"] == 250
 
 
 def test_runtime_snapshot_estimates_dual_from_job_worker(monkeypatch) -> None:
@@ -54,6 +83,7 @@ def test_runtime_snapshot_estimates_dual_from_job_worker(monkeypatch) -> None:
             "role": "api",
             "healthy": True,
             "memory_used_bytes": 100 * MIB,
+            "memory_cache_bytes": 5 * MIB,
             "memory_limit_bytes": 320 * MIB,
             "cpu_percent": 1.0,
             "collected_at": "2026-07-26T00:00:00+00:00",
@@ -110,10 +140,38 @@ def test_worker_heartbeat_adds_resources_and_reads_legacy(monkeypatch) -> None:
     assert current["memory_used_bytes"] == 10
     assert current["memory_limit_bytes"] == 20
 
+    publish_service_heartbeat(client, role="exit-advice-worker")
+    lightweight = next(
+        row for row in read_heartbeats(client) if row["role"] == "exit-advice-worker"
+    )
+    assert lightweight["loaded_mode"] == "UNKNOWN"
+
     client.values["ashare:workers:legacy"] = json.dumps(
         {"worker_id": "legacy", "role": "job-worker", "healthy": True}
     )
     assert {row["worker_id"] for row in read_heartbeats(client)} == {
         "legacy",
         current["worker_id"],
+        lightweight["worker_id"],
     }
+
+
+def test_observability_redis_failure_does_not_escape(monkeypatch) -> None:
+    class UnavailableRedis:
+        def set(self, *_args: object, **_kwargs: object) -> None:
+            raise RedisConnectionError("unavailable")
+
+        def scan_iter(self, **_kwargs: object):
+            raise RedisConnectionError("unavailable")
+
+    monkeypatch.setattr(
+        "ashare_ai.orchestration.worker_status.sample_current_service",
+        lambda **_kwargs: {
+            "memory_used_bytes": 10,
+            "memory_limit_bytes": 20,
+            "cpu_percent": 3.0,
+        },
+    )
+    client = UnavailableRedis()
+    assert publish_service_heartbeat(client, role="exit-advice-worker")
+    assert read_heartbeats(client) == []

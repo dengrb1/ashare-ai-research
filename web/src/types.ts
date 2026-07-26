@@ -48,6 +48,7 @@ export interface SystemServiceResource {
   role: string
   healthy: boolean
   memory_used_bytes?: number | null
+  memory_cache_bytes?: number | null
   memory_limit_bytes?: number | null
   cpu_percent?: number | null
   collected_at?: string | null

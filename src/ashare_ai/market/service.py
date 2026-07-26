@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import secrets
+import subprocess
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -61,7 +64,7 @@ def _number(value: Any) -> float | None:
         result = float(value)
     except (TypeError, ValueError):
         return None
-    return result if result == result else None
+    return result if math.isfinite(result) else None
 
 
 def _timestamp(value: Any) -> datetime:
@@ -176,7 +179,7 @@ def _mark_kline_cache_hit(value: dict[str, Any]) -> dict[str, Any]:
     return {**value, "status": {**status, "cache_hit": True}}
 
 
-class AKShareMarketProvider:
+class _AKShareInProcessProvider:
     source = "akshare"
 
     def _sdk(self) -> Any:
@@ -252,6 +255,80 @@ class AKShareMarketProvider:
                 }
             )
         return bars
+
+
+class AKShareMarketProvider:
+    """Run AKShare outside the long-lived API process.
+
+    Importing AKShare pulls NumPy, Pandas and PyArrow into the process. A short
+    child keeps those heaps out of API and worker parents while preserving the
+    provider and fallback contract.
+    """
+
+    source = "akshare"
+
+    def __init__(self, *, timeout_seconds: float) -> None:
+        self.timeout_seconds = max(1.0, timeout_seconds - 0.5)
+
+    def _request(self, payload: dict[str, Any], *, maximum_items: int) -> list[dict[str, Any]]:
+        encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-m", "ashare_ai.market.akshare_worker"],
+                input=encoded,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=self.timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError("akshare provider timed out") from exc
+        if completed.returncode != 0:
+            raise RuntimeError("akshare provider process failed")
+        if len(completed.stdout.encode("utf-8")) > 8 * 1024 * 1024:
+            raise RuntimeError("akshare provider response is too large")
+        try:
+            response = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("akshare provider returned invalid JSON") from exc
+        if not isinstance(response, dict) or response.get("ok") is not True:
+            raise RuntimeError("akshare provider returned an error")
+        items = response.get("items")
+        if not isinstance(items, list) or len(items) > maximum_items:
+            raise RuntimeError("akshare provider returned invalid items")
+        if not all(isinstance(item, dict) for item in items):
+            raise RuntimeError("akshare provider returned invalid items")
+        return cast(list[dict[str, Any]], items)
+
+    def quotes(self, symbols: list[str]) -> list[dict[str, Any]]:
+        normalized = sorted({normalize_symbol(symbol) for symbol in symbols})
+        if len(normalized) > MAX_PREFETCH_SYMBOLS:
+            raise ValueError("too many quote symbols")
+        return self._request(
+            {"operation": "quotes", "symbols": normalized},
+            maximum_items=len(normalized),
+        )
+
+    def klines(
+        self,
+        symbol: str,
+        period: str,
+        start: datetime | None,
+        end: datetime | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        return self._request(
+            {
+                "operation": "klines",
+                "symbol": normalize_symbol(symbol),
+                "period": period,
+                "start": start.isoformat() if start is not None else None,
+                "end": end.isoformat() if end is not None else None,
+                "limit": limit,
+            },
+            maximum_items=limit,
+        )
 
 
 class SinaMarketProvider:
@@ -579,7 +656,9 @@ class MarketDataService:
         redis_client: Any = ...,
     ) -> None:
         self.settings = settings or get_settings()
-        self.primary = primary or AKShareMarketProvider()
+        self.primary = primary or AKShareMarketProvider(
+            timeout_seconds=self.settings.market_timeout_seconds
+        )
         if fallback is not None:
             self.fallbacks: tuple[MarketProvider, ...] = (fallback,)
         else:

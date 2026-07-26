@@ -214,6 +214,7 @@ class WorkerHealthResponse(BaseModel):
     topology_sha256: str | None = None
     last_heartbeat_at: datetime | None = None
     memory_used_bytes: int | None = Field(default=None, ge=0)
+    memory_cache_bytes: int | None = Field(default=None, ge=0)
     memory_limit_bytes: int | None = Field(default=None, ge=0)
     cpu_percent: float | None = Field(default=None, ge=0)
 
@@ -258,6 +259,7 @@ class ServiceResourceResponse(BaseModel):
     role: str
     healthy: bool
     memory_used_bytes: int | None = Field(default=None, ge=0)
+    memory_cache_bytes: int | None = Field(default=None, ge=0)
     memory_limit_bytes: int | None = Field(default=None, ge=0)
     cpu_percent: float | None = Field(default=None, ge=0)
     collected_at: datetime | None = None

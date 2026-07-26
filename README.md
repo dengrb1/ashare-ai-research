@@ -136,7 +136,7 @@ docker compose -p ashare-ai-src -f compose.yaml up -d --build
 
 默认 Compose 面向小型主机，建议至少 2GB 内存：包含 Nginx WebGUI、API、单一串行 `job-worker`、独立低并发 `exit-advice-worker`、
 PostgreSQL、Redis 和仅在 Compose 私有网络内可访问的 SearXNG，并为服务设置内存/PID/日志上限。`job-worker` 同时承担收盘后调度，按
-Research、Trade Plan、Backtest 等 Redis 租约队列逐个取任务；退出研究由独立 Worker 消费，避免与普通重任务争抢队列。每个普通重任务在隔离子进程中
+Research、Trade Plan、Backtest 等 Redis 租约队列逐个取任务；退出研究由独立 Worker 消费，避免与普通重任务争抢队列。周期清理、退出研究和普通重任务均在隔离子进程中
 执行，结束后释放 Pandas/PyArrow 等科学计算堆，避免多个 Worker 并发触发 OOM。WebGUI 由
 Nginx 提供静态文件并把 `/api` 反向代理到 FastAPI；本地浏览器访问 `http://localhost`。
 PostgreSQL、Redis 和 API 默认仅绑定 `127.0.0.1`，Redis 强制密码认证。

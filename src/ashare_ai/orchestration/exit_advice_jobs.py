@@ -6,7 +6,6 @@ from datetime import UTC, datetime, time
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from typing import Any, Literal
 
-import redis
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -22,11 +21,16 @@ from ashare_ai.core.hashing import canonical_json, sha256_bytes, stable_hash
 from ashare_ai.core.time import SHANGHAI
 from ashare_ai.market.service import get_market_data_service
 from ashare_ai.notifications.service import NotificationService
+from ashare_ai.orchestration.exit_advice_queue import (
+    build_exit_advice_queue,
+)
+from ashare_ai.orchestration.exit_advice_queue import (
+    enqueue_exit_advice as _enqueue_exit_advice,
+)
 from ashare_ai.orchestration.operation_runs import (
     create_operation_run,
     transition_operation_run,
 )
-from ashare_ai.orchestration.redis_queue import RedisLeasedQueue
 from ashare_ai.orchestration.research_schedule import FreeExchangeCalendar
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import (
@@ -41,9 +45,12 @@ from ashare_ai.storage.models import (
 from ashare_ai.trading.rules import RuleContext, TradingRuleRepository
 from ashare_ai.trading.sellability import position_sellability
 
-QUEUE_NAME = "ashare:exit-advice:pending"
-PROCESSING_QUEUE_NAME = "ashare:exit-advice:processing"
 PROMPT_VERSION = "exit-advice-v1"
+
+
+def enqueue_exit_advice(advice_id: str, redis_url: str | None = None) -> None:
+    """Compatibility export for existing API and monitoring callers."""
+    _enqueue_exit_advice(advice_id, redis_url)
 
 
 class ExitLadderItem(BaseModel):
@@ -69,16 +76,6 @@ class ExitAdviceRequestError(ValueError):
     def __init__(self, message: str, *, code: str) -> None:
         super().__init__(message)
         self.code = code
-
-
-def enqueue_exit_advice(advice_id: str, redis_url: str | None = None) -> None:
-    client = redis.Redis.from_url(redis_url or get_settings().redis_url, decode_responses=True)
-    RedisLeasedQueue(
-        client,
-        pending=QUEUE_NAME,
-        processing=PROCESSING_QUEUE_NAME,
-        lease_seconds=get_settings().worker_lease_seconds,
-    ).enqueue(advice_id)
 
 
 def request_manual_exit_advice(
@@ -878,11 +875,8 @@ def _record_exit_failure(
 
 
 def consume_exit_advice_queue() -> None:
+    import redis
+
     client = redis.Redis.from_url(get_settings().redis_url, decode_responses=True)
-    queue = RedisLeasedQueue(
-        client,
-        pending=QUEUE_NAME,
-        processing=PROCESSING_QUEUE_NAME,
-        lease_seconds=get_settings().worker_lease_seconds,
-    )
+    queue = build_exit_advice_queue(client)
     queue.consume_forever(run_exit_advice_job)

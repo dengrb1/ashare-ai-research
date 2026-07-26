@@ -25,6 +25,7 @@ def test_dual_job_worker_does_not_build_a_research_consumer() -> None:
 
 def test_serial_worker_promotes_due_delayed_jobs_before_claiming(monkeypatch) -> None:
     events: list[str] = []
+    isolated: list[tuple[str, str]] = []
 
     class Queue:
         def promote_due(self) -> list[str]:
@@ -59,16 +60,9 @@ def test_serial_worker_promotes_due_delayed_jobs_before_claiming(monkeypatch) ->
     monkeypatch.setattr(serial_worker, "SessionLocal", lambda: Session())
     monkeypatch.setattr(
         serial_worker,
-        "AttachmentService",
-        lambda _session: SimpleNamespace(cleanup_expired=lambda: 0),
+        "execute_isolated",
+        lambda kind, job_id: isolated.append((kind, job_id)) or 0,
     )
-    monkeypatch.setattr(
-        serial_worker,
-        "NotificationService",
-        lambda _session: SimpleNamespace(cleanup_expired=lambda: 0),
-    )
-    monkeypatch.setattr(serial_worker, "cleanup_expired_archives", lambda: 0)
-    monkeypatch.setattr(serial_worker, "execute_isolated", lambda *_args: 0)
 
     import redis
 
@@ -77,3 +71,4 @@ def test_serial_worker_promotes_due_delayed_jobs_before_claiming(monkeypatch) ->
     serial_worker.run_loop(max_iterations=1)
 
     assert events == ["promote_due", "requeue_expired", "claim"]
+    assert isolated == [("maintenance", "tick"), ("schedule", "tick")]

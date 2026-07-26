@@ -182,7 +182,7 @@ docker ps -a
 
 ## 9. 默认 Worker 与并行扩展
 
-默认 `job-worker` 串行处理研究、交易方案、卖出建议和回测，适合小内存服务器。此时 `research-worker` 属于未启用的 `dual-research` profile，不会创建容器。通过系统设置保存 `DUAL`，确认没有活动研究或回测后，再执行页面返回的命令（或等效命令）：
+默认 `job-worker` 串行处理研究、交易方案和回测，独立的 `exit-advice-worker` 处理卖出建议，避免被长任务阻塞。重任务、退出建议和周期清理都在短生命周期子进程中执行，父进程不会保留其科学计算堆。此时 `research-worker` 属于未启用的 `dual-research` profile，不会创建容器。通过系统设置保存 `DUAL`，确认没有活动研究或回测后，再执行页面返回的命令（或等效命令）：
 
 ```bash
 docker compose -p ashare-ai-src -f compose.yaml --profile dual-research \
