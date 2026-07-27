@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { api } from '../api'
+import { MarketClosedNotice } from '../components/MarketClosedNotice'
 import { Empty, ErrorNotice, formatTime, Panel, StatusPill } from '../components/Ui'
 import type { FinancialSearchResult, FinancialSearchStatus } from '../types'
 
@@ -42,6 +43,7 @@ export function FinancialSearchPage() {
     </Panel>
 
     <Panel title="搜索结果" eyebrow="LIVE SEARCH RESULT">
+      <MarketClosedNotice />
       {result ? <div className="search-results">
         <div className="search-result-meta"><div><span>Provider</span><strong>{result.provider}</strong></div><div><span>实际数据源</span><strong>{result.upstream}</strong></div><div><span>模式</span><strong>{result.mode}</strong></div><div><span>搜索时间</span><strong>{formatTime(result.searched_at)}</strong></div><div><span>耗时</span><strong>{result.elapsed_ms} ms</strong></div></div>
         {result.entities.length > 0 && <div className="search-entities">{result.entities.map((entity, index) => <span key={`${entity.code}-${index}`}>{entity.name} · {entity.code}</span>)}</div>}

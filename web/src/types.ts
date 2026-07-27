@@ -1,5 +1,85 @@
 export type Role = 'admin' | 'researcher' | 'user'
 
+export type ResearchExecutionMode = 'SERIAL' | 'DUAL'
+
+export interface WorkerHealth {
+  worker_id: string
+  role: string
+  healthy: boolean
+  loaded_mode: ResearchExecutionMode | 'UNKNOWN'
+  topology_sha256?: string | null
+  last_heartbeat_at?: string | null
+}
+
+export interface QueueSummary {
+  pending: number
+  processing: number
+}
+
+export interface SystemSettings {
+  configuration_id: string | null
+  version: number
+  config_sha256: string
+  source: 'database' | 'environment'
+  values: Record<string, string | number | boolean | null>
+  sources: Record<string, 'database' | 'environment'>
+  secret_configured: Record<string, boolean>
+  secret_sources: Record<string, 'database' | 'environment'>
+  read_only_environment: Record<string, string | number | boolean | null>
+  topology_sha256: string
+  actual_loaded_mode: ResearchExecutionMode | 'UNKNOWN'
+  restart_required: boolean
+  workers: WorkerHealth[]
+  queues: Record<string, QueueSummary>
+  compose_restart_command: string
+}
+
+export type SystemSettingsDraft = Partial<Record<string, string | number | boolean | null>>
+
+export interface SystemResourceUsage {
+  total_bytes: number
+  used_bytes: number
+  available_bytes: number
+  percent: number
+}
+
+export interface SystemServiceResource {
+  service_id: string
+  role: string
+  healthy: boolean
+  memory_used_bytes?: number | null
+  memory_cache_bytes?: number | null
+  memory_limit_bytes?: number | null
+  cpu_percent?: number | null
+  collected_at?: string | null
+}
+
+export interface SystemResources {
+  collected_at: string
+  scope: 'HOST' | 'CONTAINER'
+  scope_label: string
+  memory: SystemResourceUsage
+  cpu: { percent: number; logical_cores: number }
+  disk: SystemResourceUsage
+  services: SystemServiceResource[]
+  topology_estimate: {
+    worker_replicas: number
+    typical_per_worker_bytes: number
+    typical_increment_bytes: number
+    maximum_increment_bytes: number
+    projected_available_bytes: number
+    level: 'NORMAL' | 'WARNING' | 'CRITICAL'
+    messages: string[]
+  }
+  level: 'NORMAL' | 'WARNING' | 'CRITICAL'
+  warnings: string[]
+}
+
+export interface SystemSettingsUnlock {
+  unlock_token: string
+  expires_at: string
+}
+
 export interface User {
   id?: string
   user_id?: string
@@ -49,6 +129,9 @@ export interface PaperPosition {
   acquired_on?: string | null
   profit_trigger_amount?: number | string | null
   exit_trigger_price?: number | string | null
+  stop_loss_price?: number | string | null
+  stop_loss_mode?: 'AUTO_ATR20' | 'MANUAL' | 'FALLBACK_8PCT'
+  stop_loss_enabled?: boolean
 }
 
 export interface AssetState {
@@ -57,11 +140,15 @@ export interface AssetState {
   total_assets?: number | null
   exit_monitor_enabled?: boolean
   default_profit_trigger?: number | string | null
+  stop_loss_monitor_enabled?: boolean
+  buy_monitor_enabled?: boolean
+  market_refresh_interval_seconds?: 15 | 30 | 60 | 120
   updated_at?: string | null
 }
 
 export interface ExitAdvice {
   advice_id: string
+  operation_run_id?: string | null
   symbol: string
   status: string
   action?: 'HOLD' | 'REDUCE' | 'SELL' | null
@@ -70,7 +157,7 @@ export interface ExitAdvice {
   current_price: number | string
   unrealized_profit: number | string
   trigger_amount: number | string
-  trigger_type?: 'PRICE' | 'PROFIT_AMOUNT'
+  trigger_type?: 'PRICE' | 'PROFIT_AMOUNT' | 'MANUAL' | 'STOP_LOSS'
   trigger_price?: number | string | null
   position_snapshot: Record<string, unknown>
   research_context: Record<string, unknown>
@@ -81,6 +168,7 @@ export interface ExitAdvice {
   created_at: string
   completed_at?: string | null
   error_message?: string | null
+  status_url?: string | null
 }
 
 export interface AIChatThread {
@@ -114,10 +202,55 @@ export interface AIChatMessage {
   sources: Array<Record<string, unknown>>
   cache_hit: boolean
   input_tokens: number
+  cached_input_tokens?: number
+  cache_write_tokens?: number
   output_tokens: number
+  reasoning_tokens?: number
+  cache_policy?: 'GROK' | 'OPENAI' | 'COMPATIBLE'
+  context_budget_status?: 'WITHIN_BUDGET' | 'HISTORY_TRIMMED' | 'CONTEXT_TOO_LARGE'
   error_code?: string | null
   request_id?: string | null
+  streaming_mode?: 'STREAMING' | 'DEGRADED' | 'CACHED'
+  data_status?: Record<string, unknown>
+  response_id?: string | null
   created_at: string
+}
+
+export interface Notification {
+  notification_id: string
+  notification_type: string
+  severity: 'INFO' | 'WARNING' | 'HIGH' | 'CRITICAL'
+  title: string
+  body: string
+  resource_type?: string | null
+  resource_id?: string | null
+  payload: Record<string, unknown>
+  read_at?: string | null
+  created_at: string
+  expires_at: string
+}
+
+export interface NotificationSummary {
+  unread_count: number
+  high_risk_unread_count: number
+  latest: Notification[]
+}
+
+export interface BuyEntryMonitor {
+  monitor_id: string
+  symbol: string
+  status: string
+  effective_date: string
+  expires_at: string
+  entry_low: number | string
+  entry_high: number | string
+  score_run_id?: string | null
+  trade_plan_id?: string | null
+  rationale: Record<string, unknown>
+  triggered_at?: string | null
+  error_code?: string | null
+  created_at: string
+  updated_at: string
 }
 
 export interface AIChatAttachment {
@@ -156,6 +289,21 @@ export interface MarketDataStatus {
   delayed: boolean
   stale?: boolean
   message?: string | null
+}
+
+export type MarketSessionState = 'OPEN' | 'PRE_OPEN' | 'BREAK' | 'CLOSED' | 'UNKNOWN'
+
+export interface MarketSessionStatus {
+  state: MarketSessionState
+  as_of: string
+  trading_date: string
+  is_trading_day: boolean | null
+  reason: 'TRADING_SESSION' | 'BEFORE_OPEN' | 'MIDDAY_BREAK' | 'AFTER_CLOSE' | 'NON_TRADING_DAY' | 'CALENDAR_UNAVAILABLE'
+}
+
+export interface MarketServiceStatus {
+  market_session?: MarketSessionStatus
+  [key: string]: unknown
 }
 
 export interface Snapshot {
@@ -211,6 +359,7 @@ export interface ModelSettings {
   search_reasoning_effort: string
   research_model: string
   research_reasoning_effort: string
+  model_profiles: ModelProfile[]
   timeout_seconds: number
   enabled: boolean
   configured: boolean
@@ -227,8 +376,41 @@ export interface ModelSettingsDraft {
   search_reasoning_effort: string
   research_model: string
   research_reasoning_effort: string
+  model_profiles: ModelProfile[]
   timeout_seconds: number
   enabled: boolean
+}
+
+export interface ModelProfile {
+  model: string
+  cache_policy: 'GROK' | 'OPENAI' | 'COMPATIBLE'
+  context_window_tokens: number
+  output_token_reserve: number
+  reasoning_token_reserve: number
+  input_price_per_million: number | string
+  cached_input_price_per_million: number | string
+  cache_write_price_per_million: number | string
+  output_price_per_million: number | string
+}
+
+export interface AICostValue {
+  requests: number
+  cache_hits: number
+  input_tokens: number
+  cached_input_tokens: number
+  cache_write_tokens: number
+  uncached_input_tokens: number
+  output_tokens: number
+  estimated_spend_usd: number | string
+  estimated_savings_usd: number | string
+}
+
+export interface AICostSummary {
+  days: number
+  items: Array<AICostValue & { bucket_date: string }>
+  next_cursor?: string | null
+  totals: AICostValue
+  current_turn?: Omit<AICostValue, 'cache_hits'> & { cache_hit: boolean } | null
 }
 
 export interface KlineBar {
@@ -330,6 +512,19 @@ export interface Run {
   next_retry_at?: string | null
 }
 
+export interface RunActivity extends Run {
+  resource_type: 'RESEARCH' | 'BACKTEST' | 'TRADE_PLAN' | 'EXIT_ADVICE'
+  resource_id?: string | null
+  resource_url?: string | null
+  title?: string | null
+  symbol?: string | null
+}
+
+export interface RunActivityResponse {
+  items: RunActivity[]
+  next_cursor?: string | null
+}
+
 export type ResearchScope = 'MARKET' | 'WATCHLIST' | 'CUSTOM'
 
 export interface ResearchSubmission {
@@ -383,12 +578,14 @@ export interface Score {
 
 export interface Candidate {
   symbol: string
+  name?: string | null
   rank: number
   total_score: number
   base_total_score?: number | null
   dividend_bonus?: number
   prediction_percentile?: number
   industry_code?: string
+  industry_name?: string | null
   event_risk_multiplier?: number
 }
 
@@ -404,8 +601,22 @@ export interface ReportSymbol {
   rank?: number | null
   prediction_percentile?: number | null
   industry_code?: string | null
+  industry_name?: string | null
   plain_language_summary?: string | null
   component_summaries?: Record<string, string>
+}
+
+export interface ReportExecutionStatus {
+  report_id: string
+  as_of: string
+  items: Array<{
+    symbol: string
+    held_quantity: number
+    acquired_on?: string | null
+    sellable_quantity: number
+    t1_restricted: boolean
+    blockers: string[]
+  }>
 }
 
 export interface Portfolio {
@@ -452,6 +663,7 @@ export interface TradePlan {
   user_id: string
   report_id: string
   run_id: string
+  operation_run_id?: string | null
   trading_date: string
   decision_at: string
   available_at: string

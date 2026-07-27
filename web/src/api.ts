@@ -1,4 +1,4 @@
-import type { AIChatAttachment, AIChatMessage, AIChatThread, AssetState, AuditEvent, Candidate, DataEnvelope, ExitAdvice, FinancialSearchResult, FinancialSearchStatus, KlineBar, KlineQueryOptions, MarketPrefetchResponse, ModelSettings, ModelSettingsDraft, PersonalArchiveJob, Portfolio, Quote, Report, ReportSymbol, ResearchSettings, ResearchSubmission, Run, Score, Snapshot, TokenPair, TradePlan, User } from './types'
+import type { AIChatAttachment, AIChatMessage, AIChatThread, AICostSummary, AssetState, AuditEvent, BuyEntryMonitor, Candidate, DataEnvelope, ExitAdvice, FinancialSearchResult, FinancialSearchStatus, KlineBar, KlineQueryOptions, MarketPrefetchResponse, MarketServiceStatus, ModelSettings, ModelSettingsDraft, Notification, NotificationSummary, PersonalArchiveJob, Portfolio, Quote, Report, ReportExecutionStatus, ReportSymbol, ResearchSettings, ResearchSubmission, Run, RunActivityResponse, Score, Snapshot, SystemResources, SystemSettings, SystemSettingsDraft, SystemSettingsUnlock, TokenPair, TradePlan, User } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api/v1').replace(/\/$/, '')
 
@@ -56,6 +56,25 @@ function params(values: Record<string, string | number | undefined>) {
   return encoded ? `?${encoded}` : ''
 }
 
+type RawQuote = Quote & {
+  change_percent?: number
+  previous_close?: number
+}
+
+function normalizeQuote(row: RawQuote): Quote {
+  return {
+    ...row,
+    price: row.price ?? 0,
+    change_pct: row.change_pct ?? row.change_percent ?? 0,
+    prev_close: row.prev_close ?? row.previous_close,
+    source: row.source || row.status?.source,
+    collected_at: row.collected_at || row.status?.collected_at,
+    cached_at: row.cached_at || row.status?.cached_at,
+    delayed: row.delayed ?? row.status?.delayed,
+    is_delayed: row.is_delayed ?? row.status?.delayed,
+  }
+}
+
 export const api = {
   login: (username: string, password: string) => request<User>('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
   token: (username: string, password: string) => request<TokenPair>('/auth/token', { method: 'POST', body: JSON.stringify({ username, password }) }),
@@ -65,8 +84,18 @@ export const api = {
   me: () => request<User>('/auth/me'),
   assets: () => request<AssetState>('/assets'),
   saveAssets: (payload: AssetState) => request<AssetState>('/assets', { method: 'PUT', body: JSON.stringify(payload) }),
+  saveExitMonitorSettings: (payload: Pick<AssetState, 'exit_monitor_enabled' | 'default_profit_trigger' | 'stop_loss_monitor_enabled' | 'buy_monitor_enabled'>, idempotencyKey = crypto.randomUUID()) => request<AssetState>('/assets/exit-monitor', { method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify(payload) }),
+  saveMarketRefreshSettings: (marketRefreshIntervalSeconds: 15 | 30 | 60 | 120, idempotencyKey = crypto.randomUUID()) => request<AssetState>('/assets/market-refresh', { method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ market_refresh_interval_seconds: marketRefreshIntervalSeconds }) }),
   exitAdvice: (limit = 30) => request<ExitAdvice[]>(`/exit-advice${params({ limit })}`),
+  submitManualExitAdvice: (symbol: string, idempotencyKey = crypto.randomUUID()) => request<ExitAdvice>('/exit-advice/manual', { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ symbol }) }),
+  buyEntryMonitors: (limit = 50) => request<BuyEntryMonitor[]>(`/buy-entry-monitors${params({ limit })}`),
+  updateBuyEntryMonitor: (symbol: string, enabled: boolean, idempotencyKey = crypto.randomUUID()) => request<BuyEntryMonitor[]>('/buy-entry-monitors', { method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ symbol, enabled }) }),
+  notificationSummary: () => request<NotificationSummary>('/notifications/summary'),
+  notifications: (options: { cursor?: string; unreadOnly?: boolean; limit?: number } = {}) => request<{ items: Notification[]; next_cursor?: string | null }>(`/notifications${params({ cursor: options.cursor, unread_only: options.unreadOnly ? 'true' : undefined, limit: options.limit })}`),
+  markNotificationsRead: (notificationIds: string[], idempotencyKey = crypto.randomUUID()) => request<NotificationSummary>('/notifications/read', { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ notification_ids: notificationIds }) }),
+  markAllNotificationsRead: (idempotencyKey = crypto.randomUUID()) => request<NotificationSummary>('/notifications/read-all', { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey } }),
   aiModels: () => request<{ models: string[]; reasoning_efforts: string[]; web_search_available: boolean; cache_enabled: boolean }>('/ai/models'),
+  aiCostSummary: (options: { days?: number; limit?: number; before?: string; threadId?: string } = {}) => request<AICostSummary>(`/ai/costs${params({ days: options.days, limit: options.limit, before: options.before, thread_id: options.threadId })}`),
   aiChatThreads: () => request<AIChatThread[]>('/ai/chat/threads'),
   aiChatThreadIndex: (options: { cursor?: string; q?: string; archived?: boolean; limit?: number } = {}) => request<{ items: AIChatThread[]; next_cursor?: string | null }>(`/ai/chat/thread-index${params({ cursor: options.cursor, q: options.q, archived: options.archived ? 'true' : undefined, limit: options.limit })}`),
   createAIChatThread: (title = '新对话') => request<AIChatThread>('/ai/chat/threads', { method: 'POST', body: JSON.stringify({ title }) }),
@@ -90,19 +119,10 @@ export const api = {
   personalImport: (archiveId: string) => request<PersonalArchiveJob>(`/me/data-imports/${encodeURIComponent(archiveId)}`),
   applyPersonalImport: (archiveId: string, mergeOptions: Record<string, unknown>, idempotencyKey: string) => request<PersonalArchiveJob>(`/me/data-imports/${encodeURIComponent(archiveId)}/apply`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ merge_options: mergeOptions }) }),
 
+  quote: async (symbol: string, refresh = false) => normalizeQuote(await request<RawQuote>(`/market/quotes/${encodeURIComponent(symbol)}${params({ refresh: refresh ? 'true' : undefined })}`)),
   quotes: async (symbols: string[], refresh = false) => {
-    const rows = await request<Array<Quote & { change_percent?: number; previous_close?: number }>>(`/market/quotes${params({ symbols: symbols.join(','), refresh: refresh ? 'true' : undefined })}`)
-    return rows.map((row) => ({
-      ...row,
-      price: row.price ?? 0,
-      change_pct: row.change_pct ?? row.change_percent ?? 0,
-      prev_close: row.prev_close ?? row.previous_close,
-      source: row.source || row.status?.source,
-      collected_at: row.collected_at || row.status?.collected_at,
-      cached_at: row.cached_at || row.status?.cached_at,
-      delayed: row.delayed ?? row.status?.delayed,
-      is_delayed: row.is_delayed ?? row.status?.delayed,
-    })) as Quote[]
+    const rows = await request<RawQuote[]>(`/market/quotes${params({ symbols: symbols.join(','), refresh: refresh ? 'true' : undefined })}`)
+    return rows.map(normalizeQuote)
   },
   kline: async (symbol: string, period: string, limit = 160, options: KlineQueryOptions | boolean = {}) => {
     const query = typeof options === 'boolean' ? { refresh: options } : options
@@ -116,29 +136,20 @@ export const api = {
     })}`)
     return { ...payload, bars: (payload.bars || []).map((bar) => ({ ...bar, time: bar.time || bar.timestamp })) }
   },
-  prefetchMarket: async (symbols: string[], periods = ['day'], limit = 160) => {
+  prefetchMarket: async (symbols: string[], periods = ['day'], limit = 160, includeQuotes = true) => {
     const payload = await request<MarketPrefetchResponse>('/market/prefetch', {
       method: 'POST',
-      body: JSON.stringify({ symbols, periods, limit }),
+      body: JSON.stringify({ symbols, periods, limit, include_quotes: includeQuotes }),
     })
     if (!payload || Array.isArray(payload)) return { quotes: [], klines: {}, errors: {} } as MarketPrefetchResponse
     return {
       ...payload,
-      quotes: (payload.quotes || []).map((row) => ({
-        ...row,
-        price: row.price ?? 0,
-        change_pct: row.change_pct ?? (row as Quote & { change_percent?: number }).change_percent ?? 0,
-        prev_close: row.prev_close ?? (row as Quote & { previous_close?: number }).previous_close,
-        source: row.source || row.status?.source,
-        collected_at: row.collected_at || row.status?.collected_at,
-        cached_at: row.cached_at || row.status?.cached_at,
-        delayed: row.delayed ?? row.status?.delayed,
-      })),
+      quotes: (payload.quotes || []).map((row) => normalizeQuote(row as RawQuote)),
       klines: payload.klines || {},
       errors: payload.errors || {},
     }
   },
-  marketStatus: () => request<Record<string, unknown>>('/market/status'),
+  marketStatus: () => request<MarketServiceStatus>('/market/status'),
   financialSearch: (query: string) => request<FinancialSearchResult>(`/search/financial${params({ q: query })}`),
   financialSearchStatus: () => request<FinancialSearchStatus>('/search/status'),
 
@@ -150,8 +161,9 @@ export const api = {
   report: (date: string, runId?: string) => request<Report>(`/reports/${date}${params({ run_id: runId })}`),
   reportContent: (reportId: string) => request<{ content?: string; body?: string }>(`/reports/${reportId}/content`),
   reportSymbols: (reportId: string) => request<ReportSymbol[]>(`/reports/${reportId}/symbols`),
+  reportExecutionStatus: (reportId: string) => request<ReportExecutionStatus>(`/reports/${reportId}/execution-status`),
   reportTradePlans: (reportId: string) => request<TradePlan[]>(`/reports/${reportId}/trade-plans`),
-  submitTradePlan: (reportId: string, payload: { symbols: string[]; budget_override?: number; objective?: 'RISK_ADJUSTED_RETURN' }) => request<TradePlan>(`/reports/${reportId}/trade-plans`, { method: 'POST', body: JSON.stringify(payload) }),
+  submitTradePlan: (reportId: string, payload: { symbols: string[]; budget_override?: number; objective?: 'RISK_ADJUSTED_RETURN' }, idempotencyKey = crypto.randomUUID()) => request<TradePlan>(`/reports/${reportId}/trade-plans`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify(payload) }),
   tradePlan: (planId: string) => request<TradePlan>(`/trade-plans/${planId}`),
 
   submitResearch: (payload: string | ResearchSubmission) => request<Run>('/research/runs', { method: 'POST', body: JSON.stringify(typeof payload === 'string' ? { trading_date: payload } : payload) }),
@@ -160,6 +172,7 @@ export const api = {
   researchRuns: (limit = 5, tradingDate?: string, published = false) => request<Run[]>(`/research/runs${params({ limit, trading_date: tradingDate, mine: 'true', published: published ? 'true' : undefined })}`),
   cancelResearch: (runId: string) => request<Run>(`/research/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' }),
   runs: () => request<Run[] | { items: Run[] }>('/runs'),
+  runActivity: (options: { cursor?: string; type?: string; status?: string; limit?: number } = {}) => request<RunActivityResponse>(`/runs/activity${params({ cursor: options.cursor, type: options.type, status: options.status, limit: options.limit })}`),
   run: (runId: string) => request<Run>(`/runs/${runId}`),
   audit: (runId: string) => request<AuditEvent[]>(`/runs/${runId}/audit`),
   submitBacktest: (payload: { name: string; start_date: string; end_date: string; snapshot_ids: string[]; config: Record<string, unknown> }) => request<Run>('/backtests', { method: 'POST', body: JSON.stringify(payload) }),
@@ -176,6 +189,12 @@ export const api = {
   testModelSettings: (payload: ModelSettingsDraft) => request<{ reachable: boolean; message: string; model: string; checked_at: string }>('/admin/model-settings/test', { method: 'POST', body: JSON.stringify(payload) }),
   saveModelSettings: (payload: ModelSettingsDraft) => request<ModelSettings>('/admin/model-settings', { method: 'PUT', body: JSON.stringify(payload) }),
   listModels: (payload: ModelSettingsDraft) => request<{ models: string[] }>('/admin/model-settings/models', { method: 'POST', body: JSON.stringify(payload) }),
+  systemSettings: () => request<SystemSettings>('/admin/system-settings'),
+  systemResources: () => request<SystemResources>('/admin/system-resources'),
+  unlockSystemSettings: (password: string) => request<SystemSettingsUnlock>('/admin/system-settings/unlock', { method: 'POST', body: JSON.stringify({ password }) }),
+  saveSystemSettings: (payload: SystemSettingsDraft, unlockToken: string, idempotencyKey: string = crypto.randomUUID()) => request<SystemSettings>('/admin/system-settings', { method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey, 'X-System-Settings-Unlock': unlockToken }, body: JSON.stringify(payload) }),
+  restoreSystemSetting: (field: string, unlockToken: string) => request<SystemSettings>(`/admin/system-settings/${encodeURIComponent(field)}`, { method: 'DELETE', headers: { 'X-System-Settings-Unlock': unlockToken } }),
+  restoreAllSystemSettings: (unlockToken: string) => request<SystemSettings>('/admin/system-settings', { method: 'DELETE', headers: { 'X-System-Settings-Unlock': unlockToken } }),
 }
 
 export async function streamAIChat(

@@ -2,10 +2,12 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../api'
 import { CandlestickChart } from '../components/CandlestickChart'
+import { MarketClosedNotice } from '../components/MarketClosedNotice'
 import { Empty, ErrorNotice, formatNumber, formatTime, Loading, Panel, StatusPill, today } from '../components/Ui'
+import { useMarket, useQuoteSubscription } from '../context/MarketContext'
 import { usePageRefresh } from '../context/RefreshContext'
 import { getKlineRangePlan, KLINE_PERIODS, KLINE_RANGES, trimBarsToRange } from '../marketKlines'
-import type { Candidate, KlineBar, KlineRange, MarketDataStatus, Quote, Report, ReportSymbol, Run, Score, TradePlan } from '../types'
+import type { Candidate, KlineBar, KlineRange, MarketDataStatus, Report, ReportExecutionStatus, ReportSymbol, Run, Score, TradePlan } from '../types'
 import { resolvePublishedResearchRun } from '../researchRuns'
 
 function displayReportHtml(content: string) {
@@ -36,6 +38,8 @@ function labelCode(value: unknown) {
 }
 
 const PLAN_ACTIVE = new Set(['PENDING', 'QUEUED', 'RUNNING', 'PROCESSING'])
+const DAILY_MARKET_REFRESH_MS = 5 * 60 * 1000
+const INTRADAY_MARKET_REFRESH_MS = 30 * 1000
 
 const REASON_LABELS: Record<string, string> = {
   CRITICAL_EVENT_RISK: '重大事件风险，禁止买入',
@@ -67,48 +71,55 @@ function fallbackReportSymbol(candidate: Candidate): ReportSymbol {
     rank: candidate.rank,
     prediction_percentile: candidate.prediction_percentile,
     industry_code: candidate.industry_code,
+    industry_name: candidate.industry_name,
   }
 }
 
 export function ReportsPage() {
+  const { quotes, loadKline } = useMarket()
   const [searchParams, setSearchParams] = useSearchParams()
   const [date, setDate] = useState(searchParams.get('date') || today())
   const requestedDate = searchParams.get('date') || undefined
   const requestedRunId = searchParams.get('run_id') || undefined
+  const requestedSymbol = /^\d{6}\.(SH|SZ|BJ)$/.test((searchParams.get('symbol') || '').toUpperCase())
+    ? (searchParams.get('symbol') || '').toUpperCase() : undefined
   const [report, setReport] = useState<Report | null>(null)
   const [content, setContent] = useState('')
   const [run, setRun] = useState<Run | null>(null)
   const [candidates, setCandidates] = useState<Candidate[]>([])
   const [reportSymbols, setReportSymbols] = useState<ReportSymbol[]>([])
+  const [executionStatus, setExecutionStatus] = useState<ReportExecutionStatus | null>(null)
   const [symbol, setSymbol] = useState('')
   const [tradePlans, setTradePlans] = useState<TradePlan[]>([])
   const [score, setScore] = useState<Score | null>(null)
   const [lineage, setLineage] = useState<Record<string, unknown> | null>(null)
-  const [quote, setQuote] = useState<Quote | null>(null)
   const [bars, setBars] = useState<KlineBar[]>([])
   const [marketStatus, setMarketStatus] = useState<MarketDataStatus | null>(null)
   const [period, setPeriod] = useState('day')
   const [range, setRange] = useState<KlineRange>('1m')
+  const [marketClock, setMarketClock] = useState(() => Date.now())
   const [loading, setLoading] = useState(true)
   const [marketLoading, setMarketLoading] = useState(false)
   const [planSubmitting, setPlanSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [marketError, setMarketError] = useState('')
+  const quote = quotes[symbol] || null
+  useQuoteSubscription(symbol ? [symbol] : [])
 
   const load = useCallback(async () => {
     setLoading(true); setError(''); setContent('')
     try {
       const selected = await resolvePublishedResearchRun(requestedDate, requestedRunId)
       if (!selected?.trading_date) {
-        setReport(null); setRun(null); setCandidates([]); setReportSymbols([]); setTradePlans([])
+        setReport(null); setRun(null); setCandidates([]); setReportSymbols([]); setTradePlans([]); setExecutionStatus(null)
         return
       }
       setDate(selected.trading_date)
       setRun(selected)
       const row = await api.report(selected.trading_date, selected.run_id)
       setReport(row)
-      const [symbolsResult, candidatesResult, plansResult] = await Promise.allSettled([
-        api.reportSymbols(row.report_id), api.candidates(selected.trading_date, row.run_id), api.reportTradePlans(row.report_id),
+      const [symbolsResult, candidatesResult, plansResult, executionResult] = await Promise.allSettled([
+        api.reportSymbols(row.report_id), api.candidates(selected.trading_date, row.run_id), api.reportTradePlans(row.report_id), api.reportExecutionStatus(row.report_id),
       ])
       const formal = candidatesResult.status === 'fulfilled'
         ? candidatesResult.value.filter((item) => (item.event_risk_multiplier ?? 1) > 0).sort((left, right) => left.rank - right.rank) : []
@@ -117,49 +128,80 @@ export function ReportsPage() {
         : (candidatesResult.status === 'fulfilled' ? candidatesResult.value.map(fallbackReportSymbol) : [])
       setCandidates(formal)
       setReportSymbols(allSymbols)
-      setSymbol((current) => allSymbols.some((item) => item.symbol === current) ? current : allSymbols[0]?.symbol || '')
+      setSymbol((current) => {
+        if (requestedSymbol && allSymbols.some((item) => item.symbol === requestedSymbol)) return requestedSymbol
+        return allSymbols.some((item) => item.symbol === current) ? current : allSymbols[0]?.symbol || ''
+      })
       setTradePlans(plansResult.status === 'fulfilled' ? plansResult.value : [])
+      setExecutionStatus(executionResult.status === 'fulfilled' ? executionResult.value : null)
       if (row.content || row.body) setContent(row.content || row.body || '')
       else {
         try { const detail = await api.reportContent(row.report_id); setContent(detail.content || detail.body || '') }
         catch { setContent('报告正文存储于对象存储，可通过审计记录核验内容哈希。') }
       }
     } catch (reason) {
-      setReport(null); setRun(null); setCandidates([]); setReportSymbols([]); setTradePlans([])
+      setReport(null); setRun(null); setCandidates([]); setReportSymbols([]); setTradePlans([]); setExecutionStatus(null)
       setError(reason instanceof Error ? reason.message : '报告加载失败')
     } finally { setLoading(false) }
-  }, [requestedDate, requestedRunId])
+  }, [requestedDate, requestedRunId, requestedSymbol])
 
   usePageRefresh(load)
   useEffect(() => { void load() }, [load])
 
-  const rangePlan = useMemo(() => getKlineRangePlan(range), [range])
+  const rangePlan = useMemo(() => getKlineRangePlan(range, new Date(marketClock)), [marketClock, range])
+  useEffect(() => {
+    if (!symbol || !report) return
+    const refreshClock = () => setMarketClock(Date.now())
+    const timer = window.setInterval(
+      refreshClock,
+      period === 'day' ? DAILY_MARKET_REFRESH_MS : INTRADAY_MARKET_REFRESH_MS,
+    )
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') refreshClock()
+    }
+    window.addEventListener('focus', refreshWhenVisible)
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', refreshWhenVisible)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+    }
+  }, [period, report, symbol])
+
   useEffect(() => {
     if (!symbol || !report) return
     let alive = true
-    setMarketLoading(true); setMarketError(''); setQuote(null); setBars([]); setMarketStatus(null); setScore(null); setLineage(null)
+    setMarketLoading(true); setMarketError(''); setMarketStatus(null); setScore(null); setLineage(null)
     void Promise.allSettled([
-      api.quotes([symbol]),
-      api.kline(symbol, period, 1200, { start: rangePlan.start, end: rangePlan.end }),
+      loadKline(symbol, period, {
+        range,
+        start: rangePlan.start,
+        end: rangePlan.end,
+        chunk: 'report-latest',
+        limit: 1200,
+        refresh: true,
+      }),
       api.score(date, symbol, report.run_id),
       api.scoreLineage(date, symbol, report.run_id),
-    ]).then(([quoteResult, klineResult, scoreResult, lineageResult]) => {
+    ]).then(([klineResult, scoreResult, lineageResult]) => {
       if (!alive) return
-      if (quoteResult.status === 'fulfilled') setQuote(quoteResult.value[0] || null)
       if (klineResult.status === 'fulfilled') {
         setBars(trimBarsToRange(klineResult.value.bars, rangePlan))
         setMarketStatus(klineResult.value.status || null)
+        setMarketError(klineResult.value.error || '')
       }
       if (scoreResult.status === 'fulfilled') setScore(scoreResult.value)
       if (lineageResult.status === 'fulfilled') setLineage(lineageResult.value)
-      const failed = [quoteResult, klineResult].filter((item) => item.status === 'rejected')
-      if (failed.length) setMarketError('实时行情或 K 线加载失败；冻结评分与研究结论不受影响。')
+      if (klineResult.status === 'rejected') {
+        setMarketError('实时 K 线加载失败；冻结评分与研究结论不受影响。')
+      }
     }).finally(() => { if (alive) setMarketLoading(false) })
     return () => { alive = false }
-  }, [date, period, rangePlan, report, symbol])
+  }, [date, loadKline, period, range, rangePlan, report, symbol])
 
   const selectedCandidate = candidates.find((item) => item.symbol === symbol)
   const selectedResearch = reportSymbols.find((item) => item.symbol === symbol)
+  const selectedExecution = executionStatus?.items.find((item) => item.symbol === symbol)
   const selectedPlan = tradePlans.find((plan) => plan.symbols.length === 1
     && plan.symbols[0] === symbol
     && (plan.status.toUpperCase() === 'SUCCEEDED' || PLAN_ACTIVE.has(plan.status.toUpperCase())))
@@ -205,8 +247,10 @@ export function ReportsPage() {
     </Panel>
 
     {report && <Panel title="自选股研究工作台" eyebrow="ALL TARGET SYMBOLS" className="full-span">
-      {reportSymbols.length ? <div className="candidate-tabs report-symbol-tabs" role="radiogroup" aria-label="本次全部研究股票">{reportSymbols.map((item) => <button role="radio" aria-checked={symbol === item.symbol} className={symbol === item.symbol ? 'active' : ''} key={item.symbol} onClick={() => setSymbol(item.symbol)}><strong>{item.rank ? `#${item.rank} ` : ''}{item.name || item.symbol}</strong><small>{item.symbol} · 最终分 {formatNumber(item.score.total_score)}</small><span className={`symbol-gate ${item.advice_eligible ? 'eligible' : 'blocked'}`}>{item.advice_eligible ? '正式可建议' : item.research_status === 'RISK_BLOCKED' ? '风险禁买' : '数据受限'}</span></button>)}</div> : <Empty title="本次报告没有股票明细" />}
+      {reportSymbols.length ? <div className="candidate-tabs report-symbol-tabs" role="radiogroup" aria-label="本次全部研究股票">{reportSymbols.map((item) => <button role="radio" aria-checked={symbol === item.symbol} className={symbol === item.symbol ? 'active' : ''} key={item.symbol} onClick={() => { setSymbol(item.symbol); setSearchParams({ date, run_id: report.run_id, symbol: item.symbol }) }}><strong>{item.rank ? `#${item.rank} ` : ''}{item.name || item.symbol}</strong><small>{item.symbol} · 最终分 {formatNumber(item.score.total_score)}</small><span className={`symbol-gate ${item.advice_eligible ? 'eligible' : 'blocked'}`}>{item.advice_eligible ? '正式可建议' : item.research_status === 'RISK_BLOCKED' ? '风险禁买' : '数据受限'}</span></button>)}</div> : <Empty title="本次报告没有股票明细" />}
       {symbol && <>
+        <MarketClosedNotice />
+        {selectedExecution?.t1_restricted && <div className="warning-box t1-warning"><strong>当日买入，T+1 禁止卖出</strong><p>当前模拟持仓 {selectedExecution.held_quantity} 股，服务端截至 {formatTime(executionStatus?.as_of)} 判定可卖数量为 0 股。</p></div>}
         <div className="workbench-grid">
           <section className="workbench-card"><span>最新行情</span><strong>{quote?.name || symbol} · {formatNumber(quote?.price)}</strong><small>{quote ? `${quote.change_pct >= 0 ? '+' : ''}${formatNumber(quote.change_pct)}%` : '行情暂不可用'}</small></section>
           <section className="workbench-card"><span>行情来源</span><strong>{quote?.source || marketStatus?.source || '—'}</strong><small>采集 {formatTime(quote?.collected_at || marketStatus?.collected_at)} · {(quote?.delayed ?? marketStatus?.delayed) ? '延迟数据' : '未标记延迟'}</small></section>
@@ -221,7 +265,7 @@ export function ReportsPage() {
           ['最终分', score.total_score], ['基础分', score.base_total_score], ['基本面', score.fundamental_score], ['技术', score.technical_score], ['情绪', score.sentiment_score], ['质量', score.quality_confidence_score], ['分红加分', score.dividend_bonus], ['风险乘数', score.event_risk_multiplier], ['预测分位', selectedResearch?.prediction_percentile ?? selectedCandidate?.prediction_percentile ?? score.prediction_percentile], ['排名', selectedResearch?.rank ?? selectedCandidate?.rank ?? score.rank],
         ].map(([label, value]) => <div key={String(label)}><span>{label}</span><strong>{typeof value === 'number' ? formatNumber(value) : '—'}</strong></div>)}<div><span>公式版本</span><strong>{score.formula_version || String(lineage?.formula_version || '—')}</strong></div></div> : <Empty title="评分暂不可用" />}
 
-        {selectedResearch?.plain_language_summary && <div className="snapshot-callout"><span>◇</span><div><strong>给家人看的总结</strong><p>{selectedResearch.plain_language_summary}</p></div></div>}
+        {selectedResearch?.plain_language_summary && <div className="snapshot-callout"><span>◇</span><div><strong>省流版</strong><p>{selectedResearch.plain_language_summary}</p></div></div>}
 
         <div className="snapshot-callout"><span>◇</span><div><strong>确定性方案，AI 仅负责解释</strong><p>方案选择历史样本中风险调整后表现最优的合格参数；模型不可用时，买入或暂不买入、数量、限价、仓位和退出规则仍然有效。</p></div></div>
         {fused && <div className="warning-box"><strong>全局风控熔断，禁止生成交易方案</strong><p>{run?.reason_message || '本次仅保留正式观察报告。'}</p></div>}
@@ -231,7 +275,7 @@ export function ReportsPage() {
         {selectedPlan && <article className="research-run-card plan-workbench"><div className="research-run-head"><div><strong>{symbol}</strong><code>{selectedPlan.plan_id}</code></div><StatusPill status={selectedPlan.status} /></div>
           {selectedPlan.status.toUpperCase() === 'FAILED' && <div className="failure-box"><strong>方案生成失败</strong><p>{selectedPlan.error_message || '请查看审计事件'}</p></div>}
           {selectedPlan.status.toUpperCase() === 'SUCCEEDED' && deterministic && <><div className={deterministic.outcome === 'BUY' ? 'success-box' : 'warning-box'}><strong>{deterministic.outcome === 'BUY' ? '满足确定性买入条件' : '当前不满足买入条件'}</strong><p>保留现金 {String(deterministic.retained_cash ?? '—')} 元；条件：{values(deterministic.conditions).map(labelCode).join('；') || '详见逐项条件与约束结果。'}</p></div>
-            <div className="table-wrap"><table><thead><tr><th>动作与条件</th><th>限价有效期</th><th>仓位</th><th>止盈止损</th><th>样本外指标</th></tr></thead><tbody>{(deterministic.symbol_plans || []).map((item) => { const strategy = (item.strategy || {}) as Record<string, unknown>; const metrics = (strategy.validation_metrics || item.validation_metrics || {}) as Record<string, unknown>; return <tr key={String(item.symbol || symbol)}><td>{labelCode(item.action ?? item.outcome)}<small>{labelCode(item.reason_code ?? item.reason)}</small></td><td>{String(item.limit_price_low ?? '—')}–{String(item.limit_price_high ?? '—')}<small>{String(item.entry_valid_from ?? '—')} 至 {String(item.entry_valid_until ?? '—')}</small></td><td>{String(item.suggested_additional_quantity ?? 0)} 股<small>目标权重 {item.target_weight === undefined ? '—' : `${(Number(item.target_weight) * 100).toFixed(2)}%`}</small></td><td>止盈 {String(item.take_profit_price ?? '—')} · 止损 {String(item.stop_loss_price ?? '—')}<small>最长 {String(item.maximum_holding_sessions ?? '—')} 个交易日</small></td><td>净收益 {metrics.net_return === undefined ? '—' : `${(Number(metrics.net_return) * 100).toFixed(2)}%`}<small>夏普比率 {metrics.sharpe === undefined ? '—' : Number(metrics.sharpe).toFixed(2)} · 回撤 {metrics.maximum_drawdown === undefined ? '—' : `${(Number(metrics.maximum_drawdown) * 100).toFixed(2)}%`}</small></td></tr> })}</tbody></table></div>
+            <div className="table-wrap"><table><thead><tr><th>动作与条件</th><th>限价有效期</th><th>仓位</th><th>止盈止损</th><th>样本外指标</th></tr></thead><tbody>{(deterministic.symbol_plans || []).map((item) => { const strategy = (item.strategy || {}) as Record<string, unknown>; const metrics = (strategy.validation_metrics || item.validation_metrics || {}) as Record<string, unknown>; return <tr key={String(item.symbol || symbol)}><td>{labelCode(item.action ?? item.outcome)}<small>{labelCode(item.reason_code ?? item.reason)}</small></td><td>{String(item.limit_price_low ?? '—')}–{String(item.limit_price_high ?? '—')}<small>{String(item.entry_valid_from ?? '—')} 至 {String(item.entry_valid_until ?? '—')}</small></td><td>{String(item.suggested_additional_quantity ?? 0)} 股<small>目标权重 {item.target_weight === undefined ? '—' : `${(Number(item.target_weight) * 100).toFixed(2)}%`}</small></td><td>止盈 {String(item.take_profit_price ?? '—')} · 止损 {String(item.stop_loss_price ?? '—')}<small>最早可卖日(T+1) {String(item.earliest_sell_date ?? '—')} · 最长 {String(item.maximum_holding_sessions ?? '—')} 个交易日</small></td><td>净收益 {metrics.net_return === undefined ? '—' : `${(Number(metrics.net_return) * 100).toFixed(2)}%`}<small>夏普比率 {metrics.sharpe === undefined ? '—' : Number(metrics.sharpe).toFixed(2)} · 回撤 {metrics.maximum_drawdown === undefined ? '—' : `${(Number(metrics.maximum_drawdown) * 100).toFixed(2)}%`}</small></td></tr> })}</tbody></table></div>
             {explanationAvailable ? <div className="ai-explanation"><h3>AI 中文说明</h3>{explanationSection(explanation, ['summary']).map((item) => <p key={item}>{item}</p>)}{[['入场', ['entry_logic', 'entry', 'entry_summary', 'entry_conditions']], ['退出', ['exit_logic', 'exit', 'exit_summary', 'exit_conditions']], ['关键证据', ['key_evidence', 'evidence']], ['风险', ['risks', 'risk_warnings']]].map(([label, keys]) => <section key={String(label)}><strong>{String(label)}</strong><ul>{explanationSection(explanation, keys as string[]).map((item) => <li key={item}>{item}</li>)}</ul></section>)}</div> : <div className="warning-box"><strong>AI 说明不可用</strong><p>确定性结论与全部数值仍有效。</p></div>}</>}
         </article>}
       </>}

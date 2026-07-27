@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     lake_root: Path = Path("data/lake")
     private_object_root: Path = Path("data/private")
-    policy_config_path: Path = runtime_resource_path("configs/first_release.v2.json")
+    policy_config_path: Path = runtime_resource_path("configs/first_release.v3.json")
     object_store_endpoint: str | None = None
     object_store_bucket: str = "ashare-research"
     object_store_access_key: str | None = None
@@ -48,8 +48,12 @@ class Settings(BaseSettings):
     market_cache_seconds: int = Field(default=15, ge=1, le=300)
     market_kline_cache_seconds: int = Field(default=300, ge=15, le=3600)
     market_prefetch_max_workers: int = Field(default=4, ge=1, le=16)
+    market_provider_max_workers: int = Field(default=4, ge=1, le=16)
+    market_provider_max_queue: int = Field(default=8, ge=1, le=64)
+    market_cache_max_entries: int = Field(default=512, ge=64, le=4096)
     market_stale_seconds: int = Field(default=900, ge=15, le=86_400)
     market_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    market_hedge_delay_seconds: float = Field(default=0.5, ge=0.1, le=3.0)
     financial_search_provider: str = "neodata-financial-search"
     neodata_financial_search_path: Path | None = None
     neodata_financial_search_mode: Literal["auto", "cli", "embedded"] = "auto"
@@ -88,7 +92,15 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-5.6-sol"
     llm_reasoning_effort: str = "high"
     llm_timeout_seconds: float = Field(default=90.0, gt=0, le=600)
-    llm_agent_max_concurrency: int = Field(default=4, ge=1, le=16)
+    # This is intentionally bounded to the per-research-run capacity exposed
+    # by the administrator control plane.  DUAL mode has two fixed research
+    # workers, so its aggregate maximum is always two times this value.
+    llm_agent_max_concurrency: int = Field(default=4, ge=1, le=4)
+    research_execution_mode: Literal["SERIAL", "DUAL"] = "SERIAL"
+    # The model gateway is an infrastructure capacity, not a user-editable
+    # model credential.  It remains environment/Compose managed and lets the
+    # control plane fail closed before enabling two research consumers.
+    model_gateway_max_concurrency: int = Field(default=8, ge=1, le=128)
     model_settings_encryption_keys: str | None = None
     personal_data_encryption_keys: str | None = None
     model_allowed_hosts: str | None = None

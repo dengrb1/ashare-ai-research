@@ -415,6 +415,8 @@ def test_small_custom_research_succeeds_reports_all_symbols_and_freezes_advice_s
         html = backend.object_store.get(report.object_uri).decode("utf-8")
         assert all(symbol in html for symbol in targets)
         assert "暂不买入" in html
+        assert "T+1 交易时序" in html
+        assert "最早可卖日" in html
         assert candidate_id == backend._stage_digest(run_id, "candidates")
 
 
@@ -463,13 +465,12 @@ def test_builtin_demo_runs_full_daily_flow_and_is_reproducible(tmp_path) -> None
         assert first_run is not None and first_run.status == "SUCCEEDED"
         scores = session.scalars(select(ScoreRow).where(ScoreRow.run_id == first["run_id"])).all()
         assert len(scores) == 20
-        assert (
-            len(
-                session.scalars(
-                    select(CandidateRow).where(CandidateRow.run_id == first["run_id"])
-                ).all()
-            )
-            == 20
+        candidate_rows = session.scalars(
+            select(CandidateRow).where(CandidateRow.run_id == first["run_id"])
+        ).all()
+        assert len(candidate_rows) == 20
+        assert all(
+            (row.industry_name or "").startswith("示例行业") for row in candidate_rows
         )
         portfolio = session.scalar(
             select(PortfolioRow).where(PortfolioRow.run_id == first["run_id"])

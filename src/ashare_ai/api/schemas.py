@@ -78,6 +78,24 @@ class PasswordResetRequest(BaseModel):
     password: str = Field(min_length=12, max_length=256)
 
 
+class ModelProfileSettings(BaseModel):
+    model: str = Field(min_length=1, max_length=128)
+    cache_policy: Literal["GROK", "OPENAI", "COMPATIBLE"] = "COMPATIBLE"
+    context_window_tokens: int = Field(default=128000, ge=1024, le=4_000_000)
+    output_token_reserve: int = Field(default=8192, ge=0, le=1_000_000)
+    reasoning_token_reserve: int = Field(default=0, ge=0, le=1_000_000)
+    input_price_per_million: Decimal = Field(default=Decimal("0"), ge=0)
+    cached_input_price_per_million: Decimal = Field(default=Decimal("0"), ge=0)
+    cache_write_price_per_million: Decimal = Field(default=Decimal("0"), ge=0)
+    output_price_per_million: Decimal = Field(default=Decimal("0"), ge=0)
+
+    @model_validator(mode="after")
+    def reserve_fits_window(self) -> ModelProfileSettings:
+        if self.output_token_reserve + self.reasoning_token_reserve >= self.context_window_tokens:
+            raise ValueError("output and reasoning reserves must leave input capacity")
+        return self
+
+
 class ModelSettingsRequest(BaseModel):
     base_url: str = Field(min_length=8, max_length=2048)
     api_key: str | None = Field(default=None, max_length=4096)
@@ -85,6 +103,7 @@ class ModelSettingsRequest(BaseModel):
     search_reasoning_effort: str = Field(default="low", pattern=r"^(low|medium|high|xhigh)$")
     research_model: str = Field(default="gpt-5.6-sol", min_length=1, max_length=128)
     research_reasoning_effort: str = Field(default="high", pattern=r"^(low|medium|high|xhigh)$")
+    model_profiles: list[ModelProfileSettings] = Field(default_factory=list, max_length=32)
     timeout_seconds: float = Field(default=90, ge=1, le=600)
     enabled: bool = True
 
@@ -106,6 +125,7 @@ class ModelSettingsResponse(BaseModel):
     search_reasoning_effort: str
     research_model: str
     research_reasoning_effort: str
+    model_profiles: list[ModelProfileSettings] = Field(default_factory=list)
     timeout_seconds: float
     enabled: bool
     configured: bool
@@ -113,6 +133,8 @@ class ModelSettingsResponse(BaseModel):
     degraded: bool
     status_message: str
     checked_at: datetime | None = None
+    structured_output_supported: bool = False
+    streaming_supported: bool = False
 
 
 class ModelProbeResponse(BaseModel):
@@ -120,10 +142,152 @@ class ModelProbeResponse(BaseModel):
     message: str
     model: str
     checked_at: datetime
+    structured_output_supported: bool = True
+    streaming_supported: bool = False
 
 
 class ModelListResponse(BaseModel):
     models: list[str]
+
+
+class SystemSettingsRequest(BaseModel):
+    """Partial admin update; omitted fields retain their active override."""
+
+    research_execution_mode: Literal["SERIAL", "DUAL"] | None = None
+    llm_agent_max_concurrency: int | None = Field(default=None, ge=1, le=4)
+    object_store_endpoint: str | None = Field(default=None, max_length=2048)
+    object_store_bucket: str | None = Field(default=None, min_length=1, max_length=255)
+    object_store_secure: bool | None = None
+    tushare_token: str | None = Field(default=None, min_length=1, max_length=4096)
+    object_store_access_key: str | None = Field(default=None, min_length=1, max_length=4096)
+    object_store_secret_key: str | None = Field(default=None, min_length=1, max_length=4096)
+    searxng_base_url: str | None = Field(default=None, min_length=8, max_length=2048)
+    searxng_timeout_seconds: float | None = Field(default=None, gt=0, le=60)
+    searxng_max_results: int | None = Field(default=None, ge=1, le=10)
+    market_cache_seconds: int | None = Field(default=None, ge=1, le=300)
+    market_kline_cache_seconds: int | None = Field(default=None, ge=15, le=3600)
+    market_prefetch_max_workers: int | None = Field(default=None, ge=1, le=16)
+    market_provider_max_workers: int | None = Field(default=None, ge=1, le=16)
+    market_provider_max_queue: int | None = Field(default=None, ge=1, le=64)
+    market_cache_max_entries: int | None = Field(default=None, ge=64, le=4096)
+    market_stale_seconds: int | None = Field(default=None, ge=15, le=86400)
+    market_timeout_seconds: float | None = Field(default=None, gt=0, le=120)
+    market_hedge_delay_seconds: float | None = Field(default=None, ge=0.1, le=3.0)
+    financial_search_cache_seconds: int | None = Field(default=None, ge=0, le=300)
+    financial_search_max_concurrency: int | None = Field(default=None, ge=1, le=32)
+    financial_search_rate_limit_per_minute: int | None = Field(default=None, ge=1, le=600)
+    daily_research_start_hour: int | None = Field(default=None, ge=0, le=23)
+    daily_research_start_minute: int | None = Field(default=None, ge=0, le=59)
+    daily_research_retry_minutes: int | None = Field(default=None, ge=1, le=60)
+    daily_research_retry_limit_minutes: int | None = Field(default=None, ge=5, le=1440)
+    worker_lease_seconds: int | None = Field(default=None, ge=30, le=7200)
+    canonical_bundle_mode: Literal["akshare", "file", "demo"] | None = None
+    allow_demo_data: bool | None = None
+    akshare_bundle_size: int | None = Field(default=None, ge=15, le=100)
+    akshare_history_sessions: int | None = Field(default=None, ge=65, le=500)
+    akshare_fetch_max_attempts: int | None = Field(default=None, ge=1, le=5)
+    akshare_fetch_backoff_seconds: float | None = Field(default=None, ge=0, le=60)
+    minimum_listing_days: int | None = Field(default=None, ge=0)
+    minimum_median_amount: float | None = Field(default=None, ge=0)
+
+    @field_validator("object_store_endpoint", mode="before")
+    @classmethod
+    def normalize_optional_endpoint(cls, value: object) -> object:
+        # Explicit null clears only a saved endpoint; DELETE restores the
+        # environment baseline.  Empty UI values are normalized to null.
+        return None if isinstance(value, str) and not value.strip() else value
+
+
+class SystemSettingsUnlockRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=256)
+
+
+class SystemSettingsUnlockResponse(BaseModel):
+    unlock_token: str
+    expires_at: datetime
+
+
+class WorkerHealthResponse(BaseModel):
+    worker_id: str
+    role: str
+    healthy: bool
+    loaded_mode: Literal["SERIAL", "DUAL", "UNKNOWN"] = "UNKNOWN"
+    topology_sha256: str | None = None
+    last_heartbeat_at: datetime | None = None
+    memory_used_bytes: int | None = Field(default=None, ge=0)
+    memory_cache_bytes: int | None = Field(default=None, ge=0)
+    memory_limit_bytes: int | None = Field(default=None, ge=0)
+    cpu_percent: float | None = Field(default=None, ge=0)
+
+
+class QueueSummaryResponse(BaseModel):
+    pending: int = Field(ge=0)
+    processing: int = Field(ge=0)
+
+
+class SystemSettingsResponse(BaseModel):
+    configuration_id: str | None
+    version: int
+    config_sha256: str
+    source: Literal["database", "environment"]
+    values: dict[str, Any]
+    sources: dict[str, Literal["database", "environment"]]
+    secret_configured: dict[str, bool]
+    secret_sources: dict[str, Literal["database", "environment"]]
+    read_only_environment: dict[str, Any]
+    topology_sha256: str
+    actual_loaded_mode: Literal["SERIAL", "DUAL", "UNKNOWN"] = "UNKNOWN"
+    restart_required: bool
+    workers: list[WorkerHealthResponse] = Field(default_factory=list)
+    queues: dict[str, QueueSummaryResponse] = Field(default_factory=dict)
+    compose_restart_command: str
+
+
+class ResourceMetricResponse(BaseModel):
+    total_bytes: int = Field(ge=0)
+    used_bytes: int = Field(ge=0)
+    available_bytes: int = Field(ge=0)
+    percent: float = Field(ge=0, le=100)
+
+
+class CpuMetricResponse(BaseModel):
+    percent: float = Field(ge=0)
+    logical_cores: int = Field(ge=1)
+
+
+class ServiceResourceResponse(BaseModel):
+    service_id: str
+    role: str
+    healthy: bool
+    memory_used_bytes: int | None = Field(default=None, ge=0)
+    memory_cache_bytes: int | None = Field(default=None, ge=0)
+    memory_limit_bytes: int | None = Field(default=None, ge=0)
+    cpu_percent: float | None = Field(default=None, ge=0)
+    collected_at: datetime | None = None
+
+
+class DualMemoryEstimateResponse(BaseModel):
+    worker_replicas: int = Field(ge=1)
+    estimate_source: Literal["research-worker", "job-worker", "fallback"]
+    typical_per_worker_bytes: int = Field(ge=0)
+    typical_increment_bytes: int = Field(ge=0)
+    maximum_increment_bytes: int = Field(ge=0)
+    projected_available_bytes: int
+    level: Literal["NORMAL", "WARNING", "CRITICAL"]
+    messages: list[str] = Field(default_factory=list)
+
+
+class SystemResourcesResponse(BaseModel):
+    collected_at: datetime
+    scope: Literal["HOST", "CONTAINER"]
+    scope_label: str
+    memory: ResourceMetricResponse
+    cpu: CpuMetricResponse
+    disk: ResourceMetricResponse
+    services: list[ServiceResourceResponse] = Field(default_factory=list)
+    topology_estimate: DualMemoryEstimateResponse
+    level: Literal["NORMAL", "WARNING", "CRITICAL"]
+    warnings: list[str] = Field(default_factory=list)
 
 
 class PaperPosition(BaseModel):
@@ -135,12 +299,11 @@ class PaperPosition(BaseModel):
     # their current weight from market value and the account total instead.
     target_weight: float | None = Field(default=None, ge=0, le=1)
     acquired_on: date | None = None
-    profit_trigger_amount: Decimal | None = Field(
-        default=None, gt=0, le=Decimal("100000000000")
-    )
-    exit_trigger_price: Decimal | None = Field(
-        default=None, gt=0, le=Decimal("10000000")
-    )
+    profit_trigger_amount: Decimal | None = Field(default=None, gt=0, le=Decimal("100000000000"))
+    exit_trigger_price: Decimal | None = Field(default=None, gt=0, le=Decimal("10000000"))
+    stop_loss_price: Decimal | None = Field(default=None, gt=0, le=Decimal("10000000"))
+    stop_loss_mode: Literal["AUTO_ATR20", "MANUAL", "FALLBACK_8PCT"] = "AUTO_ATR20"
+    stop_loss_enabled: bool = True
 
     @field_validator("symbol", mode="before")
     @classmethod
@@ -152,15 +315,28 @@ class PaperPosition(BaseModel):
     def normalize_name(cls, value: object) -> object:
         return value.strip() if isinstance(value, str) else value
 
+    @model_validator(mode="after")
+    def normalize_stop_loss_mode(self) -> PaperPosition:
+        if self.stop_loss_price is not None and self.stop_loss_mode != "MANUAL":
+            self.stop_loss_mode = "MANUAL"
+        if self.stop_loss_price is not None:
+            stop_price = Decimal(self.stop_loss_price)
+            lower = Decimal(str(self.cost)) * Decimal("0.90")
+            upper = Decimal(str(self.cost)) * Decimal("0.95")
+            if not lower <= stop_price <= upper:
+                raise ValueError("manual stop loss must be 5% to 10% below cost")
+        return self
+
 
 class AssetStateRequest(BaseModel):
     watchlist: list[str] = Field(max_length=MAX_WATCHLIST_SYMBOLS)
     positions: list[PaperPosition] = Field(max_length=15)
     total_assets: float | None = Field(default=None, gt=0, le=1_000_000_000_000)
     exit_monitor_enabled: bool | None = None
-    default_profit_trigger: Decimal | None = Field(
-        default=None, gt=0, le=Decimal("100000000000")
-    )
+    default_profit_trigger: Decimal | None = Field(default=None, gt=0, le=Decimal("100000000000"))
+    stop_loss_monitor_enabled: bool | None = None
+    buy_monitor_enabled: bool | None = None
+    market_refresh_interval_seconds: Literal[15, 30, 60, 120] | None = None
 
     @field_validator("watchlist", mode="before")
     @classmethod
@@ -196,6 +372,9 @@ class AssetStateResponse(BaseModel):
     total_assets: float | None = None
     exit_monitor_enabled: bool = False
     default_profit_trigger: Decimal | None = None
+    stop_loss_monitor_enabled: bool = True
+    buy_monitor_enabled: bool = True
+    market_refresh_interval_seconds: Literal[15, 30, 60, 120] = 15
     updated_at: datetime | None = None
 
 
@@ -203,13 +382,20 @@ class ExitMonitorSettingsRequest(BaseModel):
     """Narrow mobile-safe update that cannot overwrite holdings or the watchlist."""
 
     exit_monitor_enabled: bool
-    default_profit_trigger: Decimal | None = Field(
-        default=None, gt=0, le=Decimal("100000000000")
-    )
+    default_profit_trigger: Decimal | None = Field(default=None, gt=0, le=Decimal("100000000000"))
+    stop_loss_monitor_enabled: bool | None = None
+    buy_monitor_enabled: bool | None = None
+
+
+class MarketRefreshSettingsRequest(BaseModel):
+    """Per-account live-market refresh cadence for the interactive Web/App clients."""
+
+    market_refresh_interval_seconds: Literal[15, 30, 60, 120]
 
 
 class ExitAdviceResponse(_SanitizedErrorResponse):
     advice_id: str
+    operation_run_id: str | None = None
     user_id: str
     symbol: str
     status: str
@@ -219,7 +405,7 @@ class ExitAdviceResponse(_SanitizedErrorResponse):
     current_price: Decimal
     unrealized_profit: Decimal
     trigger_amount: Decimal
-    trigger_type: Literal["PRICE", "PROFIT_AMOUNT"] = "PROFIT_AMOUNT"
+    trigger_type: Literal["PRICE", "PROFIT_AMOUNT", "MANUAL", "STOP_LOSS"] = "PROFIT_AMOUNT"
     trigger_price: Decimal | None = None
     position_snapshot: dict[str, Any]
     research_context: dict[str, Any]
@@ -232,6 +418,72 @@ class ExitAdviceResponse(_SanitizedErrorResponse):
     cache_hit: bool
     created_at: datetime
     completed_at: datetime | None
+    status_url: str | None = None
+
+
+class ManualExitAdviceRequest(BaseModel):
+    symbol: str = Field(pattern=r"^\d{6}\.(SH|SZ|BJ)$")
+
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def normalize_symbol(cls, value: object) -> object:
+        return value.strip().upper() if isinstance(value, str) else value
+
+
+class NotificationResponse(OrmResponse):
+    notification_id: str
+    notification_type: str
+    severity: Literal["INFO", "WARNING", "HIGH", "CRITICAL"]
+    title: str
+    body: str
+    resource_type: str | None = None
+    resource_id: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    read_at: datetime | None = None
+    created_at: datetime
+    expires_at: datetime
+
+
+class NotificationListResponse(BaseModel):
+    items: list[NotificationResponse]
+    next_cursor: str | None = None
+
+
+class NotificationSummaryResponse(BaseModel):
+    unread_count: int
+    high_risk_unread_count: int
+    latest: list[NotificationResponse] = Field(default_factory=list)
+
+
+class NotificationMarkReadRequest(BaseModel):
+    notification_ids: list[str] = Field(min_length=1, max_length=100)
+
+
+class BuyEntryMonitorResponse(OrmResponse):
+    monitor_id: str
+    symbol: str
+    status: str
+    effective_date: date
+    expires_at: datetime
+    entry_low: Decimal
+    entry_high: Decimal
+    score_run_id: str | None = None
+    trade_plan_id: str | None = None
+    rationale: dict[str, Any] = Field(default_factory=dict)
+    triggered_at: datetime | None = None
+    error_code: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class BuyEntryMonitorRequest(BaseModel):
+    symbol: str = Field(pattern=r"^\d{6}\.(SH|SZ|BJ)$")
+    enabled: bool = True
+
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def normalize_symbol(cls, value: object) -> object:
+        return value.strip().upper() if isinstance(value, str) else value
 
 
 class AIChatThreadRequest(BaseModel):
@@ -273,9 +525,7 @@ class AIChatMessageResponse(OrmResponse):
     thread_id: str
     role: Literal["user", "assistant"]
     content: str
-    status: Literal["PENDING", "STREAMING", "COMPLETED", "FAILED", "CANCELLED"] = (
-        "COMPLETED"
-    )
+    status: Literal["PENDING", "STREAMING", "COMPLETED", "FAILED", "CANCELLED"] = "COMPLETED"
     trading_date: date
     decision_at: datetime
     available_at: datetime
@@ -290,10 +540,79 @@ class AIChatMessageResponse(OrmResponse):
     response_sha256: str | None
     cache_hit: bool
     input_tokens: int
+    cached_input_tokens: int = 0
+    cache_write_tokens: int = 0
     output_tokens: int
+    reasoning_tokens: int = 0
+    cache_policy: Literal["GROK", "OPENAI", "COMPATIBLE"] = "COMPATIBLE"
+    context_budget_status: Literal["WITHIN_BUDGET", "HISTORY_TRIMMED", "CONTEXT_TOO_LARGE"] = (
+        "WITHIN_BUDGET"
+    )
     error_code: str | None = None
     request_id: str | None = None
+    streaming_mode: Literal["STREAMING", "DEGRADED", "CACHED"] = "STREAMING"
+    data_status: dict[str, Any] = Field(default_factory=dict)
+    response_id: str | None = None
     created_at: datetime
+
+
+class AIChatMetricResponse(BaseModel):
+    metric: Literal["answer", "context", "market", "news", "model"]
+    requests: int
+    hits: int
+    hit_rate: float
+    average_latency_ms: float
+    average_singleflight_wait_ms: float
+    degraded_count: int
+
+
+class AICostValueResponse(BaseModel):
+    requests: int
+    cache_hits: int = 0
+    input_tokens: int
+    cached_input_tokens: int
+    cache_write_tokens: int
+    uncached_input_tokens: int
+    output_tokens: int
+    estimated_spend_usd: Decimal
+    estimated_savings_usd: Decimal
+
+
+class AICostBucketResponse(AICostValueResponse):
+    bucket_date: date
+
+
+class AICostTurnResponse(BaseModel):
+    requests: int
+    cache_hit: bool
+    input_tokens: int
+    cached_input_tokens: int
+    cache_write_tokens: int
+    uncached_input_tokens: int
+    output_tokens: int
+    estimated_spend_usd: Decimal
+    estimated_savings_usd: Decimal
+
+
+class AICostSummaryResponse(BaseModel):
+    days: int
+    items: list[AICostBucketResponse]
+    next_cursor: str | None = None
+    totals: AICostValueResponse
+    current_turn: AICostTurnResponse | None = None
+
+
+class SecurityResolveCandidate(BaseModel):
+    symbol: str
+    name: str
+
+
+class SecurityResolveResponse(BaseModel):
+    query: str
+    state: Literal["RESOLVED", "UNRESOLVED", "AMBIGUOUS"]
+    candidates: list[SecurityResolveCandidate] = Field(default_factory=list)
+    reason_code: str
+    decision_at: datetime
 
 
 class AIChatMentionRef(BaseModel):
@@ -406,6 +725,7 @@ class ScoreResponse(OrmResponse):
 
 class CandidateResponse(OrmResponse):
     symbol: str
+    name: str | None = None
     trading_date: date
     decision_at: datetime
     rank: int
@@ -414,6 +734,7 @@ class CandidateResponse(OrmResponse):
     dividend_bonus: float = 0
     prediction_percentile: float
     industry_code: str
+    industry_name: str | None = None
     event_risk_multiplier: float
     style_exposures: dict[str, float]
     evidence_hash: str
@@ -431,8 +752,24 @@ class ReportSymbolResponse(BaseModel):
     rank: int | None = None
     prediction_percentile: float | None = None
     industry_code: str | None = None
+    industry_name: str | None = None
     plain_language_summary: str | None = None
     component_summaries: dict[str, str] = Field(default_factory=dict)
+
+
+class ReportExecutionSymbolStatus(BaseModel):
+    symbol: str
+    held_quantity: int = Field(ge=0)
+    acquired_on: date | None = None
+    sellable_quantity: int = Field(ge=0)
+    t1_restricted: bool = False
+    blockers: list[str] = Field(default_factory=list)
+
+
+class ReportExecutionStatusResponse(BaseModel):
+    report_id: str
+    as_of: datetime
+    items: list[ReportExecutionSymbolStatus] = Field(default_factory=list)
 
 
 class PortfolioResponse(OrmResponse):
@@ -625,6 +962,7 @@ class TradePlanResponse(_SanitizedErrorResponse):
     user_id: str
     report_id: str
     run_id: str
+    operation_run_id: str | None = None
     trading_date: date
     decision_at: datetime
     available_at: datetime
@@ -649,6 +987,20 @@ class TradePlanResponse(_SanitizedErrorResponse):
 
 class RunListResponse(RunResponse):
     user_id: str | None
+
+
+class RunActivityItem(RunResponse):
+    user_id: str | None = None
+    resource_type: Literal["RESEARCH", "BACKTEST", "TRADE_PLAN", "EXIT_ADVICE"]
+    resource_id: str | None = None
+    resource_url: str | None = None
+    title: str | None = None
+    symbol: str | None = None
+
+
+class RunActivityResponse(BaseModel):
+    items: list[RunActivityItem]
+    next_cursor: str | None = None
 
 
 class ResearchRunResponse(RunResponse):
@@ -727,6 +1079,21 @@ class ReportBodyResponse(BaseModel):
     content: str
 
 
+class MarketSessionStatus(BaseModel):
+    state: Literal["OPEN", "PRE_OPEN", "BREAK", "CLOSED", "UNKNOWN"]
+    as_of: datetime
+    trading_date: date
+    is_trading_day: bool | None = None
+    reason: Literal[
+        "TRADING_SESSION",
+        "BEFORE_OPEN",
+        "MIDDAY_BREAK",
+        "AFTER_CLOSE",
+        "NON_TRADING_DAY",
+        "CALENDAR_UNAVAILABLE",
+    ]
+
+
 class MarketDataStatus(BaseModel):
     source: str
     collected_at: datetime
@@ -774,6 +1141,7 @@ class MarketPrefetchRequest(BaseModel):
     symbols: list[str] = Field(min_length=1, max_length=500)
     periods: list[str] = Field(default_factory=lambda: ["day"], min_length=1, max_length=5)
     limit: int = Field(default=160, ge=1, le=5000)
+    include_quotes: bool = True
 
     @field_validator("periods")
     @classmethod

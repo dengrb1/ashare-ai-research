@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import logging
+import subprocess
+import sys
+import time
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import update
@@ -9,9 +13,16 @@ from sqlalchemy.orm import Session
 
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.security import safe_error_message
+from ashare_ai.core.system_settings import (
+    SystemConfigurationService,
+    SystemRuntimeSettings,
+    get_effective_settings,
+)
+from ashare_ai.notifications.service import NotificationService
 from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.orchestration.daily import Pipeline, load_pipeline
 from ashare_ai.orchestration.redis_queue import RedisLeasedQueue
+from ashare_ai.orchestration.worker_status import publish_heartbeat
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import JobRun
 
@@ -20,6 +31,7 @@ PROCESSING_QUEUE_NAME = "ashare:research:processing"
 DELAYED_QUEUE_NAME = "ashare:research:delayed"
 
 _TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "FUSED", "CANCELLED"}
+logger = logging.getLogger(__name__)
 
 
 def _error_details(error: Exception) -> dict[str, Any]:
@@ -40,7 +52,7 @@ def enqueue_research(run_id: str, redis_url: str | None = None) -> None:
         client,
         pending=QUEUE_NAME,
         processing=PROCESSING_QUEUE_NAME,
-        lease_seconds=get_settings().worker_lease_seconds,
+        lease_seconds=get_effective_settings().worker_lease_seconds,
     ).enqueue(run_id)
 
 
@@ -55,11 +67,18 @@ def enqueue_research_at(
         pending=QUEUE_NAME,
         processing=PROCESSING_QUEUE_NAME,
         delayed=DELAYED_QUEUE_NAME,
-        lease_seconds=get_settings().worker_lease_seconds,
+        lease_seconds=get_effective_settings().worker_lease_seconds,
     ).enqueue_at(run_id, available_at.timestamp())
 
 
-def _retry_waiting_research(run_id: str) -> bool:
+def _retry_waiting_research(
+    run_id: str,
+    *,
+    now: datetime | None = None,
+    session_factory: Callable[[], Session] = SessionLocal,
+    readiness: Callable[[date, datetime], bool] | None = None,
+    enqueue_at: Callable[[str, datetime], None] = enqueue_research_at,
+) -> bool:
     """Promote a due data-readiness wait, or persist its next safe retry.
 
     The immutable run parameters live in the manifest; only operational wait
@@ -67,8 +86,8 @@ def _retry_waiting_research(run_id: str) -> bool:
     """
     from ashare_ai.orchestration.research_schedule import AKShareDataReadiness
 
-    now = datetime.now(UTC)
-    with SessionLocal() as session:
+    current = now or datetime.now(UTC)
+    with session_factory() as session:
         run = session.get(JobRun, run_id)
         if run is None:
             return False
@@ -80,21 +99,14 @@ def _retry_waiting_research(run_id: str) -> bool:
             deadline = datetime.fromisoformat(str(deadline_raw))
             deadline = deadline if deadline.tzinfo else deadline.replace(tzinfo=UTC)
         except ValueError:
-            deadline = now
-        if now >= deadline:
-            run.status = "FAILED"
-            run.active_research_key = None
-            run.error_message = "benchmark data did not synchronize before the next trading session"
-            run.completed_at = now
-            AuditLogger(session).record(
-                run_id, "DATA_READINESS_TIMEOUT", "Benchmark data wait expired",
-                severity="ERROR", details={"deadline_at": deadline.isoformat()},
-            )
-            session.commit()
-            return False
+            deadline = current
         ready = False
         try:
-            ready = AKShareDataReadiness().ready(run.trading_date, now)
+            ready = (
+                readiness(run.trading_date, current)
+                if readiness is not None
+                else AKShareDataReadiness().ready(run.trading_date, current)
+            )
         except Exception:
             ready = False
         if ready:
@@ -107,8 +119,25 @@ def _retry_waiting_research(run_id: str) -> bool:
             )
             session.commit()
             return True
+        if current >= deadline:
+            # The 09:25 boundary means "not ready by then", not "skip the
+            # last readiness probe".  A feed that arrives exactly at the
+            # deadline remains safe because the next continuous session has
+            # not begun yet.
+            run.status = "FAILED"
+            run.active_research_key = None
+            run.error_message = "benchmark data did not synchronize before the next trading session"
+            run.completed_at = current
+            AuditLogger(session).record(
+                run_id, "DATA_READINESS_TIMEOUT", "Benchmark data wait expired",
+                severity="ERROR", details={"deadline_at": deadline.isoformat()},
+            )
+            session.commit()
+            return False
         retry_at = min(
-            now + timedelta(minutes=get_settings().daily_research_retry_minutes), deadline
+            current
+            + timedelta(minutes=get_effective_settings().daily_research_retry_minutes),
+            deadline,
         )
         wait["next_retry_at"] = retry_at.isoformat()
         wait["attempt_count"] = int(wait.get("attempt_count", 0)) + 1
@@ -118,7 +147,7 @@ def _retry_waiting_research(run_id: str) -> bool:
             details={"next_retry_at": retry_at.isoformat(), "attempt_count": wait["attempt_count"]},
         )
         session.commit()
-    enqueue_research_at(run_id, retry_at)
+    enqueue_at(run_id, retry_at)
     return False
 
 
@@ -149,6 +178,17 @@ def mark_research_failed(
             severity="ERROR",
             details=_error_details(error),
         )
+        if run.user_id:
+            NotificationService(session).create(
+                user_id=run.user_id,
+                notification_type="RESEARCH_FAILED",
+                severity="WARNING",
+                title="正式研究运行失败",
+                body="本次研究未完成；没有生成或执行自动交易。",
+                resource_type="RESEARCH_RUN",
+                resource_id=run.run_id,
+                dedupe_key=f"research-failed:{run.run_id}",
+            )
         session.commit()
 
 
@@ -289,6 +329,18 @@ def execute_research_job(
             completed = session.get(JobRun, run_id)
             if completed is not None:
                 completed.active_research_key = None
+                if completed.user_id:
+                    NotificationService(session).create(
+                        user_id=completed.user_id,
+                        notification_type="RESEARCH_COMPLETED",
+                        severity="INFO",
+                        title="正式研究运行已完成",
+                        body="研究结果已生成，可查看报告与模拟交易方案。",
+                        resource_type="RESEARCH_RUN",
+                        resource_id=completed.run_id,
+                        payload={"status": completed.status, "report_id": report_id},
+                        dedupe_key=f"research-completed:{completed.run_id}",
+                    )
                 session.commit()
         return result
     except Exception as exc:
@@ -304,17 +356,46 @@ def execute_research_job(
                 if run is not None:
                     wait = dict((run.manifest or {}).get("data_readiness_wait") or {})
                     deadline_raw = wait.get("deadline_at")
-                    deadline = (
-                        datetime.fromisoformat(str(deadline_raw))
-                        if deadline_raw
-                        else now
-                        + timedelta(minutes=get_settings().daily_research_retry_limit_minutes)
-                    )
+                    if not deadline_raw:
+                        from ashare_ai.orchestration.research_schedule import (
+                            FreeExchangeCalendar,
+                            data_readiness_wait,
+                        )
+
+                        try:
+                            sessions = FreeExchangeCalendar().sessions(
+                                run.trading_date, run.trading_date + timedelta(days=14)
+                            )
+                            wait = data_readiness_wait(
+                                trading_date=run.trading_date,
+                                now=now,
+                                sessions=sessions,
+                                retry_minutes=get_effective_settings().daily_research_retry_minutes,
+                            )
+                        except Exception as calendar_error:
+                            run.status = "FAILED"
+                            run.active_research_key = None
+                            run.error_message = "authoritative trading calendar unavailable"
+                            run.completed_at = now
+                            AuditLogger(session).record(
+                                run_id,
+                                "DATA_READINESS_CALENDAR_UNAVAILABLE",
+                                "Research could not calculate a safe data-readiness deadline",
+                                severity="ERROR",
+                                details={"error_type": type(calendar_error).__name__},
+                            )
+                            session.commit()
+                            raise
+                        deadline_raw = wait["deadline_at"]
+                    deadline = datetime.fromisoformat(str(deadline_raw))
                     if deadline.tzinfo is None:
                         deadline = deadline.replace(tzinfo=UTC)
                     if now < deadline:
                         retry_at = min(
-                            now + timedelta(minutes=get_settings().daily_research_retry_minutes),
+                            now
+                            + timedelta(
+                                minutes=get_effective_settings().daily_research_retry_minutes
+                            ),
                             deadline,
                         )
                         wait.update(
@@ -337,25 +418,82 @@ def execute_research_job(
                         session.commit()
                         enqueue_research_at(run_id, retry_at)
                         return {"run_id": run_id, "status": "DATA_READINESS_WAITING"}
+                    run.status = "FAILED"
+                    run.active_research_key = None
+                    run.error_message = (
+                        "benchmark data did not synchronize before the next trading session"
+                    )
+                    run.completed_at = now
+                    AuditLogger(session).record(
+                        run_id,
+                        "DATA_READINESS_TIMEOUT",
+                        "Benchmark data wait expired during snapshot construction",
+                        severity="ERROR",
+                        details={**_error_details(exc), "deadline_at": deadline.isoformat()},
+                    )
+                    session.commit()
+                    return {"run_id": run_id, "status": "FAILED"}
         mark_research_failed(run_id, exc, session_factory=session_factory)
         raise
 
 
 def run_research_job(run_id: str) -> dict[str, Any]:
     if not _retry_waiting_research(run_id):
-        return {"run_id": run_id, "status": "DATA_READINESS_WAITING"}
+        with SessionLocal() as session:
+            run = session.get(JobRun, run_id)
+            return {"run_id": run_id, "status": run.status if run is not None else "FAILED"}
     return execute_research_job(run_id, pipeline=load_pipeline())
 
 
-def consume_research_queue() -> None:
+def _load_worker_runtime() -> SystemRuntimeSettings | None:
+    try:
+        with SessionLocal() as session:
+            return SystemConfigurationService().resolve(session)
+    except Exception:
+        logger.exception("could not load persisted research-worker topology; using SERIAL standby")
+        return None
+
+
+def _execute_isolated_research(run_id: str) -> int:
+    """Keep dedicated workers isolated exactly like the serial worker."""
+    return subprocess.run(
+        [sys.executable, "-m", "ashare_ai.orchestration.run_job", "research", run_id],
+        check=False,
+    ).returncode
+
+
+def consume_research_queue(*, max_standby_iterations: int | None = None) -> None:
     import redis
 
-    client = redis.Redis.from_url(get_settings().redis_url, decode_responses=True)
+    runtime = _load_worker_runtime()
+    settings = runtime.settings if runtime is not None else get_settings()
+    client = redis.Redis.from_url(settings.redis_url, decode_responses=True)
+    if runtime is None or runtime.execution_mode != "DUAL":
+        # Compose starts these replicas only through the dual-research profile.
+        # If a replica is left running during an incomplete topology restart,
+        # it still fails closed in SERIAL and never claims a research message.
+        iterations = 0
+        while max_standby_iterations is None or iterations < max_standby_iterations:
+            if runtime is not None:
+                publish_heartbeat(client, role="research-worker", runtime=runtime)
+            iterations += 1
+            if max_standby_iterations is None or iterations < max_standby_iterations:
+                time.sleep(5)
+        return
     queue = RedisLeasedQueue(
         client,
         pending=QUEUE_NAME,
         processing=PROCESSING_QUEUE_NAME,
         delayed=DELAYED_QUEUE_NAME,
-        lease_seconds=get_settings().worker_lease_seconds,
+        lease_seconds=runtime.settings.worker_lease_seconds,
     )
-    queue.consume_forever(run_research_job)
+
+    def execute(run_id: str) -> None:
+        return_code = _execute_isolated_research(run_id)
+        if return_code:
+            logger.error("isolated research job %s exited with status %s", run_id, return_code)
+
+    def heartbeat() -> None:
+        publish_heartbeat(client, role="research-worker", runtime=runtime)
+
+    queue.consume_forever(execute, on_poll=heartbeat)

@@ -28,6 +28,23 @@ describe('API security and market adapters', () => {
     expect(init?.method).toBe('POST')
   })
 
+  it('uses the focused quote endpoint and persists refresh settings through the narrow API', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({ symbol: '600519.SH', price: 21.8, status: { source: 'sina', collected_at: '2026-07-20T00:00:00Z', cached_at: '2026-07-20T00:00:00Z', delayed: false, stale: false } }))
+      .mockResolvedValueOnce(jsonResponse({ watchlist: [], positions: [], market_refresh_interval_seconds: 30 }))
+
+    const quote = await api.quote('600519.SH', true)
+    await api.saveMarketRefreshSettings(30)
+
+    expect(quote.price).toBe(21.8)
+    expect(String(vi.mocked(fetch).mock.calls[0][0])).toContain('/market/quotes/600519.SH?refresh=true')
+    expect(String(vi.mocked(fetch).mock.calls[1][0])).toContain('/assets/market-refresh')
+    const init = vi.mocked(fetch).mock.calls[1][1]
+    expect(init?.method).toBe('PUT')
+    expect(new Headers(init?.headers).get('Idempotency-Key')).toBeTruthy()
+    expect(JSON.parse(String(init?.body))).toEqual({ market_refresh_interval_seconds: 30 })
+  })
+
   it('targets single-score lineage and research cancellation endpoints', async () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(jsonResponse({ symbol: '600000.SH', total_score: 80 }))
@@ -124,19 +141,51 @@ describe('API security and market adapters', () => {
       configuration_id: 'config-1', version: 1, config_sha256: 'a'.repeat(64), source: 'database',
       provider: 'openai-compatible', base_url: 'https://gateway.example/v1', api_key_configured: true,
       search_model: 'gpt-5.6-luna', search_reasoning_effort: 'low', research_model: 'gpt-5.6-sol',
-      research_reasoning_effort: 'high', timeout_seconds: 90, enabled: true, configured: true,
+      research_reasoning_effort: 'high', model_profiles: [], timeout_seconds: 90, enabled: true, configured: true,
       reachable: true, degraded: false, status_message: 'ok',
     }))
     await api.saveModelSettings({
       base_url: 'https://gateway.example/v1', api_key: '', search_model: 'gpt-5.6-luna',
       search_reasoning_effort: 'low', research_model: 'gpt-5.6-sol', research_reasoning_effort: 'high',
-      timeout_seconds: 90, enabled: true,
+      model_profiles: [], timeout_seconds: 90, enabled: true,
     })
 
     const [, init] = vi.mocked(fetch).mock.calls[0]
     expect(init?.method).toBe('PUT')
     expect(new Headers(init?.headers).get('X-CSRF-Token')).toBe('csrf-value')
     expect(String(init?.body)).toContain('"api_key":""')
+  })
+
+  it('reads system resources and protects every settings mutation with an unlock token', async () => {
+    const resources = {
+      collected_at: '2026-07-26T08:00:00Z', scope: 'CONTAINER', scope_label: 'Docker',
+      memory: { total_bytes: 100, used_bytes: 40, available_bytes: 60, percent: 40 },
+      cpu: { percent: 12, logical_cores: 8 },
+      disk: { total_bytes: 200, used_bytes: 50, available_bytes: 150, percent: 25 },
+      services: [],
+      topology_estimate: { worker_replicas: 1, typical_per_worker_bytes: 20, typical_increment_bytes: 20, maximum_increment_bytes: 40, projected_available_bytes: 40, level: 'NORMAL', messages: [] },
+    }
+    const settings = { values: {}, workers: [], queues: {} }
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse(resources))
+      .mockResolvedValueOnce(jsonResponse({ unlock_token: 'unlock-secret', expires_at: '2026-07-26T08:10:00Z' }))
+      .mockResolvedValueOnce(jsonResponse(settings))
+      .mockResolvedValueOnce(jsonResponse(settings))
+      .mockResolvedValueOnce(jsonResponse(settings))
+
+    expect(await api.systemResources()).toMatchObject({ scope: 'CONTAINER', cpu: { logical_cores: 8 } })
+    expect(await api.unlockSystemSettings('current-password')).toMatchObject({ unlock_token: 'unlock-secret' })
+    await api.saveSystemSettings({ market_cache_seconds: 30 }, 'unlock-secret', 'save-key')
+    await api.restoreSystemSetting('market_cache_seconds', 'unlock-secret')
+    await api.restoreAllSystemSettings('unlock-secret')
+
+    expect(String(vi.mocked(fetch).mock.calls[0][0])).toContain('/admin/system-resources')
+    expect(JSON.parse(String(vi.mocked(fetch).mock.calls[1][1]?.body))).toEqual({ password: 'current-password' })
+    expect(vi.mocked(fetch).mock.calls[1][1]?.method).toBe('POST')
+    for (const call of vi.mocked(fetch).mock.calls.slice(2)) {
+      expect(new Headers(call[1]?.headers).get('X-System-Settings-Unlock')).toBe('unlock-secret')
+    }
+    expect(new Headers(vi.mocked(fetch).mock.calls[2][1]?.headers).get('Idempotency-Key')).toBe('save-key')
   })
 
   it('persists user asset state with CSRF protection', async () => {

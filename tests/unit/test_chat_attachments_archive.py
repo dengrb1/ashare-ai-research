@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from ashare_ai.agents.attachments import AttachmentError, AttachmentService, inspect_image
 from ashare_ai.agents.chat import _resolve_mentions
-from ashare_ai.core.config import Settings, get_settings
+from ashare_ai.core.config import Settings
 from ashare_ai.core.hashing import canonical_json, sha256_bytes
 from ashare_ai.storage.models import (
     AIChatMessage,
@@ -66,6 +66,13 @@ def _database() -> tuple[Session, str]:
     session.add(user)
     session.commit()
     return session, user.user_id
+
+
+def _archive_settings() -> Settings:
+    return Settings(
+        _env_file=None,
+        personal_data_encryption_keys=Fernet.generate_key().decode(),
+    )
 
 
 def test_attachment_is_encrypted_user_isolated_and_expires_at_exact_boundary(
@@ -128,7 +135,9 @@ def test_image_signature_mime_and_animation_validation() -> None:
     assert _looks_like_image(b"BM" + b"\x00" * 30)
 
 
-def test_personal_archive_excludes_image_metadata_and_authenticates_passphrase() -> None:
+def test_personal_archive_excludes_image_metadata_and_authenticates_passphrase(monkeypatch) -> None:
+    settings = _archive_settings()
+    monkeypatch.setattr("ashare_ai.storage.personal_archive.get_settings", lambda: settings)
     session, user_id = _database()
     now = datetime.now(UTC)
     session.add(
@@ -196,7 +205,9 @@ def test_personal_archive_rejects_unsafe_zip_paths() -> None:
     assert caught.value.code == "ARCHIVE_PATH_UNSAFE"
 
 
-def test_personal_archive_rejects_unsigned_source_and_signed_image_objects() -> None:
+def test_personal_archive_rejects_unsigned_source_and_signed_image_objects(monkeypatch) -> None:
+    settings = _archive_settings()
+    monkeypatch.setattr("ashare_ai.storage.personal_archive.get_settings", lambda: settings)
     profile_payload = canonical_json({"schema_version": 1})
     files = {"domain/profile.json": profile_payload}
     manifest: dict[str, object] = {
@@ -229,7 +240,7 @@ def test_personal_archive_rejects_unsigned_source_and_signed_image_objects() -> 
             for name, value in image_files.items()
         },
     }
-    key_id, key = _server_keys(get_settings())[0]
+    key_id, key = _server_keys(settings)[0]
     signed_manifest["source_auth"] = {
         "algorithm": "HMAC-SHA256",
         "key_id": key_id,
@@ -240,7 +251,11 @@ def test_personal_archive_rejects_unsigned_source_and_signed_image_objects() -> 
     assert caught.value.code == "ARCHIVE_IMAGE_FORBIDDEN"
 
 
-def test_personal_archive_applies_watchlist_union_and_selected_position_atomically() -> None:
+def test_personal_archive_applies_watchlist_union_and_selected_position_atomically(
+    monkeypatch,
+) -> None:
+    settings = _archive_settings()
+    monkeypatch.setattr("ashare_ai.storage.personal_archive.get_settings", lambda: settings)
     session, source_user = _database()
     now = datetime.now(UTC)
     target = UserAccount(
@@ -475,7 +490,7 @@ def test_stock_name_mentions_cannot_be_bound_to_a_different_symbol(monkeypatch) 
         {},
         [{"symbol": "000001.SZ", "name": "贵州茅台"}],
         now=now,
-    ) == []
+    ) == [{"symbol": "600519.SH", "name": "贵州茅台"}]
     assert _resolve_mentions(
         "@贵州茅台",
         {},

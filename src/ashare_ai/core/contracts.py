@@ -264,7 +264,11 @@ class AgentComponentResult(FrozenModel):
     prompt_sha256: Sha256
     response_sha256: Sha256
     input_tokens: int = Field(ge=0)
+    cached_input_tokens: int = Field(default=0, ge=0)
+    cache_write_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(ge=0)
+    reasoning_tokens: int = Field(default=0, ge=0)
+    cache_policy: Literal["GROK", "OPENAI", "COMPATIBLE"] = "COMPATIBLE"
     duration_ms: int = Field(ge=0)
     retry_count: int = Field(ge=0)
 
@@ -335,6 +339,9 @@ class Candidate(FrozenModel):
     dividend_bonus: float = Field(default=0, ge=0, le=10)
     prediction_percentile: float = Field(ge=0, le=1)
     industry_code: str
+    # Defaulted so CandidateArtifact JSON frozen before this field existed still
+    # deserializes; new artifacts are not readable by older code.
+    industry_name: str | None = None
     volatility: float = Field(gt=0)
     event_risk_multiplier: float = Field(default=1.0, ge=0, le=1)
     style_exposures: dict[str, float] = Field(default_factory=dict)

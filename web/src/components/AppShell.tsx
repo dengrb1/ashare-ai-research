@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
-import { useMarket } from '../context/MarketContext'
+import { MARKET_REFRESH_INTERVAL_OPTIONS, useMarket } from '../context/MarketContext'
 import { formatTime } from './Ui'
 import { ThemeToggle } from '../context/ThemeContext'
 import { useRefreshControl } from '../context/RefreshContext'
+import { NotificationBell } from './NotificationBell'
 
 const NAV = [
   { to: '/', label: '全局仪表盘', icon: '◫', end: true },
@@ -43,6 +44,7 @@ const TITLES: Record<string, [string, string]> = {
   '/about': ['关于本系统', '系统定位、研究链路与使用边界'],
   '/admin': ['用户管理', '账户、角色与访问控制'],
   '/admin/models': ['模型设置', '加密凭据、模型分工、连通性与版本状态'],
+  '/admin/system-settings': ['系统设置', '持久化运行配置与 Worker 执行拓扑'],
 }
 
 export function titleForPathname(pathname: string): [string, string] {
@@ -52,7 +54,7 @@ export function titleForPathname(pathname: string): [string, string] {
 
 export function AppShell() {
   const { user, logout } = useAuth()
-  const { delayed, source, updatedAt } = useMarket()
+  const { delayed, source, updatedAt, marketRefreshIntervalSeconds, saveMarketRefreshInterval, assetsSaving } = useMarket()
   const location = useLocation()
   const [title, subtitle] = titleForPathname(location.pathname)
   const isAdmin = user?.role?.toLowerCase() === 'admin'
@@ -103,11 +105,11 @@ export function AppShell() {
           <NavLink key={item.to} to={item.to!} end={item.end} onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}>
             <span>{item.icon}</span>{item.label}
           </NavLink>)}
-        {isAdmin && <><NavLink to="/admin" end onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}><span>⚙</span>用户管理</NavLink><NavLink to="/admin/models" onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}><span>◉</span>模型设置</NavLink></>}
+        {isAdmin && <><NavLink to="/admin" end onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}><span>⚙</span>用户管理</NavLink><NavLink to="/admin/system-settings" onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}><span>⌘</span>系统设置</NavLink><NavLink to="/admin/models" onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}><span>◉</span>模型设置</NavLink></>}
       </nav>
       <div className="sidebar-foot">
         <div className={`feed-state ${delayed ? 'delayed' : ''}`}><i />{delayed ? '行情非实时' : `${source} 行情正常`}</div>
-        <small>{updatedAt ? `更新 ${formatTime(updatedAt)}` : '按活跃标的 15 秒刷新'}</small>
+        <small>{updatedAt ? `更新 ${formatTime(updatedAt)}` : `按活跃标的 ${marketRefreshIntervalSeconds} 秒刷新`}</small>
       </div>
     </aside>
     <div className="workspace">
@@ -116,6 +118,12 @@ export function AppShell() {
         <div className="topbar-title"><h1>{title}</h1><p>{subtitle}</p></div>
         <div className="top-actions">
           <button className="refresh-button" onClick={() => void refresh()} disabled={!available || busy} title="刷新当前页面">{busy ? '刷新中' : '↻ 刷新'}</button>
+          <label className="market-refresh-interval">自动刷新
+            <select aria-label="自动刷新间隔" value={marketRefreshIntervalSeconds} disabled={assetsSaving} onChange={(event) => void saveMarketRefreshInterval(Number(event.target.value) as typeof marketRefreshIntervalSeconds).catch(() => undefined)}>
+              {MARKET_REFRESH_INTERVAL_OPTIONS.map((seconds) => <option value={seconds} key={seconds}>{seconds} 秒</option>)}
+            </select>
+          </label>
+          <NotificationBell />
           <ThemeToggle compact />
           <div className="market-clock"><span>上海时间</span><strong>{shanghaiClock}</strong></div>
           <div className="user-menu"><span>{user?.username.slice(0, 1).toUpperCase()}</span><div><strong>{user?.username}</strong><small>{isAdmin ? '管理员' : '研究员'}</small></div><button onClick={() => void logout()} title="退出登录">退出</button></div>

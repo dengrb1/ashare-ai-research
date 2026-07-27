@@ -137,3 +137,26 @@ def test_failed_item_does_not_stop_the_worker_loop() -> None:
     assert handled == ["run-1", "run-2"]
     assert errors == [("run-1", "expected failure")]
     assert client.lists["processing"] == []
+
+def test_two_independent_consumers_claim_distinct_research_runs() -> None:
+    client = FakeRedis()
+    consumer_a = RedisLeasedQueue(
+        client,
+        pending="research:pending",
+        processing="research:processing",
+        lease_seconds=30,
+        clock=lambda: 100.0,
+    )
+    consumer_b = RedisLeasedQueue(
+        client,
+        pending="research:pending",
+        processing="research:processing",
+        lease_seconds=30,
+        clock=lambda: 100.0,
+    )
+    consumer_a.enqueue("run-1")
+    consumer_a.enqueue("run-2")
+
+    claimed = {consumer_a.claim(), consumer_b.claim()}
+    assert claimed == {"run-1", "run-2"}
+    assert consumer_a.claim() is None

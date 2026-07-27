@@ -11,13 +11,20 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from ashare_ai.api.app import app
+from ashare_ai.api.app import (
+    _market_session_calendar_cache,
+    _market_session_status,
+    app,
+)
 from ashare_ai.api.auth import hash_password
 from ashare_ai.api.dependencies import get_db
+from ashare_ai.api.schemas import MarketSessionStatus
 from ashare_ai.core.config import Settings
 from ashare_ai.market.service import (
+    AKShareMarketProvider,
     MarketDataService,
     SinaMarketProvider,
+    TencentHfqDailyMarketProvider,
     _intraday_series_is_stale,
 )
 from ashare_ai.storage.models import (
@@ -183,6 +190,15 @@ class EmptyFallback:
     def klines(self, symbol, period, start, end, limit):
         del symbol, period, start, end, limit
         return []
+
+
+class TargetedRealtimeProvider(QuoteProvider):
+    source = "sina"
+    delayed = False
+
+    def quotes(self, symbols):
+        self.calls += 1
+        return [{"symbol": symbol, "price": 21.8} for symbol in symbols]
 
 
 class PrefetchProvider(QuoteProvider):
@@ -559,6 +575,31 @@ def test_quote_cache_older_than_stale_limit_is_not_reused() -> None:
         service.quotes(["600000.SH"])
 
 
+def test_focused_quote_prefers_targeted_realtime_provider_and_uses_its_own_cache() -> None:
+    primary = QuoteProvider()
+    realtime = TargetedRealtimeProvider()
+    current = [datetime(2026, 7, 15, 2, tzinfo=UTC)]
+    service = MarketDataService(
+        primary=primary,
+        fallback=realtime,
+        settings=Settings(market_cache_seconds=15, market_timeout_seconds=1),
+        clock=lambda: current[0],
+        redis_client=None,
+    )
+
+    first = service.quote("600000.SH")
+    cached = service.quote("600000.SH")
+    refreshed = service.quote("600000.SH", force_refresh=True)
+
+    assert first["price"] == 21.8
+    assert first["status"]["source"] == "sina"
+    assert first["status"]["delayed"] is False
+    assert cached["status"]["cache_hit"] is True
+    assert refreshed["status"]["cache_hit"] is False
+    assert realtime.calls == 2
+    assert primary.calls == 0
+
+
 def test_concurrent_disjoint_quote_requests_are_coalesced() -> None:
     provider = SlowQuoteProvider()
     settings = Settings(
@@ -790,6 +831,25 @@ def test_prefetch_normalizes_symbols_limits_concurrency_and_isolates_failures() 
         service.prefetch(["600519.SH"], periods=["5m"])
 
 
+def test_prefetch_without_quotes_warms_daily_klines_only() -> None:
+    provider = PrefetchProvider()
+    service = MarketDataService(
+        primary=provider,
+        fallback=EmptyFallback(),
+        settings=Settings(market_timeout_seconds=1),
+        clock=lambda: datetime(2026, 7, 14, 2, tzinfo=UTC),
+        redis_client=None,
+    )
+
+    payload = service.prefetch(
+        ["600519.SH", "000001.SZ"], periods=["day"], limit=160, include_quotes=False
+    )
+
+    assert payload["quotes"] == []
+    assert set(payload["klines"]) == {"000001.SZ", "600519.SH"}
+    assert provider.calls == 0
+
+
 def test_daily_kline_uses_independent_five_minute_cache() -> None:
     provider = PrefetchProvider()
     current = [datetime(2026, 7, 15, 2, tzinfo=UTC)]
@@ -814,6 +874,248 @@ def test_daily_kline_uses_independent_five_minute_cache() -> None:
     current[0] += timedelta(seconds=2)
     service.klines("600519.SH", "day", limit=160)
     assert provider.kline_calls["600519.SH"] == 2
+
+
+def _daily_bar(close: float = 10.5) -> list[dict[str, object]]:
+    return [
+        {
+            "timestamp": "2026-07-14T00:00:00+08:00",
+            "open": 10.0,
+            "high": 11.0,
+            "low": 9.0,
+            "close": close,
+            "volume": 100.0,
+            "amount": 1000.0,
+            "turnover_rate": 1.0,
+        }
+    ]
+
+
+def test_daily_kline_hedges_slow_akshare_and_caches_only_winner(monkeypatch) -> None:
+    primary = AKShareMarketProvider(timeout_seconds=2)
+    tencent = TencentHfqDailyMarketProvider()
+    calls = {"primary": 0, "tencent": 0}
+
+    def slow_primary(*_args):
+        calls["primary"] += 1
+        time.sleep(0.25)
+        return _daily_bar(10.4)
+
+    def fast_tencent(*_args):
+        calls["tencent"] += 1
+        return _daily_bar(10.6)
+
+    monkeypatch.setattr(primary, "klines", slow_primary)
+    monkeypatch.setattr(tencent, "klines", fast_tencent)
+    service = MarketDataService(
+        primary=primary,
+        fallback=tencent,
+        settings=Settings(
+            market_timeout_seconds=1,
+            market_hedge_delay_seconds=0.1,
+            market_kline_cache_seconds=300,
+        ),
+        clock=lambda: datetime(2026, 7, 15, 2, tzinfo=UTC),
+        redis_client=None,
+    )
+
+    first = service.klines(
+        "600519.SH",
+        "day",
+        limit=10,
+        start=datetime(2026, 7, 1, tzinfo=UTC),
+        end=datetime(2026, 7, 14, 23, tzinfo=UTC),
+    )
+    cached = service.klines(
+        "600519.SH",
+        "day",
+        limit=10,
+        start=datetime(2026, 7, 1, 12, tzinfo=UTC),
+        end=datetime(2026, 7, 14, 12, tzinfo=UTC),
+    )
+
+    assert first["status"]["source"] == "tencent"
+    assert first["bars"][0]["close"] == 10.6
+    assert cached["status"]["cache_hit"] is True
+    assert calls == {"primary": 1, "tencent": 1}
+
+
+def test_daily_kline_does_not_hedge_fast_akshare(monkeypatch) -> None:
+    primary = AKShareMarketProvider(timeout_seconds=2)
+    tencent = TencentHfqDailyMarketProvider()
+    tencent_calls = 0
+
+    monkeypatch.setattr(primary, "klines", lambda *_args: _daily_bar())
+
+    def unexpected_tencent(*_args):
+        nonlocal tencent_calls
+        tencent_calls += 1
+        return _daily_bar()
+
+    monkeypatch.setattr(tencent, "klines", unexpected_tencent)
+    service = MarketDataService(
+        primary=primary,
+        fallback=tencent,
+        settings=Settings(market_timeout_seconds=1, market_hedge_delay_seconds=0.1),
+        clock=lambda: datetime(2026, 7, 15, 2, tzinfo=UTC),
+        redis_client=None,
+    )
+
+    result = service.klines(
+        "600519.SH",
+        "day",
+        limit=10,
+        start=datetime(2026, 7, 1, tzinfo=UTC),
+        end=datetime(2026, 7, 14, 23, tzinfo=UTC),
+    )
+
+    assert result["status"]["source"] == "akshare"
+    assert tencent_calls == 0
+
+
+def test_intraday_kline_cache_uses_refresh_bucket_and_exact_filtering() -> None:
+    class IntradayProvider(PrefetchProvider):
+        def klines(self, symbol, period, start, end, limit):
+            del symbol, period, start, end, limit
+            self.kline_calls["600519.SH"] = self.kline_calls.get("600519.SH", 0) + 1
+            return [
+                {
+                    "timestamp": "2026-07-15T10:00:10+08:00",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.0,
+                    "close": 10.5,
+                    "volume": 100.0,
+                }
+            ]
+
+    provider = IntradayProvider()
+    service = MarketDataService(
+        primary=provider,
+        fallback=EmptyFallback(),
+        settings=Settings(market_cache_seconds=15, market_timeout_seconds=1),
+        clock=lambda: datetime(2026, 7, 15, 2, 0, 12, tzinfo=UTC),
+        redis_client=None,
+    )
+    first = service.klines(
+        "600519.SH",
+        "5m",
+        limit=10,
+        start=datetime(2026, 7, 15, 1, 59, 46, tzinfo=UTC),
+        end=datetime(2026, 7, 15, 2, 0, 14, tzinfo=UTC),
+    )
+    second = service.klines(
+        "600519.SH",
+        "5m",
+        limit=10,
+        start=datetime(2026, 7, 15, 1, 59, 47, tzinfo=UTC),
+        end=datetime(2026, 7, 15, 2, 0, 13, tzinfo=UTC),
+    )
+
+    assert first["bars"] and second["bars"]
+    assert second["status"]["cache_hit"] is True
+    assert provider.kline_calls["600519.SH"] == 1
+
+
+def test_market_status_reports_compatible_process_and_hedge_fields() -> None:
+    service = MarketDataService(
+        primary=PrefetchProvider(),
+        fallback=EmptyFallback(),
+        settings=Settings(market_hedge_delay_seconds=0.7),
+        redis_client=None,
+    )
+
+    status = service.status()
+
+    assert status["provider_process_mode"] == "IN_PROCESS"
+    assert status["provider_process_state"] == "READY"
+    assert status["provider_process_degraded"] is False
+    assert status["hedge_delay_seconds"] == 0.7
+
+
+def test_market_session_status_caches_successful_calendar_results_and_fails_closed(
+    monkeypatch,
+) -> None:
+    class Calendar:
+        calls = 0
+
+        def sessions(self, start: date, end: date) -> tuple[date, ...]:
+            assert start == end == date(2026, 7, 20)
+            type(self).calls += 1
+            return (start,)
+
+    _market_session_calendar_cache.clear()
+    monkeypatch.setattr("ashare_ai.api.app.FreeExchangeCalendar", Calendar)
+    current = datetime(2026, 7, 20, 15, tzinfo=UTC)
+    try:
+        first = _market_session_status(current)
+        second = _market_session_status(current)
+    finally:
+        _market_session_calendar_cache.clear()
+
+    assert (first.state, first.is_trading_day, first.reason) == (
+        "CLOSED",
+        True,
+        "AFTER_CLOSE",
+    )
+    assert second == first
+    assert Calendar.calls == 1
+
+    class UnavailableCalendar:
+        def sessions(self, start: date, end: date) -> tuple[date, ...]:
+            del start, end
+            raise RuntimeError("calendar offline")
+
+    monkeypatch.setattr("ashare_ai.api.app.FreeExchangeCalendar", UnavailableCalendar)
+    unavailable = _market_session_status(current)
+    assert (unavailable.state, unavailable.is_trading_day, unavailable.reason) == (
+        "UNKNOWN",
+        None,
+        "CALENDAR_UNAVAILABLE",
+    )
+
+
+def test_market_status_api_exposes_compatible_market_session(monkeypatch) -> None:
+    session, _, _ = _database()
+
+    class StubMarket:
+        def status(self) -> dict[str, object]:
+            return {"primary": "fixture", "live_data_isolated_from_snapshots": True}
+
+    expected = MarketSessionStatus(
+        state="CLOSED",
+        as_of=datetime(2026, 7, 20, 15, tzinfo=UTC),
+        trading_date=date(2026, 7, 20),
+        is_trading_day=True,
+        reason="AFTER_CLOSE",
+    )
+
+    def override_db():
+        yield session
+
+    monkeypatch.setattr("ashare_ai.api.app.get_market_data_service", lambda: StubMarket())
+    monkeypatch.setattr("ashare_ai.api.app._market_session_status", lambda: expected)
+    app.dependency_overrides[get_db] = override_db
+    try:
+        anonymous = TestClient(app)
+        assert anonymous.get("/api/v1/market/status").status_code == 401
+        client = TestClient(app)
+        assert client.post(
+            "/api/v1/auth/login",
+            json={"username": "alice", "password": "alice-password"},
+        ).status_code == 200
+        response = client.get("/api/v1/market/status")
+        assert response.status_code == 200
+        assert response.json()["market_session"] == {
+            "state": "CLOSED",
+            "as_of": "2026-07-20T15:00:00Z",
+            "trading_date": "2026-07-20",
+            "is_trading_day": True,
+            "reason": "AFTER_CLOSE",
+        }
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
 
 
 def test_kline_timeout_degrades_to_recent_cache() -> None:
@@ -857,7 +1159,7 @@ def test_prefetch_api_requires_auth_csrf_and_returns_indexed_results(monkeypatch
     session, _, _ = _database()
 
     class StubMarket:
-        def prefetch(self, symbols, *, periods, limit):
+        def prefetch(self, symbols, *, periods, limit, include_quotes):
             if len(set(symbols)) > 50:
                 raise ValueError("prefetch supports at most 50 symbols")
             if any(symbol == "INVALID" for symbol in symbols):
@@ -865,6 +1167,7 @@ def test_prefetch_api_requires_auth_csrf_and_returns_indexed_results(monkeypatch
             assert symbols == ["600519.SH"]
             assert periods == ["day"]
             assert limit == 160
+            assert include_quotes is False
             status = {
                 "source": "fixture",
                 "collected_at": "2026-07-16T01:00:00Z",
@@ -918,7 +1221,12 @@ def test_prefetch_api_requires_auth_csrf_and_returns_indexed_results(monkeypatch
         csrf = client.cookies.get("ashare_csrf")
         response = client.post(
             "/api/v1/market/prefetch",
-            json={"symbols": ["600519.SH"], "periods": ["day"], "limit": 160},
+            json={
+                "symbols": ["600519.SH"],
+                "periods": ["day"],
+                "limit": 160,
+                "include_quotes": False,
+            },
             headers={"x-csrf-token": csrf},
         )
         assert response.status_code == 200
@@ -953,6 +1261,7 @@ def test_research_submission_prepares_frozen_manifest_and_deduplicates(monkeypat
     monkeypatch.setattr("ashare_ai.api.app.load_pipeline", lambda: pipeline)
     monkeypatch.setattr("ashare_ai.api.app.enqueue_research", queued.append)
     monkeypatch.setattr("ashare_ai.api.app._manual_research_date", lambda value, now: value)
+    monkeypatch.setattr("ashare_ai.api.app._research_readiness_wait", lambda _date, _now: None)
 
     def override_db():
         yield session
@@ -1036,6 +1345,60 @@ def test_research_submission_prepares_frozen_manifest_and_deduplicates(monkeypat
         session.close()
 
 
+def test_research_submission_reuses_a_waiting_data_readiness_run(monkeypatch) -> None:
+    session, _, _ = _database()
+    pipeline = PreparedPipeline(session)
+    delayed: list[tuple[str, datetime]] = []
+    next_retry_at = "2026-07-14T08:05:00+00:00"
+    monkeypatch.setattr("ashare_ai.api.app.load_pipeline", lambda: pipeline)
+    monkeypatch.setattr(
+        "ashare_ai.api.app._manual_research_date", lambda value, now: value
+    )
+    monkeypatch.setattr(
+        "ashare_ai.api.app._research_readiness_wait",
+        lambda _date, _now: {
+            "deadline_at": "2026-07-15T01:00:00+00:00",
+            "next_retry_at": next_retry_at,
+            "attempt_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        "ashare_ai.api.app.enqueue_research_at",
+        lambda run_id, available_at: delayed.append((run_id, available_at)),
+    )
+
+    def override_db():
+        yield session
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        client = TestClient(app)
+        client.post(
+            "/api/v1/auth/login",
+            json={"username": "alice", "password": "alice-password"},
+        )
+        csrf = client.cookies.get("ashare_csrf")
+        payload = {
+            "trading_date": "2026-07-14",
+            "scope": "CUSTOM",
+            "symbols": ["600519.SH"],
+            "total_budget": 1_000_000,
+            "per_symbol_budget": 80_000,
+        }
+        first = client.post("/api/v1/research/runs", json=payload, headers={"x-csrf-token": csrf})
+        second = client.post("/api/v1/research/runs", json=payload, headers={"x-csrf-token": csrf})
+
+        assert first.status_code == 202
+        assert first.json()["status"] == "DATA_READINESS_WAITING"
+        assert second.status_code == 200
+        assert second.json()["run_id"] == first.json()["run_id"]
+        assert pipeline.start_calls == 1
+        assert delayed == [("prepared-run", datetime.fromisoformat(next_retry_at))]
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+
 def test_watchlist_research_accepts_a_selected_subset_and_rejects_outside_symbols(
     monkeypatch,
 ) -> None:
@@ -1045,6 +1408,7 @@ def test_watchlist_research_accepts_a_selected_subset_and_rejects_outside_symbol
     monkeypatch.setattr("ashare_ai.api.app.load_pipeline", lambda: pipeline)
     monkeypatch.setattr("ashare_ai.api.app.enqueue_research", queued.append)
     monkeypatch.setattr("ashare_ai.api.app._manual_research_date", lambda value, now: value)
+    monkeypatch.setattr("ashare_ai.api.app._research_readiness_wait", lambda _date, _now: None)
 
     def override_db():
         yield session

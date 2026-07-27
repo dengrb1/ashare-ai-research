@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from cryptography.fernet import Fernet
 from starlette.requests import Request
 
 from ashare_ai.agents.model_settings import ModelSettingsError, normalize_base_url
@@ -30,6 +31,7 @@ def _production_settings(**changes: object) -> Settings:
         "model_allowed_hosts": "gateway.example.com",
         "allow_demo_data": False,
         "canonical_bundle_mode": "akshare",
+        "personal_data_encryption_keys": Fernet.generate_key().decode(),
     }
     values.update(changes)
     return Settings(**values)
@@ -50,6 +52,11 @@ def test_production_configuration_fails_closed_and_accepts_hardened_values() -> 
             object_store_endpoint="http://object-store:9000",
             object_store_access_key="access-key",
             object_store_secret_key="a-strong-object-secret",
+        ).validate_production_security()
+    with pytest.raises(ValueError, match="PERSONAL_DATA_ENCRYPTION_KEYS"):
+        _production_settings(
+            personal_data_encryption_keys=None,
+            model_settings_encryption_keys=None,
         ).validate_production_security()
 
 

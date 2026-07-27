@@ -19,15 +19,34 @@ def dispatch_auto_research_once() -> dict[str, Any]:
 
 
 def dispatch_scheduled_tasks() -> dict[str, Any]:
+    from ashare_ai.notifications.service import NotificationService
     from ashare_ai.orchestration.exit_advice_jobs import dispatch_exit_advice
+    from ashare_ai.portfolio.monitoring import BuyEntryMonitorService, StopLossMonitorService
+    from ashare_ai.storage.database import SessionLocal
+
+    now = datetime.now(SHANGHAI)
+    buy_monitor = BuyEntryMonitorService()
+    refresh_created = 0
+    # The row uniqueness constraint makes this safe during retries; limiting the
+    # refresh to after close avoids treating intraday plans as formal inputs.
+    if now.time().replace(tzinfo=None) >= datetime.strptime("15:05", "%H:%M").time():
+        refresh_created = buy_monitor.refresh_from_trade_plans(now=now)
+    with SessionLocal() as session:
+        expired_notifications = NotificationService(session).cleanup_expired(now=now)
+        if expired_notifications:
+            session.commit()
 
     return {
-        "exit_advice": dispatch_exit_advice(),
+        "exit_advice": dispatch_exit_advice(now=now),
+        "stop_loss": StopLossMonitorService().dispatch(now=now),
+        "buy_entry_monitor": buy_monitor.dispatch(now=now),
+        "buy_entry_refresh_created": refresh_created,
+        "expired_notifications": expired_notifications,
         "daily_research": dispatch_auto_research_once(),
     }
 
 
-def seconds_until_next_tick(now: datetime, *, interval_minutes: int = 5) -> float:
+def seconds_until_next_tick(now: datetime, *, interval_minutes: int = 1) -> float:
     if now.tzinfo is None:
         raise ValueError("scheduler time must be timezone-aware")
     if interval_minutes <= 0:

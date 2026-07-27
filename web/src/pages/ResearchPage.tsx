@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api'
+import { MarketClosedNotice } from '../components/MarketClosedNotice'
 import { ErrorNotice, formatNumber, formatTime, Loading, Panel, StatusPill, today } from '../components/Ui'
 import { useMarket } from '../context/MarketContext'
 import { usePageRefresh } from '../context/RefreshContext'
@@ -212,11 +213,12 @@ export function ResearchPage() {
           <div className="automatic-budget-fields"><label>总预算（元）<input type="number" min="1" value={draft.totalBudget} onChange={(event) => updateAutomaticDraft(draft.slot, { totalBudget: event.target.value })} /></label><label>单股最高投入（元）<input type="number" min="1" value={draft.perSymbolBudget} onChange={(event) => updateAutomaticDraft(draft.slot, { perSymbolBudget: event.target.value })} /></label><label>最高可接受股价（元）<input type="number" min="0.01" step="0.01" value={draft.maxStockPrice} onChange={(event) => updateAutomaticDraft(draft.slot, { maxStockPrice: event.target.value })} placeholder="不限" /></label></div>
         </article>)}</div>
         {settingsError && <div className="failure-box" role="alert"><strong>无法保存</strong><p>{settingsError}</p></div>}
-        <footer><p>上海交易日 15:05 同时提交启用的配置，由串行 Worker 依次执行。</p><div><button type="button" className="secondary" onClick={() => setSettingsOpen(false)}>取消</button><button type="button" className="primary" disabled={settingsSaving} onClick={() => void saveAutomaticSettings()}>{settingsSaving ? '正在保存…' : '保存设置'}</button></div></footer>
+        <footer><p>上海交易日 15:05 同时提交启用的配置；数据延迟时会等待至下一交易日 09:25，由串行 Worker 依次执行。</p><div><button type="button" className="secondary" onClick={() => setSettingsOpen(false)}>取消</button><button type="button" className="primary" disabled={settingsSaving} onClick={() => void saveAutomaticSettings()}>{settingsSaving ? '正在保存…' : '保存设置'}</button></div></footer>
       </section>
     </div>}
     <Panel title="发起每日研究" eyebrow="NEW RESEARCH RUN" className="full-span">
       <div className="run-form research-run-form">
+        {scope !== 'MARKET' && <MarketClosedNotice />}
         <label>交易日<input type="date" value={date} max={today()} onChange={(event) => setDate(event.target.value)} /></label>
         <label>研究范围<select value={scope} onChange={(event) => setScope(event.target.value as ResearchScope)}><option value="MARKET">动态市场股票池</option><option value="WATCHLIST">我的自选与持仓</option><option value="CUSTOM">手工指定股票</option></select></label>
         {scope === 'CUSTOM' && <label className="wide">股票代码<textarea rows={3} value={customSymbols} onChange={(event) => setCustomSymbols(event.target.value)} placeholder="600519 或 600519.SH；多个代码用空格、逗号或换行分隔" /><small>已识别 {parsedCustomSymbols.length} 只：{parsedCustomSymbols.join('、') || '—'}</small></label>}

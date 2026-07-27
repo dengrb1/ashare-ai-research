@@ -23,6 +23,7 @@ from ashare_ai.agents.model_settings import ModelConfigurationService, ModelSett
 from ashare_ai.agents.openai_compatible import OpenAICompatibleStructuredLLMClient
 from ashare_ai.core.config import Settings, get_settings
 from ashare_ai.core.hashing import stable_hash
+from ashare_ai.core.system_settings import get_effective_settings
 
 _PROVIDER_ALIASES = {
     "neodata": "neodata-financial-search",
@@ -420,6 +421,7 @@ class FinancialSearchService:
             model=model,
             reasoning_effort=effort,
             timeout_seconds=runtime.timeout_seconds,
+            cache_policy=runtime.profile_for(model).cache_policy,
         )
         generation = asyncio.run(
             client.generate_structured(
@@ -926,4 +928,4 @@ def _minimal_subprocess_env() -> dict[str, str]:
 
 @lru_cache(maxsize=1)
 def get_financial_search_service() -> FinancialSearchService:
-    return FinancialSearchService()
+    return FinancialSearchService(settings=get_effective_settings())

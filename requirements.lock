@@ -295,6 +295,8 @@ propcache==0.5.2
     # via
     #   aiohttp
     #   yarl
+psutil==7.2.2
+    # via ashare-ai-research (pyproject.toml)
 psycopg[binary]==3.3.4
     # via ashare-ai-research (pyproject.toml)
 psycopg-binary==3.3.4
@@ -469,6 +471,8 @@ tushare==1.4.29
     # via ashare-ai-research (pyproject.toml)
 typer==0.26.8
     # via pydocket
+types-psutil==7.2.2.20260518
+    # via ashare-ai-research (pyproject.toml)
 typing-extensions==4.16.0
     # via
     #   aiohttp

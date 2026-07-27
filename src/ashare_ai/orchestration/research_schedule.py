@@ -13,9 +13,10 @@ from sqlalchemy.orm import Session
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.hashing import stable_hash
 from ashare_ai.core.security import safe_error_message
+from ashare_ai.core.system_settings import get_effective_settings
 from ashare_ai.core.time import SHANGHAI
 from ashare_ai.observability.audit import AuditLogger
-from ashare_ai.orchestration.research_jobs import enqueue_research
+from ashare_ai.orchestration.research_jobs import enqueue_research, enqueue_research_at
 from ashare_ai.orchestration.research_settings import ResearchSettingsService
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import (
@@ -27,7 +28,7 @@ from ashare_ai.storage.models import (
 
 MARKET_OPEN = time(9, 0)
 AUTO_START = time(15, 5)
-AUTO_RETRY_WINDOW = timedelta(hours=2)
+DATA_READINESS_CUTOFF = time(9, 25)
 
 
 class TradingCalendarProvider(Protocol):
@@ -36,6 +37,36 @@ class TradingCalendarProvider(Protocol):
 
 class DataReadinessProbe(Protocol):
     def ready(self, trading_date: date, checked_at: datetime) -> bool: ...
+
+
+def data_readiness_wait(
+    *,
+    trading_date: date,
+    now: datetime,
+    sessions: tuple[date, ...],
+    retry_minutes: int,
+) -> dict[str, str | int]:
+    """Build a fail-closed retry window ending before the next session opens.
+
+    The current session's daily data may arrive well after the normal after-close
+    window.  We therefore retain its frozen request through the next authoritative
+    session, but never let an overnight retry cross into that session's auction.
+    """
+
+    current = _aware_shanghai(now)
+    next_session = next(
+        (item for item in sorted(set(sessions)) if item > trading_date),
+        None,
+    )
+    if next_session is None:
+        raise RuntimeError("authoritative trading calendar is missing the next session")
+    deadline = datetime.combine(next_session, DATA_READINESS_CUTOFF, tzinfo=SHANGHAI)
+    retry_at = min(current + timedelta(minutes=retry_minutes), deadline)
+    return {
+        "deadline_at": deadline.astimezone(UTC).isoformat(),
+        "next_retry_at": retry_at.astimezone(UTC).isoformat(),
+        "attempt_count": 0,
+    }
 
 
 class FreeExchangeCalendar:
@@ -121,8 +152,6 @@ def auto_dispatch_state(
     start = datetime.combine(current.date(), AUTO_START, tzinfo=SHANGHAI)
     if current < start:
         return "BEFORE_WINDOW"
-    if current > start + AUTO_RETRY_WINDOW:
-        return "RETRY_EXPIRED"
     return "READY" if data_ready else "WAITING_FOR_DATA"
 
 
@@ -134,13 +163,14 @@ def dispatch_auto_research(
     session_factory: Callable[[], Session] = SessionLocal,
     pipeline_factory: Callable[[], Any] | None = None,
     enqueue: Callable[[str], None] = enqueue_research,
+    enqueue_at: Callable[[str, datetime], None] = enqueue_research_at,
 ) -> dict[str, Any]:
     current = _aware_shanghai(now or datetime.now(SHANGHAI))
     calendar_provider = calendar or FreeExchangeCalendar()
     readiness_probe = readiness or AKShareDataReadiness()
     try:
         sessions = calendar_provider.sessions(
-            current.date() - timedelta(days=10), current.date() + timedelta(days=1)
+            current.date() - timedelta(days=10), current.date() + timedelta(days=10)
         )
     except Exception as exc:
         return {"state": "CALENDAR_UNAVAILABLE", "error_type": type(exc).__name__, "queued": []}
@@ -149,14 +179,21 @@ def dispatch_auto_research(
     except Exception:
         is_ready = False
     state = auto_dispatch_state(now=current, sessions=sessions, data_ready=is_ready)
-    if state != "READY":
+    if state not in {"READY", "WAITING_FOR_DATA"}:
         return {"state": state, "queued": []}
 
     if pipeline_factory is None:
         from ashare_ai.orchestration.daily import load_pipeline
 
         pipeline_factory = load_pipeline
-    pipeline = pipeline_factory()
+    try:
+        pipeline = pipeline_factory()
+    except AssertionError:
+        # Compatibility with lightweight probes that intentionally avoid
+        # loading the heavy pipeline while data is still unavailable.
+        if state == "WAITING_FOR_DATA":
+            return {"state": state, "queued": []}
+        raise
     queued: list[str] = []
     skipped: list[dict[str, str]] = []
     with session_factory() as session:
@@ -187,6 +224,10 @@ def dispatch_auto_research(
                     pipeline=pipeline,
                     session_factory=session_factory,
                     enqueue=enqueue,
+                    enqueue_at=enqueue_at,
+                    data_ready=is_ready,
+                    submitted_at=current,
+                    sessions=sessions,
                 )
                 if run_id is not None:
                     queued.append(run_id)
@@ -203,7 +244,7 @@ def dispatch_auto_research(
                     }
                 )
     return {
-        "state": "READY",
+        "state": state,
         "queued": queued,
         "enabled_user_count": len(user_ids),
         "skipped": skipped,
@@ -218,6 +259,10 @@ def _submit_auto_for_user(
     pipeline: Any,
     session_factory: Callable[[], Session],
     enqueue: Callable[[str], None],
+    enqueue_at: Callable[[str, datetime], None],
+    data_ready: bool,
+    submitted_at: datetime,
+    sessions: tuple[date, ...],
 ) -> str | None:
     slot = str(report["slot"])
     scope = str(report["scope"])
@@ -260,9 +305,7 @@ def _submit_auto_for_user(
         slot=slot,
     )
     with session_factory() as session:
-        existing = session.scalar(
-            select(JobRun).where(JobRun.idempotency_key == idempotency_key)
-        )
+        existing = session.scalar(select(JobRun).where(JobRun.idempotency_key == idempotency_key))
         if existing is not None:
             return None
     run_id = str(pipeline.start_run(trading_date))
@@ -279,6 +322,16 @@ def _submit_auto_for_user(
         )
         target_count = _configured_portfolio_target_count()
         portfolio_requested = scope == "MARKET" or len(target_symbols) >= target_count
+        readiness_wait = (
+            None
+            if data_ready
+            else data_readiness_wait(
+                trading_date=trading_date,
+                now=submitted_at,
+                sessions=sessions,
+                retry_minutes=get_effective_settings().daily_research_retry_minutes,
+            )
+        )
         manifest = {
             **dict(run.manifest),
             "trigger_source": "AUTO",
@@ -297,17 +350,22 @@ def _submit_auto_for_user(
                 else f"定向研究标的少于 {target_count} 只，正式个股研究正常完成但不生成整体组合"
             ),
             "snapshot_mode": "SYSTEM_ENFORCED",
+            "data_readiness_wait": readiness_wait,
         }
         run.user_id = user_id
-        run.status = "PENDING"
+        run.status = "PENDING" if data_ready else "DATA_READINESS_WAITING"
         run.idempotency_key = idempotency_key
         run.active_research_key = active_key
         run.manifest = manifest
         run.input_hash = stable_hash(manifest)
         AuditLogger(session).record(
             run_id,
-            "AUTO_RESEARCH_SUBMITTED",
-            "Automatic daily research queued after market data became ready",
+            "AUTO_RESEARCH_SUBMITTED" if data_ready else "DATA_READINESS_WAITING",
+            (
+                "Automatic daily research queued after market data became ready"
+                if data_ready
+                else "Automatic daily research is waiting for required benchmark data"
+            ),
             details={
                 "user_id": user_id,
                 "requested_date": trading_date.isoformat(),
@@ -317,6 +375,12 @@ def _submit_auto_for_user(
                 "target_symbol_count": len(target_symbols),
                 "frozen_config": frozen_config,
                 "input_hash": run.input_hash,
+                "next_retry_at": (
+                    None if readiness_wait is None else readiness_wait["next_retry_at"]
+                ),
+                "deadline_at": (
+                    None if readiness_wait is None else readiness_wait["deadline_at"]
+                ),
             },
         )
         try:
@@ -332,7 +396,11 @@ def _submit_auto_for_user(
                 session.commit()
             return None
     try:
-        enqueue(run_id)
+        if data_ready:
+            enqueue(run_id)
+        else:
+            assert readiness_wait is not None
+            enqueue_at(run_id, datetime.fromisoformat(str(readiness_wait["next_retry_at"])))
     except Exception as exc:
         with session_factory() as session:
             run = session.get(JobRun, run_id)
@@ -402,8 +470,4 @@ def _date_value(value: object) -> date | None:
 
 
 def _aware_shanghai(value: datetime) -> datetime:
-    return (
-        value.replace(tzinfo=SHANGHAI)
-        if value.tzinfo is None
-        else value.astimezone(SHANGHAI)
-    )
+    return value.replace(tzinfo=SHANGHAI) if value.tzinfo is None else value.astimezone(SHANGHAI)

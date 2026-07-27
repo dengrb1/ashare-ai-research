@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { CandlestickChart } from '../components/CandlestickChart'
+import { MarketClosedNotice } from '../components/MarketClosedNotice'
 import { ErrorNotice, formatAmount, formatNumber, Loading, Panel } from '../components/Ui'
 import { usePageRefresh } from '../context/RefreshContext'
 import { useMarket, useQuoteSubscription, type KlineCacheEntry } from '../context/MarketContext'
@@ -11,7 +12,7 @@ const DAILY_REFRESH_MS = 5 * 60 * 1000
 const INTRADAY_REFRESH_MS = 30 * 1000
 
 export function MarketPage() {
-  const { watchlist, quotes, addWatch, removeWatch, source, delayed, updatedAt, refresh, getKline, loadKline } = useMarket()
+  const { watchlist, quotes, addWatch, removeWatch, source, delayed, updatedAt, refreshSymbol, refreshRemaining, getKline, loadKline } = useMarket()
   const [symbol, setSymbol] = useState(watchlist[0] || '600519.SH')
   const [search, setSearch] = useState('')
   const [period, setPeriod] = useState('day')
@@ -40,19 +41,23 @@ export function MarketPage() {
     refresh: refreshChunk,
   }), [loadKline, period, range, symbol])
 
-  const forceRefresh = useMemo(() => async () => {
+  const forceRefresh = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
-      await refresh(true)
-      if (!initialChunk) return
-      const next = await loadWindow(initialChunk, true)
-      setEntry(next)
-      setError(next.error || '')
+      const klineWork = initialChunk ? loadWindow(initialChunk, true) : Promise.resolve(undefined)
+      const [, next] = await Promise.all([refreshSymbol(symbol, true), klineWork])
+      if (next) {
+        setEntry(next)
+        setError(next.error || '')
+      }
+      // The selected quote and visible K-line are ready before unrelated symbols
+      // use the expensive all-market snapshot in the background.
+      void refreshRemaining(symbol, true)
     } finally {
       setLoading(false)
     }
-  }, [initialChunk, loadWindow, refresh])
+  }, [initialChunk, loadWindow, refreshRemaining, refreshSymbol, symbol])
   usePageRefresh(forceRefresh)
 
   useEffect(() => {
@@ -175,6 +180,7 @@ export function MarketPage() {
   const targetDates = `${new Date(plan.start).toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai' })} — ${new Date(plan.end).toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
 
   return <div className="market-layout">
+    <MarketClosedNotice />
     <Panel className="watch-panel" eyebrow="ACTIVE SYMBOLS" title="自选行情" action={<span className="count-badge">{watchlist.length}</span>}>
       <div className="symbol-search"><input value={search} onChange={(event) => setSearch(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && locate()} placeholder="输入代码 600519" /><button onClick={locate}>定位</button></div>
       <div className="watch-list">

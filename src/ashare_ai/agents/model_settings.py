@@ -3,7 +3,8 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from decimal import Decimal
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 import httpx
@@ -21,6 +22,7 @@ from ashare_ai.core.hashing import stable_hash
 from ashare_ai.storage.models import ActiveModelConfiguration, ModelConfigurationVersion
 
 Purpose = Literal["search", "research"]
+CachePolicy = Literal["GROK", "OPENAI", "COMPATIBLE"]
 
 
 class ModelSettingsError(RuntimeError):
@@ -34,6 +36,39 @@ class ModelConnectionProbe(BaseModel):
 
 
 @dataclass(frozen=True)
+class ModelProfileDraft:
+    model: str
+    cache_policy: CachePolicy = "COMPATIBLE"
+    context_window_tokens: int = 128000
+    output_token_reserve: int = 8192
+    reasoning_token_reserve: int = 0
+    input_price_per_million: Decimal = Decimal("0")
+    cached_input_price_per_million: Decimal = Decimal("0")
+    cache_write_price_per_million: Decimal = Decimal("0")
+    output_price_per_million: Decimal = Decimal("0")
+
+
+@dataclass(frozen=True)
+class ModelRuntimeProfile(ModelProfileDraft):
+    @property
+    def input_budget_tokens(self) -> int:
+        return self.context_window_tokens - self.output_token_reserve - self.reasoning_token_reserve
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "cache_policy": self.cache_policy,
+            "context_window_tokens": self.context_window_tokens,
+            "output_token_reserve": self.output_token_reserve,
+            "reasoning_token_reserve": self.reasoning_token_reserve,
+            "input_price_per_million": str(self.input_price_per_million),
+            "cached_input_price_per_million": str(self.cached_input_price_per_million),
+            "cache_write_price_per_million": str(self.cache_write_price_per_million),
+            "output_price_per_million": str(self.output_price_per_million),
+        }
+
+
+@dataclass(frozen=True)
 class ModelSettingsDraft:
     base_url: str
     api_key: str | None
@@ -41,6 +76,7 @@ class ModelSettingsDraft:
     search_reasoning_effort: str = "low"
     research_model: str = "gpt-5.6-sol"
     research_reasoning_effort: str = "high"
+    model_profiles: tuple[ModelProfileDraft, ...] = ()
     timeout_seconds: float = 90.0
     enabled: bool = True
 
@@ -58,6 +94,7 @@ class ModelRuntimeConfiguration:
     search_reasoning_effort: str
     research_model: str
     research_reasoning_effort: str
+    model_profiles: tuple[ModelRuntimeProfile, ...]
     timeout_seconds: float
     enabled: bool
 
@@ -65,6 +102,12 @@ class ModelRuntimeConfiguration:
         if purpose == "search":
             return self.search_model, self.search_reasoning_effort
         return self.research_model, self.research_reasoning_effort
+
+    def profile_for(self, model: str) -> ModelRuntimeProfile:
+        for profile in self.model_profiles:
+            if profile.model == model:
+                return profile
+        return _default_profile(model)
 
     def manifest_reference(self) -> dict[str, object]:
         return {
@@ -77,6 +120,7 @@ class ModelRuntimeConfiguration:
             "search_reasoning_effort": self.search_reasoning_effort,
             "research_model": self.research_model,
             "research_reasoning_effort": self.research_reasoning_effort,
+            "model_profiles": [profile.public_dict() for profile in self.model_profiles],
             "timeout_seconds": self.timeout_seconds,
             "enabled": self.enabled,
         }
@@ -88,6 +132,8 @@ class ModelProbeResult:
     message: str
     model: str
     checked_at: datetime
+    structured_output_supported: bool = True
+    streaming_supported: bool = False
 
 
 class ModelConfigurationService:
@@ -109,9 +155,7 @@ class ModelConfigurationService:
         environment_runtime = self._environment_runtime()
         return (
             environment_runtime
-            if environment_runtime is None
-            or environment_runtime.enabled
-            or not require_enabled
+            if environment_runtime is None or environment_runtime.enabled or not require_enabled
             else None
         )
 
@@ -150,6 +194,7 @@ class ModelConfigurationService:
                 search_reasoning_effort="low",
                 research_model=runtime.research_model,
                 research_reasoning_effort=runtime.research_reasoning_effort,
+                model_profiles=runtime.model_profiles,
                 timeout_seconds=runtime.timeout_seconds,
                 enabled=True,
             ),
@@ -176,6 +221,10 @@ class ModelConfigurationService:
             raise ModelSettingsError("search and research models are required")
         if not 1 <= draft.timeout_seconds <= 600:
             raise ModelSettingsError("timeout_seconds must be between 1 and 600")
+        profiles = _normalize_profiles(
+            draft.model_profiles,
+            models=(draft.search_model.strip(), draft.research_model.strip()),
+        )
         config_hash = _config_hash(
             base_url=base_url,
             api_key=api_key,
@@ -183,6 +232,7 @@ class ModelConfigurationService:
             search_reasoning_effort=draft.search_reasoning_effort,
             research_model=draft.research_model.strip(),
             research_reasoning_effort=draft.research_reasoning_effort,
+            model_profiles=[profile.public_dict() for profile in profiles],
             timeout_seconds=draft.timeout_seconds,
             enabled=draft.enabled,
         )
@@ -194,9 +244,9 @@ class ModelConfigurationService:
         now = datetime.now(UTC)
         if row is None:
             fernet, key_id = self._cipher()
-            version = int(
-                session.scalar(select(func.max(ModelConfigurationVersion.version))) or 0
-            ) + 1
+            version = (
+                int(session.scalar(select(func.max(ModelConfigurationVersion.version))) or 0) + 1
+            )
             row = ModelConfigurationVersion(
                 version=version,
                 provider="openai-compatible",
@@ -207,6 +257,7 @@ class ModelConfigurationService:
                 search_reasoning_effort=draft.search_reasoning_effort,
                 research_model=draft.research_model.strip(),
                 research_reasoning_effort=draft.research_reasoning_effort,
+                model_profiles=[_profile_storage_dict(profile) for profile in profiles],
                 timeout_seconds=draft.timeout_seconds,
                 enabled=draft.enabled,
                 config_sha256=config_hash,
@@ -233,6 +284,8 @@ class ModelConfigurationService:
             pointer.last_checked_at = probe.checked_at
             pointer.last_check_status = "REACHABLE" if probe.reachable else "FAILED"
             pointer.last_check_message = probe.message
+            pointer.structured_output_supported = probe.structured_output_supported
+            pointer.streaming_supported = probe.streaming_supported
         session.flush()
         return row
 
@@ -243,6 +296,14 @@ class ModelConfigurationService:
         if not api_key:
             raise ModelSettingsError("API key is required")
         model = draft.search_model.strip()
+        profile = next(
+            item
+            for item in _normalize_profiles(
+                draft.model_profiles,
+                models=(draft.search_model.strip(), draft.research_model.strip()),
+            )
+            if item.model == model
+        )
         client = OpenAICompatibleStructuredLLMClient(
             base_url=base_url,
             api_key=api_key,
@@ -250,6 +311,7 @@ class ModelConfigurationService:
             reasoning_effort=draft.search_reasoning_effort,
             timeout_seconds=draft.timeout_seconds,
             max_retries=0,
+            cache_policy=profile.cache_policy,
         )
         checked_at = datetime.now(UTC)
         try:
@@ -270,11 +332,24 @@ class ModelConfigurationService:
                 raise ModelSettingsError("model probe returned an unexpected result")
         except (OpenAICompatibleError, httpx.HTTPError) as exc:
             raise ModelSettingsError(_safe_error(exc)) from exc
+        streaming_supported = False
+        try:
+            streaming_supported = await client.probe_stream()
+        except (OpenAICompatibleError, httpx.HTTPError):
+            # A compatible one-shot Responses gateway remains usable for chat;
+            # the persisted capability makes the eventual degradation visible.
+            streaming_supported = False
         return ModelProbeResult(
             reachable=True,
-            message="Responses API structured-output probe succeeded",
+            message=(
+                "Responses API structured and streaming probes succeeded"
+                if streaming_supported
+                else "Responses API structured probe succeeded; streaming will degrade"
+            ),
             model=model,
             checked_at=checked_at,
+            structured_output_supported=True,
+            streaming_supported=streaming_supported,
         )
 
     async def list_models(self, draft: ModelSettingsDraft, session: Session) -> list[str]:
@@ -320,6 +395,8 @@ class ModelConfigurationService:
             "enabled": bool(runtime and runtime.enabled),
             "message": message,
             "checked_at": pointer.last_checked_at if pointer else None,
+            "structured_output_supported": bool(pointer and pointer.structured_output_supported),
+            "streaming_supported": bool(pointer and pointer.streaming_supported),
         }
 
     def _runtime_from_row(self, row: ModelConfigurationVersion) -> ModelRuntimeConfiguration:
@@ -341,6 +418,10 @@ class ModelConfigurationService:
             search_reasoning_effort=row.search_reasoning_effort,
             research_model=row.research_model,
             research_reasoning_effort=row.research_reasoning_effort,
+            model_profiles=_profiles_from_storage(
+                row.model_profiles,
+                models=(row.search_model, row.research_model),
+            ),
             timeout_seconds=row.timeout_seconds,
             enabled=row.enabled,
         )
@@ -360,6 +441,10 @@ class ModelConfigurationService:
             search_reasoning_effort="low",
             research_model=self.settings.llm_model,
             research_reasoning_effort=self.settings.llm_reasoning_effort,
+            model_profiles=[
+                _default_profile(model).public_dict()
+                for model in ("gpt-5.6-luna", self.settings.llm_model)
+            ],
             timeout_seconds=self.settings.llm_timeout_seconds,
             enabled=True,
         )
@@ -375,6 +460,9 @@ class ModelConfigurationService:
             search_reasoning_effort="low",
             research_model=self.settings.llm_model,
             research_reasoning_effort=self.settings.llm_reasoning_effort,
+            model_profiles=_normalize_profiles(
+                (), models=("gpt-5.6-luna", self.settings.llm_model)
+            ),
             timeout_seconds=self.settings.llm_timeout_seconds,
             enabled=True,
         )
@@ -419,6 +507,86 @@ def normalize_base_url(value: str, settings: Settings | None = None) -> str:
 def _config_hash(**values: object) -> str:
     api_key = str(values.pop("api_key"))
     return stable_hash({**values, "api_key_sha256": hashlib.sha256(api_key.encode()).hexdigest()})
+
+
+def _default_profile(model: str) -> ModelRuntimeProfile:
+    """Unknown and legacy models stay on the conservative compatible contract."""
+
+    return ModelRuntimeProfile(model=model, cache_policy="COMPATIBLE")
+
+
+def _profile_storage_dict(profile: ModelRuntimeProfile) -> dict[str, Any]:
+    return profile.public_dict()
+
+
+def _normalize_profiles(
+    raw_profiles: tuple[ModelProfileDraft, ...] | list[ModelProfileDraft],
+    *,
+    models: tuple[str, str],
+) -> tuple[ModelRuntimeProfile, ...]:
+    by_model: dict[str, ModelRuntimeProfile] = {}
+    for raw in raw_profiles:
+        profile = ModelRuntimeProfile(**raw.__dict__)
+        normalized_name = profile.model.strip()
+        if not normalized_name:
+            raise ModelSettingsError("model profile model is required")
+        if normalized_name in by_model:
+            raise ModelSettingsError("model profile model values must be unique")
+        if profile.cache_policy not in {"GROK", "OPENAI", "COMPATIBLE"}:
+            raise ModelSettingsError("model profile cache_policy is invalid")
+        if not 1024 <= profile.context_window_tokens <= 4_000_000:
+            raise ModelSettingsError("model profile context_window_tokens is invalid")
+        if min(profile.output_token_reserve, profile.reasoning_token_reserve) < 0:
+            raise ModelSettingsError("model profile token reserves must be non-negative")
+        if profile.input_budget_tokens <= 0:
+            raise ModelSettingsError("model profile reserves must leave input capacity")
+        prices = (
+            profile.input_price_per_million,
+            profile.cached_input_price_per_million,
+            profile.cache_write_price_per_million,
+            profile.output_price_per_million,
+        )
+        if any(price < 0 for price in prices):
+            raise ModelSettingsError("model profile prices must be non-negative")
+        by_model[normalized_name] = ModelRuntimeProfile(
+            **{**profile.__dict__, "model": normalized_name}
+        )
+    for model in dict.fromkeys(models):
+        by_model.setdefault(model, _default_profile(model))
+    return tuple(by_model[name] for name in sorted(by_model))
+
+
+def _profiles_from_storage(
+    raw_profiles: object, *, models: tuple[str, str]
+) -> tuple[ModelRuntimeProfile, ...]:
+    profiles: list[ModelProfileDraft] = []
+    if isinstance(raw_profiles, list):
+        for raw in raw_profiles:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                profiles.append(
+                    ModelProfileDraft(
+                        model=str(raw["model"]),
+                        cache_policy=str(raw.get("cache_policy", "COMPATIBLE")),  # type: ignore[arg-type]
+                        context_window_tokens=int(raw.get("context_window_tokens", 128000)),
+                        output_token_reserve=int(raw.get("output_token_reserve", 8192)),
+                        reasoning_token_reserve=int(raw.get("reasoning_token_reserve", 0)),
+                        input_price_per_million=Decimal(str(raw.get("input_price_per_million", 0))),
+                        cached_input_price_per_million=Decimal(
+                            str(raw.get("cached_input_price_per_million", 0))
+                        ),
+                        cache_write_price_per_million=Decimal(
+                            str(raw.get("cache_write_price_per_million", 0))
+                        ),
+                        output_price_per_million=Decimal(
+                            str(raw.get("output_price_per_million", 0))
+                        ),
+                    )
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+    return _normalize_profiles(profiles, models=models)
 
 
 def _validate_effort(value: str) -> None:

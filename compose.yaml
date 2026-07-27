@@ -58,8 +58,8 @@ services:
   api:
     <<: *app-service
     command: ["sh", "-c", "ashare-ai migrate && ashare-ai api --host 0.0.0.0 --port 8000"]
-    ports: ["${SERVICE_BIND_ADDRESS:-127.0.0.1}:8000:8000"]
-    mem_limit: 320m
+    ports: ["${API_BIND_ADDRESS:-127.0.0.1}:8000:8000"]
+    mem_limit: 384m
     depends_on:
       private-data-init:
         condition: service_completed_successfully
@@ -96,8 +96,9 @@ services:
       timeout: 5s
       retries: 5
 
-  # Larger hosts may opt into independent parallel workers. Keep job-worker at
-  # scale zero when using this profile to avoid duplicate consumers.
+  # Legacy optional scheduler/queue workers remain profile-gated.  The normal
+  # deployment topology is the serial job-worker; the two research workers
+  # below are only enabled by the persisted DUAL topology command.
   worker:
     <<: *app-service
     profiles: ["parallel-workers"]
@@ -131,7 +132,11 @@ services:
 
   research-worker:
     <<: *app-service
-    profiles: ["parallel-workers"]
+    # This profile is deliberately opt-in.  SERIAL deployments do not create
+    # research-worker containers; the System Settings restart command enables
+    # it only after the persisted topology is changed to DUAL.
+    profiles: ["dual-research"]
+    scale: 2
     command: ["python", "-m", "ashare_ai.orchestration.research_worker"]
     mem_limit: 700m
     depends_on:
@@ -141,6 +146,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import redis; from ashare_ai.core.config import get_settings; assert redis.Redis.from_url(get_settings().redis_url).ping()"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
 
   trade-plan-worker:
     <<: *app-service
@@ -157,9 +167,9 @@ services:
 
   exit-advice-worker:
     <<: *app-service
-    profiles: ["parallel-workers"]
     command: ["python", "-m", "ashare_ai.orchestration.exit_advice_worker"]
     mem_limit: 320m
+    pids_limit: 64
     depends_on:
       api:
         condition: service_healthy
@@ -169,6 +179,11 @@ services:
         condition: service_healthy
       searxng:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import redis; from ashare_ai.core.config import get_settings; assert redis.Redis.from_url(get_settings().redis_url).ping()"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
 
   searxng:
     image: searxng/searxng@sha256:800a5e3757df04f59e6bd6c622f15de2edbfa47f5591c5b82d4a8ff3b938a845

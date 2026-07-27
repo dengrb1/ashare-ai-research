@@ -84,7 +84,9 @@ it('calculates current allocation from the latest quote and recalculates when qu
   const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     if (url.endsWith('/assets') && (!init?.method || init.method === 'GET')) return jsonResponse(initial)
+    if (url.includes('/market/quotes/')) return jsonResponse({ symbol: '600519.SH', name: '贵州茅台', price, change_pct: 1, status: { source: 'fixture', collected_at: '2026-07-20T00:00:00Z', cached_at: '2026-07-20T00:00:00Z', delayed: false, stale: false } })
     if (url.includes('/market/quotes')) return jsonResponse([{ symbol: '600519.SH', name: '贵州茅台', price, change_pct: 1 }])
+    if (url.includes('/buy-entry-monitors')) return jsonResponse([])
     if (url.endsWith('/market/prefetch')) return jsonResponse({ quotes: [], klines: {}, errors: {} })
     throw new Error(`unexpected request ${url}`)
   })
@@ -149,9 +151,40 @@ it('validates and persists the account total explicitly', async () => {
   await waitFor(() => expect(savedBodies.at(-1)?.total_assets).toBe(250000))
 })
 
-it('renders the exit monitor as a compact switch and persists its state', async () => {
-  const savedBodies: Array<{ exit_monitor_enabled?: boolean; default_profit_trigger?: number | null }> = []
-  const initial = { watchlist: [], positions: [], exit_monitor_enabled: false, default_profit_trigger: 2000 }
+it('persists exit-monitor controls through the narrow idempotent settings endpoint', async () => {
+  const savedBodies: Array<{ exit_monitor_enabled?: boolean; default_profit_trigger?: number | null; stop_loss_monitor_enabled?: boolean; buy_monitor_enabled?: boolean }> = []
+  const initial = { watchlist: [], positions: [], exit_monitor_enabled: false, default_profit_trigger: 2000, stop_loss_monitor_enabled: false, buy_monitor_enabled: false }
+  const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    if (url.endsWith('/assets/exit-monitor') && init?.method === 'PUT') {
+      const body = JSON.parse(String(init.body))
+      savedBodies.push(body)
+      expect(new Headers(init?.headers).get('Idempotency-Key')).toEqual(expect.any(String))
+      return jsonResponse({ ...initial, ...body })
+    }
+    if (url.endsWith('/assets')) return jsonResponse(initial)
+    if (url.includes('/market/quotes')) return jsonResponse([])
+    if (url.endsWith('/market/prefetch')) return jsonResponse({ quotes: [], klines: {}, errors: {} })
+    throw new Error(`unexpected request ${url}`)
+  })
+  vi.stubGlobal('fetch', mockFetch)
+
+  render(<MarketProvider><AssetsPage /></MarketProvider>)
+  expect(await screen.findByText('已暂停')).toBeInTheDocument()
+  const monitor = screen.getByRole('checkbox', { name: /浮盈退出监控/ })
+  expect(monitor).not.toBeChecked()
+  expect(monitor).toHaveAttribute('type', 'checkbox')
+  await userEvent.click(monitor)
+  await waitFor(() => expect(savedBodies.at(-1)).toMatchObject({ exit_monitor_enabled: true, default_profit_trigger: 2000, stop_loss_monitor_enabled: false, buy_monitor_enabled: false }))
+  expect(await screen.findByText('监控中')).toBeInTheDocument()
+})
+
+it('rejects an unsafe manual stop loss before persisting the holding', async () => {
+  const savedBodies: Array<{ positions: Array<{ stop_loss_price?: number | null; stop_loss_enabled?: boolean }> }> = []
+  const initial = {
+    watchlist: [],
+    positions: [{ symbol: '600519.SH', name: '贵州茅台', quantity: 100, cost: 100, stop_loss_enabled: true }],
+  }
   const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     if (url.endsWith('/assets') && init?.method === 'PUT') {
@@ -167,13 +200,50 @@ it('renders the exit monitor as a compact switch and persists its state', async 
   vi.stubGlobal('fetch', mockFetch)
 
   render(<MarketProvider><AssetsPage /></MarketProvider>)
-  expect(await screen.findByText('已暂停')).toBeInTheDocument()
-  const monitor = screen.getByRole('checkbox', { name: /盘中每 5 分钟自动检查/ })
-  expect(monitor).not.toBeChecked()
-  expect(monitor).toHaveAttribute('type', 'checkbox')
-  await userEvent.click(monitor)
-  await waitFor(() => expect(savedBodies.at(-1)).toMatchObject({ exit_monitor_enabled: true, default_profit_trigger: 2000 }))
-  expect(await screen.findByText('监控中')).toBeInTheDocument()
+  expect(await screen.findByText('贵州茅台')).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: '编辑' }))
+  const stopLoss = screen.getByLabelText('手动止损价（元/股，可选）')
+  await userEvent.type(stopLoss, '85')
+  await userEvent.click(screen.getByRole('button', { name: '保存' }))
+  expect(await screen.findByText('手动止损价必须在成本价下方 5%–10%')).toBeInTheDocument()
+  expect(savedBodies).toHaveLength(0)
+
+  await userEvent.clear(stopLoss)
+  await userEvent.type(stopLoss, '92')
+  await userEvent.click(screen.getByRole('button', { name: '保存' }))
+  await waitFor(() => {
+    expect(savedBodies.at(-1)?.positions[0]).toMatchObject({
+      stop_loss_price: 92,
+      stop_loss_enabled: true,
+    })
+  })
+})
+
+it('submits a paper-only manual exit study with an idempotency key', async () => {
+  const initial = {
+    watchlist: [],
+    positions: [{ symbol: '600519.SH', name: '贵州茅台', quantity: 100, cost: 100 }],
+  }
+  const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    if (url.endsWith('/exit-advice/manual') && init?.method === 'POST') {
+      expect(new Headers(init.headers).get('Idempotency-Key')).toEqual(expect.any(String))
+      expect(JSON.parse(String(init.body))).toEqual({ symbol: '600519.SH' })
+      return jsonResponse({ advice_id: 'exit-1', status: 'PENDING' }, 202)
+    }
+    if (url.endsWith('/assets')) return jsonResponse(initial)
+    if (url.includes('/market/quotes')) return jsonResponse([])
+    if (url.endsWith('/market/prefetch')) return jsonResponse({ quotes: [], klines: {}, errors: {} })
+    throw new Error(`unexpected request ${url}`)
+  })
+  vi.stubGlobal('fetch', mockFetch)
+
+  render(<MarketProvider><AssetsPage /></MarketProvider>)
+  expect(await screen.findByText('贵州茅台')).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: '退出研究' }))
+  expect(
+    await screen.findByText('600519.SH 的模拟退出研究已提交，可在“卖出建议”查看进度。'),
+  ).toBeInTheDocument()
 })
 
 it('rolls the account total back when its save fails', async () => {

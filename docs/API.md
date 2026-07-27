@@ -4,7 +4,7 @@
 基础路径：`/api/v1`  
 契约来源：`src/ashare_ai/api/app.py`、`src/ashare_ai/api/schemas.py` 及 `src/ashare_ai/search/service.py`
 
-本文档描述当前代码实际注册的公开 HTTP API。当前 OpenAPI 中有 55 个操作；另外保留了 5 个不在 OpenAPI 展示的兼容别名。接口只用于研究、评分、报告、回测和模拟组合，不执行真实下单。
+本文档描述当前代码实际注册的公开 HTTP API。接口只用于研究、评分、报告、回测和模拟组合，不执行真实下单。
 
 ## 1. 基本约定
 
@@ -113,10 +113,20 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 认证 | GET | `/api/v1/auth/me` | 登录 |
 | App 初始化 | GET | `/api/v1/app/bootstrap` | 登录 |
 | 用户资产 | GET/PUT | `/api/v1/assets` | 登录/写入 |
-| 退出监控设置 | PUT | `/api/v1/assets/exit-monitor` | 写入 |
+| 退出监控设置 | PUT | `/api/v1/assets/exit-monitor` | 写入、幂等 |
+| 行情刷新设置 | PUT | `/api/v1/assets/market-refresh` | 写入、幂等 |
 | 卖出建议 | GET | `/api/v1/exit-advice` | 登录 |
 | 卖出建议 | GET | `/api/v1/exit-advice/{advice_id}` | 登录 |
+| 卖出研究 | POST | `/api/v1/exit-advice/manual` | 写入、幂等、202 |
+| 买入监控 | GET/PUT | `/api/v1/buy-entry-monitors` | 登录/写入、幂等 |
+| 通知 | GET | `/api/v1/notifications` | 登录、cursor 分页 |
+| 通知 | GET | `/api/v1/notifications/summary` | 登录 |
+| 通知 | POST | `/api/v1/notifications/read` | 写入、幂等 |
+| 通知 | POST | `/api/v1/notifications/read-all` | 写入、幂等 |
+| 证券解析 | GET | `/api/v1/securities/resolve` | 登录 |
 | AI 对话 | GET | `/api/v1/ai/models` | 登录 |
+| AI 对话 | GET | `/api/v1/ai/chat/metrics` | 登录 |
+| AI 成本 | GET | `/api/v1/ai/costs` | 登录、用户隔离、日期分页 |
 | AI 对话 | GET/POST | `/api/v1/ai/chat/threads` | 登录/写入 |
 | AI 对话 | GET | `/api/v1/ai/chat/thread-index` | 登录 |
 | AI 对话 | PATCH/DELETE | `/api/v1/ai/chat/threads/{thread_id}` | 写入 |
@@ -137,6 +147,10 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 模型设置 | GET/PUT | `/api/v1/admin/model-settings` | 管理员 |
 | 模型设置 | POST | `/api/v1/admin/model-settings/test` | 管理员、写入 |
 | 模型设置 | POST | `/api/v1/admin/model-settings/models` | 管理员、写入 |
+| 系统设置 | GET/PUT/DELETE | `/api/v1/admin/system-settings` | 管理员；PUT 幂等、写入 |
+| 系统设置 | DELETE | `/api/v1/admin/system-settings/{field}` | 管理员、写入 |
+| 系统设置解锁 | POST | `/api/v1/admin/system-settings/unlock` | 管理员、写入；当前账户密码二次验证 |
+| 系统资源 | GET | `/api/v1/admin/system-resources` | 管理员；运行环境只读指标 |
 | 研究结果 | GET | `/api/v1/scores/{trading_date}` | 登录 |
 | 研究结果 | GET | `/api/v1/scores/{trading_date}/{symbol}` | 登录 |
 | 研究结果 | GET | `/api/v1/scores/{trading_date}/{symbol}/lineage` | 登录 |
@@ -145,6 +159,7 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 报告 | GET | `/api/v1/reports/{trading_date}` | 登录 |
 | 报告 | GET | `/api/v1/reports/{report_id}/content` | 登录 |
 | 报告 | GET | `/api/v1/reports/{report_id}/symbols` | 登录 |
+| 报告 | GET | `/api/v1/reports/{report_id}/execution-status` | 登录、所有者 |
 | Trade Plan | POST/GET | `/api/v1/reports/{report_id}/trade-plans` | 写入/登录 |
 | Trade Plan | GET | `/api/v1/trade-plans/{plan_id}` | 登录 |
 | 快照 | GET | `/api/v1/snapshots` | 登录 |
@@ -153,6 +168,7 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 研究任务 | GET/PUT | `/api/v1/research/settings` | 登录/写入 |
 | 研究任务 | POST | `/api/v1/research/runs/{run_id}/cancel` | 写入 |
 | 通用运行 | GET | `/api/v1/runs` | 登录 |
+| 通用运行 | GET | `/api/v1/runs/activity` | 登录、cursor 分页 |
 | 通用运行 | GET | `/api/v1/runs/{run_id}` | 登录 |
 | 通用运行 | GET | `/api/v1/runs/{run_id}/audit` | 登录 |
 | 回测 | POST | `/api/v1/backtests` | 写入 |
@@ -160,6 +176,7 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 回测 | GET | `/api/v1/backtests/{backtest_id}` | 登录 |
 | 回测 | POST | `/api/v1/backtests/{backtest_id}/retry` | 写入 |
 | 行情 | GET | `/api/v1/market/quotes` | 登录 |
+| 行情 | GET | `/api/v1/market/quotes/{symbol}` | 登录 |
 | 行情 | GET | `/api/v1/market/klines/{symbol}` | 登录 |
 | 行情 | POST | `/api/v1/market/prefetch` | 写入 |
 | 行情 | GET | `/api/v1/market/status` | 登录 |
@@ -234,6 +251,9 @@ Web 登录。请求体为 `LoginRequest`：
 | `acquired_on` | date/null | 买入日期；缺失时 AI 可研究但模拟卖出数量被 T+1 门禁阻断 |
 | `profit_trigger_amount` | decimal/null | 旧客户端兼容字段；仅在未设置个股股价线时作为个股浮盈金额规则 |
 | `exit_trigger_price` | decimal/null | 最新股价严格超过该元/股价格时触发，优先于金额规则 |
+| `stop_loss_price` | decimal/null | 用户指定的模拟止损价；必须低于成本价，存在时模式为 `MANUAL` |
+| `stop_loss_mode` | string | `AUTO_ATR20`、`MANUAL` 或 `FALLBACK_8PCT`；缺失价格时由服务端派生 |
+| `stop_loss_enabled` | boolean | 默认 `true`；只决定预警和退出研究，不会自动卖出 |
 
 `AssetStateRequest`：
 
@@ -242,13 +262,18 @@ Web 登录。请求体为 `LoginRequest`：
 | `watchlist` | string[] | 最多 100 个，不重复 |
 | `positions` | PaperPosition[] | 最多 15 个，代码不重复 |
 | `total_assets` | number/null | 省略时保留原值；传 `null` 可清空，传值必须大于 0且不超过 1,000,000,000,000 |
-| `exit_monitor_enabled` | boolean | 是否启用交易时段每 5 分钟盈利监控 |
+| `exit_monitor_enabled` | boolean | 是否启用交易时段每分钟盈利监控 |
 | `default_profit_trigger` | decimal/null | 全局人民币浮盈触发金额；启用监控时应提供 |
+| `stop_loss_monitor_enabled` | boolean | 默认 `true`；交易日每分钟检查持仓止损预警 |
+| `buy_monitor_enabled` | boolean | 默认 `true`；正式 BUY Trade Plan 的有效入场区间监控 |
+| `market_refresh_interval_seconds` | integer | 账户级行情自动刷新间隔，只允许 `15`、`30`、`60` 或 `120`，默认 `15` |
 
 `AssetStateResponse` 在此基础上增加 `updated_at`；`GET /assets` 返回当前用户数据，`PUT /assets` 整体替换当前用户自选股、模拟持仓和可选总资产。
 
-`PUT /api/v1/assets/exit-monitor` 只接受 `exit_monitor_enabled` 和
-`default_profit_trigger`，不会修改自选股、模拟持仓或总资产。手机客户端调整监控设置时应优先使用该窄接口，避免用旧缓存整体覆盖资产数据。
+`PUT /api/v1/assets/exit-monitor` 只接受 `exit_monitor_enabled`、
+`default_profit_trigger`、`stop_loss_monitor_enabled` 和 `buy_monitor_enabled`，不会修改自选股、模拟持仓或总资产。该写入必须携带 `Idempotency-Key`；手机客户端调整监控设置时应优先使用该窄接口，避免用旧缓存整体覆盖资产数据。
+
+`PUT /api/v1/assets/market-refresh` 请求 `{"market_refresh_interval_seconds":30}`，必须携带 `Idempotency-Key`。它只更新当前账户的行情自动刷新频率，不会覆盖自选、持仓、总资产或监控设置；同一键和同一请求返回已保存的 `AssetStateResponse`。
 
 `GET /api/v1/app/bootstrap` 返回：
 
@@ -256,7 +281,7 @@ Web 登录。请求体为 `LoginRequest`：
 {
   "server_time": "2026-07-19T12:00:00Z",
   "user": {"user_id":"<USER_ID>","username":"admin","role":"ADMIN","enabled":true,"created_at":"<DATETIME>","updated_at":"<DATETIME>"},
-  "assets": {"watchlist":[],"positions":[],"total_assets":null,"updated_at":null},
+  "assets": {"watchlist":[],"positions":[],"total_assets":null,"market_refresh_interval_seconds":15,"updated_at":null},
   "capabilities": {
     "api_version":"v1",
     "authentication":"BEARER_REFRESH",
@@ -264,24 +289,38 @@ Web 登录。请求体为 `LoginRequest`：
     "max_watchlist_symbols":100,
     "max_research_symbols":100,
     "max_trade_plan_symbols":15,
-    "portfolio_target_count":10,
-    "features": {"watchlist_research_selection":true,"formal_watchlist_reports":true,"report_symbol_eligibility":true,"trade_plan_generation":true,"research_cancellation":true,"idempotency_key":true,"paper_portfolio_only":true,"persistent_ai_chat":true,"chat_images_seven_day_retention":true,"personal_archive_export_import":true},
-    "endpoints": {"assets":"/api/v1/assets","exit_monitor_settings":"/api/v1/assets/exit-monitor","research_runs":"/api/v1/research/runs","research_run":"/api/v1/research/runs/{run_id}","research_settings":"/api/v1/research/settings","ai_chat_threads":"/api/v1/ai/chat/threads","ai_chat_thread_index":"/api/v1/ai/chat/thread-index","personal_data_exports":"/api/v1/me/data-exports","personal_data_imports":"/api/v1/me/data-imports"}
+    "portfolio_target_count":15,
+    "features": {"watchlist_research_selection":true,"formal_watchlist_reports":true,"report_symbol_eligibility":true,"trade_plan_generation":true,"research_cancellation":true,"idempotency_key":true,"paper_portfolio_only":true,"profit_exit_monitor":true,"stop_loss_monitor":true,"buy_entry_monitor":true,"market_refresh_interval_setting":true,"notifications":true,"chat_context_metrics":true,"ai_cost_summary":true,"persistent_ai_chat":true,"chat_images_seven_day_retention":true,"personal_archive_export_import":true,"searxng_web_research":true},
+    "endpoints": {"assets":"/api/v1/assets","exit_monitor_settings":"/api/v1/assets/exit-monitor","market_refresh_settings":"/api/v1/assets/market-refresh","research_runs":"/api/v1/research/runs","research_run":"/api/v1/research/runs/{run_id}","research_settings":"/api/v1/research/settings","exit_advice":"/api/v1/exit-advice","manual_exit_advice":"/api/v1/exit-advice/manual","buy_entry_monitors":"/api/v1/buy-entry-monitors","notifications":"/api/v1/notifications","notification_summary":"/api/v1/notifications/summary","security_resolve":"/api/v1/securities/resolve","chat_metrics":"/api/v1/ai/chat/metrics","ai_costs":"/api/v1/ai/costs","ai_chat_threads":"/api/v1/ai/chat/threads","ai_chat_thread_index":"/api/v1/ai/chat/thread-index","personal_data_exports":"/api/v1/me/data-exports","personal_data_imports":"/api/v1/me/data-imports"}
   }
 }
 ```
 
 `portfolio_target_count` 从版本化策略配置读取，不应由客户端写入或覆盖。
 
-### 5.2 卖出建议与 AI 对话
+### 5.2 卖出建议、买入监控与通知
 
-个股已设 `exit_trigger_price` 时，最新价必须严格超过该价格才提交研究；否则按 `(最新价 - 成本价) × 持股数` 与旧个股金额或全局 `default_profit_trigger` 比较。`ExitAdviceResponse` 新增 `trigger_type=PRICE|PROFIT_AMOUNT` 和 `trigger_price`；价格规则的 `trigger_amount` 仍返回等价浮盈金额，供旧客户端继续读取。同一用户、股票和交易日内，仅当价格相对上次建议变化至少 3%、持仓变化或正式评分变化时重新调用 AI。
+个股已设 `exit_trigger_price` 时，最新价必须严格超过该价格才提交研究；否则按 `(最新价 - 成本价) × 持股数` 与旧个股金额或全局 `default_profit_trigger` 比较。`ExitAdviceResponse.trigger_type` 兼容 `PRICE|PROFIT_AMOUNT`，并新增 `MANUAL|STOP_LOSS`；价格规则的 `trigger_amount` 仍返回等价浮盈金额，供旧客户端继续读取。止损使用后复权日 K 的 ATR20 推导，限制在成本价下方 5%-10%；历史不足时使用 8%。止损触发先创建高优先级通知，随后排队模拟退出研究，任何路径都不会自动卖出或修改持仓。
 
 `ExitAdviceResponse.result` 包含 `action=HOLD|REDUCE|SELL`、`summary`、`confidence`、`sell_ladder[]`、`stop_loss_price`、`risks`、`sellable_quantity`、`execution_blockers` 和 `paper_trade_only=true`。每档包含 `target_price`、`quantity`、`estimated_gross_proceeds`、`reason` 与 `status`。缺少买入日期、T+1 未满足、证券主数据或带生效日期交易规则不可用时，档位状态为阻断，不得据此修改模拟持仓。
 
-AI 对话线程和消息均按当前用户保存。发送请求增加 `attachment_ids`、经证券主数据逐项核对名称与代码绑定的 `mention_refs[{symbol,name}]`、可选带时区 `decision_at` 及 `Idempotency-Key`；服务端拒绝未来时点并为本次调用冻结权威 `decision_at`。消息响应新增 `trading_date`、`decision_at`、`available_at`。正式评分只读取 `ScoreRow.decision_at <= 本次决策时点` 的当前用户成功运行，K 线使用相同截止时点，缺少可验证抓取时点的报价不会进入上下文。
+`POST /api/v1/exit-advice/manual` 请求 `{"symbol":"600519.SH"}`，必须携带 `Idempotency-Key`。服务端验证当前用户确有该持仓、行情新鲜且证券/规则数据可用，成功返回 `202 ExitAdviceResponse`，并额外返回 `status_url`；相同键和请求返回首次资源与 `200`。错误只返回稳定原因码，例如 `POSITION_NOT_FOUND`、`QUOTE_STALE` 或 `TRADING_RULE_UNAVAILABLE`。
 
-助手历史在 Responses API 中编码为 `output_text`，用户/系统文本为 `input_text`，未到期的近期用户图片为 `input_image`；每张已销毁图片分别加入不可用标记。SSE 会先发 `meta` 事件，随后发 `delta`、`done` 或安全 `error`；错误含 `code`、`request_id`和 `retryable`。只有收到上游 `response.completed` 后才写入完成状态和缓存。浏览器与模型网关均仅在首个正文片段之前，对网络错误、408、429、5xx 或明确可重试错误使用同一幂等键进行有限重试；正文出现后断线会保留部分内容并标记未完成。
+`GET /api/v1/buy-entry-monitors` 按 `updated_at desc, monitor_id desc` 返回当前用户的监控资源；`PUT /api/v1/buy-entry-monitors` 请求 `{"symbol":"600519.SH","enabled":true}` 且要求 `Idempotency-Key`。启用时标的必须在用户自选中。系统仅把已完成正式研究、评分合格且 Trade Plan 结果为 `BUY` 的次交易日入场区间转为监控；首次进入区间时通知用户并关联模拟方案，不会买入。资产页会显示有效日、入场区间和触发/到期状态。
+
+通知接口全部按用户隔离。`GET /notifications` 使用稳定的 URL-safe `cursor`，`limit` 范围 1-200，支持 `unread_only=true`；响应为 `{items,next_cursor}`。`GET /notifications/summary` 只返回未读计数、高风险未读计数和最多 5 条未读摘要，适合可见页面轮询。两个已读写接口均要求 `Idempotency-Key`。已读通知保留 90 天，未读保留 180 天，由后台分批清理。
+
+### 5.3 AI 对话、证券解析与指标
+
+AI 对话线程和消息均按当前用户保存。消息正文中的 `@名称`、`@6位代码` 与标准代码由服务端按已提交证券主数据逐项解析；`mention_refs` 仅是客户端提示，不能把名称绑定到不匹配的代码，重名会显式返回 `SECURITY_NAME_AMBIGUOUS`。`GET /securities/resolve?q=顺络电子` 可用于 UI 预校验。发送请求可传 `attachment_ids`、可选带时区 `decision_at` 及 `Idempotency-Key`；不传 `decision_at` 时由服务端在并行数据获取完成后冻结实时决策时点。显式历史时点只读取 PIT 合格评分与日 K，当前持仓、实时行情和新闻会在 `data_status` 中标为不可用，不会混入历史结论。
+
+助手历史在 Responses API 中编码为 `output_text`，用户/系统文本为 `input_text`，未到期的近期用户图片为 `input_image`；每张已销毁图片分别加入不可用标记。SSE 依次包含 `meta`、`stage`（`retrieval|market|news|generation`）、心跳、`delta`、`done` 或安全 `error`；错误含 `code`、`request_id` 和 `retryable`。消息与 `done` 会附加 `streaming_mode=STREAMING|DEGRADED|CACHED`、`data_status`、`response_id`、`cached_input_tokens`、`cache_write_tokens`、`reasoning_tokens`、`cache_policy` 和 `context_budget_status` 等只增字段。服务端按“窗口减输出/推理预留”保留完整最近轮次；固定 PIT 上下文或当前问题自身超预算时返回 `CHAT_CONTEXT_TOO_LARGE`，不会截断或使用未来数据。Grok 档案保存且仅内部重放规范化动态快照，快照不在消息、导出或公开 API 中出现；OpenAI 档案可使用稳定 `prompt_cache_key` 与安全的增量 Responses 续接。兼容网关不发送专属缓存字段，并在远端参数不支持时以同一幂等键安全回退。只有收到上游 `response.completed` 后才写入完成状态和缓存。浏览器与模型网关均仅在首个正文片段之前，对网络错误、408、429、5xx 或明确可重试错误使用同一幂等键进行有限重试；正文出现后断线会保留部分内容并标记未完成。
+
+`GET /ai/chat/metrics` 返回当前用户的 `answer|context|market|news|model` 聚合指标，每项包含请求数、命中数、命中率、平均延迟、平均单飞等待和降级次数；其中没有提示词、持仓、凭据或上游原始错误。最终答案缓存仅在动态上下文哈希完全相同、同用户、同模型配置和同附件上下文时命中。
+
+`GET /ai/costs?days=30&limit=30&before=YYYY-MM-DD&thread_id=...` 只返回当前用户的日聚合用量和金额估算。`days` 与 `limit` 均为 1-90，按 `bucket_date desc` 稳定排序，`next_cursor` 可作为下一页的 `before`；可选 `thread_id` 仅额外返回该线程最近完成回复的 `current_turn`，不会缩小近 30 天总计。字段包括输入、缓存读取/写入、未缓存输入、输出、缓存命中、估算支出与估算节省。金额按当前管理员维护的每百万 token 单价估算，不替代供应商账单，响应不含提示词、仓位、密钥或上游错误。
+
+管理员的 `/admin/model-settings` 请求和响应新增 `model_profiles[]`。每项包含 `model`、`cache_policy=GROK|OPENAI|COMPATIBLE`、上下文窗口、输出/推理预留及输入、缓存读取、缓存写入、输出的每百万 token 单价。历史配置缺少该字段时默认 `COMPATIBLE` 和零价格；这些档案已纳入不可变配置哈希与研究 Manifest。
 
 `POST /ai/chat/attachments` 支持 PNG、JPEG、WebP 和非动画 GIF；每条最多 4 张、单张 10 MB、合计 25 MB。服务端校验真实签名、MIME、尺寸和动画状态，不接受远程 URL。`expires_at=uploaded_at+7天` 固定不延长；到期瞬间读取返回 `410`，后台五分钟内物理清理。
 
@@ -403,6 +442,32 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 
 `POST /api/v1/admin/model-settings/test` 返回 `ModelProbeResponse`：`reachable`、`message`、`model`、`checked_at`。`POST /api/v1/admin/model-settings/models` 返回 `{"models":["..."]}`。
 
+### 系统设置中心
+
+`GET /api/v1/admin/system-settings` 返回有效的公开设置、每项来源（`database|environment`）、不可变配置版本/哈希、敏感项是否已配置、环境只读状态、Worker 心跳、已加载执行模式及各队列 `pending/processing` 摘要。它绝不返回 Tushare、对象存储或模型密钥，也不返回数据库/Redis 地址、认证参数、Fernet 密钥或卷路径。Worker 心跳可以包含清洗后的内存、内存上限和 CPU 指标。
+
+`GET /api/v1/admin/system-resources` 返回服务器或 Docker VM 的内存、CPU、运行文件系统磁盘指标，以及 API/Worker 的清洗后资源占用。Docker Desktop 下总览是整个 Docker VM，并不等于当前 Compose 项目的服务合计；服务表只展示能够通过应用心跳安全采集的 Python 服务。服务的 `memory_used_bytes` 是扣除 cgroup `inactive_file` 后的工作集，可选的 `memory_cache_bytes` 单独表示这部分可回收文件缓存。`scope` 明确区分 `HOST|CONTAINER`。`topology_estimate` 返回 DUAL 的 Worker 数、估算来源、单 Worker 典型占用、典型新增量、最大预算、预计剩余内存和 `NORMAL|WARNING|CRITICAL` 等级；顶层 `warnings` 同时包含内存、CPU 和磁盘提醒。该接口不使用 Docker socket，不返回路径、容器环境变量或未经清洗的运行时配置。
+
+`PUT /api/v1/admin/system-settings` 接收 `SystemSettingsRequest` 的任意非空子集，支持 `Idempotency-Key`。每次成功保存均创建一个新的不可变 PostgreSQL 版本；同一个键与同一请求体重试不会创建第二个版本，同键不同请求体返回 `409`。可编辑公开字段包括：
+
+- `research_execution_mode=SERIAL|DUAL` 与 `llm_agent_max_concurrency=1..4`；
+- 对象存储 endpoint/bucket/TLS，SearXNG 地址/超时/结果数；
+- 行情、金融检索缓存与并发/限流；
+- 每日研究启动与重试间隔、旧版重试窗口兼容值、Worker lease、AKShare 参数、数据包模式、演示数据开关、最低上市日和成交额；旧版窗口仅保持读取/写入兼容，自动补数统一在权威交易日历确定的下一交易日 09:25（上海时间）截止；
+- 可写但永不回显的 `tushare_token`、`object_store_access_key`、`object_store_secret_key`。
+
+敏感值使用 `MODEL_SETTINGS_ENCRYPTION_KEYS` 的 Fernet 加密；缺少该环境变量时保存敏感项返回 `422`。`DELETE /api/v1/admin/system-settings/{field}` 仅恢复该字段至环境变量基线，`DELETE /api/v1/admin/system-settings` 恢复全部覆盖；两者同样新增审计版本。
+
+所有系统设置写操作必须先调用 `POST /api/v1/admin/system-settings/unlock`，请求体为 `{"password":"<CURRENT_ADMIN_PASSWORD>"}`。服务端只验证当前登录管理员自己的密码；成功返回只可用于当前 `user_id + session_id` 的 `unlock_token` 和 `expires_at`，有效期 10 分钟。客户端把令牌放入 `X-System-Settings-Unlock`，不得持久化或记录。缺失、过期、跨用户或跨会话令牌返回 `403` 与 `SYSTEM_SETTINGS_LOCKED`；解锁存储不可用返回 `503`。该安全强化要求旧管理客户端在 PUT/DELETE 前增加解锁步骤，Web Cookie 仍需 CSRF，App Bearer 会话不模拟 Cookie。
+
+`SERIAL` 模式下只有 `job-worker` 领取研究队列，默认 Compose 也不会创建 `research-worker` 容器；`DUAL` 模式下固定两个 `research-worker` 副本领取不同 `run_id`，`job-worker` 仍串行处理个人档案、Trade Plan、回测、调度和清理但跳过研究队列。切换模式会检查活动研究和回测，存在活动任务返回 `422`。内存不再使用固定 4GB 门槛拒绝切换，而由系统资源接口按实测基线和两个 700 MiB Worker 最大预算提供分级提醒；`MODEL_GATEWAY_MAX_CONCURRENCY >= 2 * llm_agent_max_concurrency` 仍是硬性门禁。执行模式和 LLM 并发只在 Worker 启动时读取，保存后响应中的 `restart_required=true` 表示执行响应中 `compose_restart_command` 给出的命令；保存为 `DUAL` 时它会启用 `dual-research` profile，保存为 `SERIAL` 时它会停止现有研究 Worker：
+
+```bash
+docker compose -p ashare-ai-src -f compose.yaml --profile dual-research up -d --force-recreate job-worker research-worker
+```
+
+其他系统设置会在下一次 API 请求、Worker 轮询或任务启动时加载。系统设置 API 不拥有 Docker socket，不能直接重启或扩缩容容器。
+
 ## 7. 研究结果、报告和 Trade Plan
 
 所有结果查询都支持可选查询参数 `run_id`，用于选择指定运行。省略时服务端按当前用户可见范围选择最新合适结果；管理员可跨用户查询，但不能读取不存在或无权限的运行。
@@ -446,7 +511,7 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 
 ### `GET /api/v1/candidates/{trading_date}`
 
-返回按研究结果排序的 `CandidateResponse[]`，字段为：`symbol`、`trading_date`、`decision_at`、`rank`、`total_score`、`base_total_score`、`dividend_bonus`、`prediction_percentile`、`industry_code`、`event_risk_multiplier`、`style_exposures`、`evidence_hash`。
+返回按研究结果排序的 `CandidateResponse[]`，字段为：`symbol`、可空 `name`、`trading_date`、`decision_at`、`rank`、`total_score`、`base_total_score`、`dividend_bonus`、`prediction_percentile`、`industry_code`、`event_risk_multiplier`、`style_exposures`、`evidence_hash`。`name` 仅来自该研究运行 `decision_at` 时可用且生效的证券主数据；缺失时为 `null`，客户端应回退展示标准证券代码。
 
 ### `GET /api/v1/portfolios/{trading_date}`
 
@@ -493,7 +558,7 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
   -H "Authorization: Bearer <ACCESS_TOKEN>"
 ```
 
-提交相同的用户、日期、范围、标的和预算且已有进行中任务时返回既有运行，状态码为 `200`。队列不可用返回 `503`；交易时段、未来日期或不安全的历史实时重建返回 `409`。收盘后若股票日线已到而任一策略基准（CSI300、CSI500、CSI1000）尚未覆盖目标日，仍创建 `202` 任务，状态为 `DATA_READINESS_WAITING`；轮询研究详情会返回“等待基准数据同步”以及新增的 `next_retry_at`。系统在冻结的原始范围、预算、价格上限、幂等键和活动键不变的前提下按固定间隔重试；在下一交易日开盘前仍不完整时以脱敏操作性原因终止，且绝不回退到开盘后的上一日实时快照。实时 AKShare 模式只允许冻结当日已就绪数据，或在下一交易日开盘前/非交易日冻结最近已完成交易日；冻结文件模式仍可按文件覆盖日期运行历史研究。
+提交相同的用户、日期、范围、标的和预算且已有进行中任务时返回既有运行，状态码为 `200`，其中包括 `DATA_READINESS_WAITING`。队列不可用返回 `503`；交易时段、未来日期或不安全的历史实时重建返回 `409`。收盘后若股票日线已到而任一策略基准（CSI300、CSI500、CSI1000）尚未覆盖目标日，仍创建 `202` 任务，状态为 `DATA_READINESS_WAITING`；轮询研究详情会返回“等待基准数据同步”以及新增的 `next_retry_at`。系统在冻结的原始范围、预算、价格上限、幂等键和活动键不变的前提下按固定间隔重试；在权威交易日历确定的下一交易日 09:25（上海时间）前仍不完整时以脱敏操作性原因终止，且绝不回退到下一交易时段的上一日实时快照。实时 AKShare 模式只允许冻结当日已就绪数据，或在下一交易日安全截止前/非交易日冻结最近已完成交易日；冻结文件模式仍可按文件覆盖日期运行历史研究。
 
 ### `GET /api/v1/research/runs`
 
@@ -514,7 +579,7 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 
 ### `PUT /api/v1/research/settings`
 
-新客户端完整提交 `{"automatic_reports":[报告A,报告B]}`；旧请求 `{"auto_enabled":true|false}` 继续兼容。自动研究固定使用上海时区和 `15:05` 调度时间，快照模式不可修改。启用一个槽位即运行单报告，两个均启用则同日提交两份独立任务，由默认串行 Worker 依次执行。`WATCHLIST` 在每次运行时动态读取用户当时的自选股与模拟持仓；为空时只跳过该槽位并在两小时窗口内继续重试，不阻塞另一槽位。同一用户、交易日和槽位只接受首次提交，首次提交后修改配置或自选与持仓不会在当日重复创建报告，新配置从下一交易日起生效。
+新客户端完整提交 `{"automatic_reports":[报告A,报告B]}`；旧请求 `{"auto_enabled":true|false}` 继续兼容。自动研究固定使用上海时区和 `15:05` 调度时间，快照模式不可修改。启用一个槽位即运行单报告，两个均启用则同日提交两份独立任务，由默认串行 Worker 依次执行。15:05 后即持久化启用槽位；基准数据未就绪时状态为 `DATA_READINESS_WAITING`，响应中的 `next_retry_at` 和审计事件给出下次重试时点。任务会按权威交易日历持续重试到下一交易日 09:25（上海时间），届时仍未就绪才失败关闭，绝不使用未就绪或下一交易时段数据。`WATCHLIST` 在每次运行时动态读取用户当时的自选股与模拟持仓。同一用户、交易日和槽位只接受首次提交，首次提交后修改配置或自选与持仓不会在当日重复创建报告，新配置从下一交易日起生效。
 
 ### `GET /api/v1/research/settings`
 
@@ -527,6 +592,14 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 ### `GET /api/v1/runs`
 
 查询参数 `run_type`（可选，服务端转大写）和 `limit`（默认 100，范围 1–500）。返回 `RunListResponse[]`，每项在 `RunResponse` 上增加 `user_id`。
+
+### `GET /api/v1/runs/activity`
+
+返回当前用户的研究、回测、买入方案和卖出建议统一活动流，稳定按 `started_at desc, run_id desc` 排序。支持 `type`、`status`、`limit`（1–100）和不透明 `cursor`；响应为 `RunActivityResponse`，含 `items`、`next_cursor` 以及每项的 `resource_type`、`resource_id`、`resource_url` 和可空 `symbol`。既有 `/runs` 行为不变。
+
+### `GET /api/v1/reports/{report_id}/execution-status`
+
+仅返回报告涉及且属于当前用户模拟持仓的执行状态，含服务端 `as_of`、持仓数量、买入日、可卖数量、`t1_restricted` 和稳定阻断码。当天买入返回 `T1_NOT_SELLABLE`；缺少买入日时默认拒绝并返回 `MISSING_ACQUIRED_ON`。
 
 ### `GET /api/v1/runs/{run_id}`
 
@@ -575,7 +648,7 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 
 ## 10. 行情接口
 
-实时行情是交互数据，不写入研究或回测快照。行情响应中的 `status` 包含：
+实时行情是交互数据，不写入研究或回测快照。Web 在恢复可见或重新聚焦时会强制刷新已订阅报价；日线和分钟线在页面可见时分别至少每 5 分钟和 30 秒重验。行情响应中的 `status` 包含：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
@@ -586,9 +659,13 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 | `stale` | boolean | 当前通常与 `delayed` 同步 |
 | `message` | string/null | 上游或缓存说明 |
 
+### `GET /api/v1/market/quotes/{symbol}`
+
+返回一个 `QuoteResponse`。可选 `refresh=true|false` 强制刷新；该端点优先使用能按标的定向请求的实时供应商，并使用独立的短缓存。它适合当前选中证券，不会等待全市场批量快照。无效代码返回 `422`，所有上游和可用缓存均失败时返回 `503`。
+
 ### `GET /api/v1/market/quotes`
 
-必填查询参数 `symbols`，使用逗号分隔，例如 `600519.SH,000001.SZ`；可选 `refresh=true|false` 强制刷新。返回 `QuoteResponse[]`，每项包含 `symbol`、`name`、`price`、`change`、`change_percent`、`open`、`high`、`low`、`previous_close`、`volume`、`amount` 和 `status`。单个数值可能为 `null`。
+必填查询参数 `symbols`，使用逗号分隔，例如 `600519.SH,000001.SZ`；可选 `refresh=true|false` 强制刷新。返回 `QuoteResponse[]`，每项包含 `symbol`、`name`、`price`、`change`、`change_percent`、`open`、`high`、`low`、`previous_close`、`volume`、`amount` 和 `status`。单个数值可能为 `null`。它适合后台批量刷新；Web 会先调用单标的端点，再在后台调用此端点补全其余证券。
 
 ### `GET /api/v1/market/klines/{symbol}`
 
@@ -612,14 +689,16 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 请求体：
 
 ```json
-{"symbols":["600519.SH","000001.SZ"],"periods":["day"],"limit":160}
+{"symbols":["600519.SH","000001.SZ"],"periods":["day"],"limit":160,"include_quotes":true}
 ```
 
-`symbols` 至少 1 个，去重后最多 50 个；`periods` 当前只能为 `day` 或 `daily`，服务端会规范为 `day`；`limit` 范围 1–5000。返回 `quotes`、`klines` 和按代码记录的 `errors`。单只股票失败不会丢弃其他成功结果。
+`symbols` 至少 1 个，去重后最多 50 个；`periods` 当前只能为 `day` 或 `daily`，服务端会规范为 `day`；`limit` 范围 1–5000。`include_quotes` 默认为 `true`；设为 `false` 时仅预热 K 线并返回空的 `quotes`，可避免与已在进行的报价读取重复。返回 `quotes`、`klines` 和按代码记录的 `errors`。单只股票失败不会丢弃其他成功结果。
 
 ### `GET /api/v1/market/status`
 
-返回当前行情服务状态对象，主要字段包括 `primary`、`fallback`、`fallbacks`、`cache_seconds`、`kline_cache_seconds`、`prefetch_max_workers`、`prefetch_max_symbols`、`stale_seconds`、`adjustment`、`live_data_isolated_from_snapshots` 和可选 `quotes` 缓存状态。
+返回当前行情服务状态对象，主要字段包括 `primary`、`fallback`、`fallbacks`、`cache_seconds`、`kline_cache_seconds`、`prefetch_max_workers`、`prefetch_max_symbols`、`stale_seconds`、`adjustment`、`live_data_isolated_from_snapshots` 和可选 `quotes` 缓存状态。兼容新增的 `provider_process_mode`、`provider_process_state`、`provider_process_degraded` 与 `hedge_delay_seconds` 用于观察可复用 AKShare 隔离进程和日线延迟竞速；这些字段不暴露 PID、命令行、环境变量或内部错误。
+
+`market_session` 为兼容性新增对象，用于界面标注实时行情是否已收盘：`state` 取值为 `OPEN`、`PRE_OPEN`、`BREAK`、`CLOSED` 或 `UNKNOWN`；并返回上海时区的 `as_of`、`trading_date`、`is_trading_day` 和原因码 `reason`。交易日 15:00 起及非交易日返回 `CLOSED`；午间休市返回 `BREAK`。交易日历暂不可用时返回 `UNKNOWN`，客户端不得将其视为已收盘。旧客户端可忽略该新增字段。
 
 ## 11. 财务检索
 
@@ -650,7 +729,7 @@ curl -sS "$BASE_URL/api/v1/search/financial?q=%E8%B4%B5%E5%B7%9E%E8%8C%85%E5%8F%
 |---:|---|
 | `200` | 查询成功，或重复提交命中已有任务/结果 |
 | `201` | 用户创建成功 |
-| `202` | 研究、回测、Trade Plan 或回测重试已接受并异步排队 |
+| `202` | 研究、回测、Trade Plan、手动退出研究或回测重试已接受并异步排队 |
 | `204` | 注销或撤销成功，无响应体 |
 | `401` | 未登录、令牌无效、令牌过期或会话失效 |
 | `403` | CSRF 无效或需要管理员权限 |
@@ -685,7 +764,7 @@ curl -sS "$BASE_URL/api/v1/search/financial?q=%E8%B4%B5%E5%B7%9E%E8%8C%85%E5%8F%
 
 提交研究、回测或 Trade Plan 后，先保存返回的 `run_id`、`backtest_id` 或 `plan_id`，再使用对应详情接口查询。研究任务使用 `/research/runs/{run_id}`，不要用缺少 `phase/progress` 的通用 `/runs/{run_id}` 代替。不要依赖长连接或固定等待时间。常见研究状态包括 `PENDING`、`QUEUED`、`RUNNING`、`PROCESSING`、`SUCCEEDED`、`FAILED`、`FUSED`、`CANCEL_REQUESTED` 和 `CANCELLED`；具体 `phase` 和进度以响应为准。
 
-研究、回测和报告 Trade Plan 提交支持 `Idempotency-Key` 请求头（1–128 字符）。服务端只持久化 Key 的 SHA-256，并按“用户 + 路由 + Key + 请求体哈希”去重：同 Key、同请求返回首次创建的资源和 `200`；同 Key、不同请求返回 `409`。首次接受仍返回 `202`。手机客户端应为每次用户意图生成随机 Key，在网络重试中原样复用，并保存返回的资源 ID继续轮询。
+研究、回测、报告 Trade Plan、手动退出研究、通知已读、买入监控设置及管理员系统设置支持 `Idempotency-Key` 请求头（1–128 字符）。服务端只持久化 Key 的 SHA-256，并按“用户 + 路由 + Key + 请求体哈希”去重：同 Key、同请求返回首次创建的资源和 `200`；同 Key、不同请求返回 `409`。首次接受仍返回 `202`（同步设置接口除外）。手机客户端应为每次用户意图生成随机 Key，在网络重试中原样复用，并保存返回的资源 ID继续轮询。
 
 ## 13. 兼容别名和开发工具
 

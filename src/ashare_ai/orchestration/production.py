@@ -15,6 +15,7 @@ from ashare_ai.agents.model_settings import ModelConfigurationService
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.hashing import sha256_bytes, stable_hash
 from ashare_ai.core.security import safe_error_message
+from ashare_ai.core.system_settings import SystemConfigurationService
 from ashare_ai.core.time import SHANGHAI, market_decision_time
 from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.storage.database import SessionLocal
@@ -113,6 +114,8 @@ class ApplicationPipeline:
             random_seed=int(manifest.get("random_seed", 42)),
         )
         with self.session_factory() as session:
+            system_configuration = SystemConfigurationService(settings).resolve(session)
+            manifest["system_configuration"] = system_configuration.manifest_reference()
             model_configuration = ModelConfigurationService(settings).resolve(session)
             manifest["model_configuration"] = (
                 model_configuration.manifest_reference()
@@ -150,7 +153,11 @@ class ApplicationPipeline:
                 run_id,
                 "RUN_STARTED",
                 "After-close research run started",
-                details={"input_hash": input_hash, "decision_at": decision_at.isoformat()},
+                details={
+                    "input_hash": input_hash,
+                    "decision_at": decision_at.isoformat(),
+                    "system_configuration": system_configuration.manifest_reference(),
+                },
             )
             session.commit()
         return run_id

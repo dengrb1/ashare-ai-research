@@ -187,8 +187,11 @@ class RedisLeasedQueue:
         handler: Callable[[str], Any],
         *,
         on_error: Callable[[str, Exception], None] | None = None,
+        on_poll: Callable[[], None] | None = None,
     ) -> None:
         while True:
+            if on_poll is not None:
+                on_poll()
             self.promote_due()
             self.requeue_expired()
             item = self.claim()

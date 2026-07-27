@@ -156,7 +156,16 @@ async def test_stream_text_normalizes_response_deltas_and_usage() -> None:
     assert events == [
         {"type": "delta", "delta": "你"},
         {"type": "delta", "delta": "好"},
-        {"type": "completed", "model": "gpt-test", "input_tokens": 3, "output_tokens": 2},
+        {
+            "type": "completed",
+            "model": "gpt-test",
+            "input_tokens": 3,
+            "cached_input_tokens": 0,
+            "cache_write_tokens": 0,
+            "output_tokens": 2,
+            "reasoning_tokens": 0,
+            "cache_policy": "COMPATIBLE",
+        },
     ]
 
 
@@ -325,6 +334,7 @@ async def test_stream_text_retries_clean_eof_before_first_delta() -> None:
             async for event in client.stream_text(
                 messages=({"role": "user", "content": "hello"},),
                 idempotency_key="clean-eof-retry",
+                allow_degraded=False,
             )
         ]
 

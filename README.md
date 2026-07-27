@@ -111,12 +111,12 @@ npm run dev
 
 访问 `http://localhost:5173` 登录。主题支持“跟随系统 / 浅色 / 深色”三态并按此顺序循环；没有保存偏好时默认跟随系统，系统配色变化会实时生效。选择保存在 `localStorage`，已有的 `ashare-theme=light/dark` 会继续作为显式覆盖；页面首屏脚本会在 React 启动前同步实际渲染主题和浏览器 `theme-color`，避免主题闪烁。
 
-登录后前端会把“自选股 + 我的持仓”合并去重，在后台调用行情预取接口。报价按 15 秒刷新，后复权日 K 预热和缓存周期为 5 分钟；1/5/15/30/60 分钟线按需分段加载，最新分段最长缓存 30 秒并在页面停留、重新聚焦时自动检查。收盘后最后一根分钟线正常停在当日 15:00；后端会拒绝把上一交易日的数据标记为实时。实时行情缓存始终与研究、评分、报告和回测的不可变快照隔离。
+登录后前端会把“自选股 + 我的持仓”合并去重，在后台调用行情预取接口。报价自动刷新频率按账户保存，可选 15/30/60/120 秒，默认 15 秒；手动刷新会先定向刷新当前选中证券并并行刷新可见 K 线，其他证券再在后台补全。后复权日 K 预热和缓存周期为 5 分钟；1/5/15/30/60 分钟线按需分段加载，最新分段最长缓存 30 秒并在页面停留、重新聚焦时自动检查。收盘后最后一根分钟线正常停在当日 15:00；后端会拒绝把上一交易日的数据标记为实时。实时行情缓存始终与研究、评分、报告和回测的不可变快照隔离。
 自选、我的持仓和账户总资金按登录用户保存到 PostgreSQL，可在“我的持仓”页新增、编辑或删除。账户总资金包括持仓市值和可用现金；当前仓位按最新行情（不可用时按成本价估算）乘以持仓数量后除以账户总资金自动计算。Cookie 只承载认证会话，清除 Cookie 后重新登录同一账户仍会恢复资产数据；部署前仅存在浏览器内存中的自定义数据无法追溯，新表上线后从默认值开始并在首次修改后永久保存。这些手工数据只用于页面记账与行情预取，不会覆盖研究生成的版本化组合，也不会触发真实下单。
 
-持仓页可启用盘中盈利退出监控，设置全局人民币浮盈触发金额并允许个股覆盖。交易日 09:30–11:30、13:00–15:00 每 5 分钟检查；严格超过触发线时排队执行 AI 退出研究。AI 可建议继续持有、减仓或卖出，并生成目标价/数量分档；服务端再按持仓上限、买入日期 T+1 和带生效日期的交易规则复核。结果只生成待确认的模拟卖出方案，不自动修改持仓。同日价格相对上次变化不足 3%、研究与持仓未变时不重复调用；完全相同输入会命中 PostgreSQL AI 缓存并显示缓存状态。
+持仓页可启用盘中盈利退出监控、止损预警和自选股买入区间监控。交易日 09:30–11:30、13:00–15:00 每分钟合并行情后检查；止损线优先使用手工价格，缺失时以 20 个后复权日 K 的 ATR 推导并限制在成本价下方 5%-10%，历史不足时使用 8%。触发止损时先写入高优先级通知，再排队快速 AI 退出研究；用户也可手动提交某个现有持仓的退出研究。正式评分合格且 Trade Plan 为 `BUY` 的自选股，仅在下一个交易日的有效入场区间首次命中时提示。所有路径只创建通知、研究和模拟方案，不自动买入、卖出或修改持仓。
 
-研究中心提供持久化 AI 股票问答。用户可用 `@600690.SH` 或已保存持仓名称附加系统内最新行情、近 30 根日 K、个人持仓和最近正式评分；可选已配置的搜索/研究模型与 `low|medium|high|xhigh` 思考强度。响应通过 SSE 流式返回并按用户保存。联网由同一 Compose 私有网络中的 SearXNG 提供，生产默认地址为 `http://searxng:8080`；只向搜索服务发送查询词，模型不会获得数据库、凭据或任意内网访问能力。
+研究中心提供持久化 AI 问答。用户可询问任意问题，也可用 `@名称`、`@002138` 或 `@600690.SH` 附加由已提交证券主数据精确解析的行情、近 30 根日 K、个人持仓、最近正式评分和强相关新闻；同名歧义会拒绝绑定。启用联网时通过同一 Compose 私有网络中的 SearXNG 检索最多 5 条 Google、Bing 或 DuckDuckGo 结果，公共检索按 SHA-256 查询键缓存，含“最新、今日、实时”等时效词缓存 5 分钟，普通查询缓存 30 分钟，并以 Redis 单飞抑制并发重复请求。无历史 `decision_at` 时服务端在并行数据返回后冻结实时决策时点；显式历史时点只读取 PIT 合格数据并禁止联网，避免未来信息。模型不会获得数据库、凭据或任意内网访问能力。
 
 ### 完整 Docker 栈
 
@@ -134,17 +134,21 @@ Copy-Item .env.docker.example .env.docker
 docker compose -p ashare-ai-src -f compose.yaml up -d --build
 ```
 
-默认 Compose 面向小型主机，建议至少 2GB 内存：包含 Nginx WebGUI、API、单一串行 `job-worker`、
+默认 Compose 面向小型主机，建议至少 2GB 内存：包含 Nginx WebGUI、API、单一串行 `job-worker`、独立低并发 `exit-advice-worker`、
 PostgreSQL、Redis 和仅在 Compose 私有网络内可访问的 SearXNG，并为服务设置内存/PID/日志上限。`job-worker` 同时承担收盘后调度，按
-Research、Trade Plan、Exit Advice、Backtest 四类 Redis 租约队列逐个取任务；每个重任务在隔离子进程中
+Research、Trade Plan、Backtest 等 Redis 租约队列逐个取任务；退出研究由独立 Worker 消费，避免与普通重任务争抢队列。周期清理、退出研究和普通重任务均在隔离子进程中
 执行，结束后释放 Pandas/PyArrow 等科学计算堆，避免多个 Worker 并发触发 OOM。WebGUI 由
 Nginx 提供静态文件并把 `/api` 反向代理到 FastAPI；本地浏览器访问 `http://localhost`。
 PostgreSQL、Redis 和 API 默认仅绑定 `127.0.0.1`，Redis 强制密码认证。
 
 内置流水线使用 `object-data` 内容寻址卷。仓库不再捆绑安全更新滞后的 MinIO/MC 镜像；确需
-S3 兼容时，通过 `OBJECT_STORE_ENDPOINT` 接入受维护的外部 S3 服务。需要独立并行
-Worker 时使用 `docker compose -p ashare-ai-src -f compose.yaml --profile parallel-workers up -d --scale job-worker=0`；
-1.5GB 主机不要启用该扩展配置。
+S3 兼容时，通过 `OBJECT_STORE_ENDPOINT` 接入受维护的外部 S3 服务。管理员在“系统设置”中可查看
+运行环境内存、CPU、磁盘及 API/Worker 占用；所有修改与恢复操作均须由当前登录管理员输入自己的账户密码解锁，
+解锁证明仅保留 10 分钟且绑定当前会话。管理员可将研究拓扑保存为 `SERIAL`（仅 `job-worker` 消费研究）或 `DUAL`（固定两个 `research-worker`
+消费研究，`job-worker` 跳过研究队列）。默认 `SERIAL` 不创建 `research-worker` 容器；保存为
+`DUAL` 后，执行设置页面给出的 Compose 命令才会启用 `dual-research` profile 并启动两个副本。切回
+`SERIAL` 时该命令会停止研究 Worker。`DUAL` 内存容量按实测基线和两个 Worker 的容器预算分级提醒，不再使用固定 4GB 阈值拒绝保存；模型网关并发容量仍是硬性门禁。不要手工
+启用会竞争默认 Trade Plan、回测或研究队列的 legacy `parallel-workers` profile。
 
 公网部署先复制 `.env.production.example` 为未跟踪的 `.env`，逐项填写强随机数据库、Redis、
 管理员密码和加密密钥，再复制 `.env.docker.example`。将 `TRUSTED_HOSTS` 设置为实际域名，
@@ -161,7 +165,7 @@ docker compose -p ashare-ai-src -f compose.yaml logs job-worker --tail 100
 ```
 
 生产调度默认使用仓库内置的 `ApplicationPipeline + BuiltinDailyBackend`：开发环境会生成确定性全 A 风格 demo bundle，完整跑通股票池、三类特征、严格 Agent Schema、综合评分、预测分位、事件风控、15 股组合和日报；生产环境必须通过 `ASHARE_CANONICAL_BUNDLE` 提供强类型 canonical JSON，否则 fail closed。也可替换 `ASHARE_STAGE_BACKEND_FACTORY` 接入获授权的数据源与模型实现，而不修改编排图。
-当前生产默认使用 `configs/first_release.v2.json`：保留 15/8%/25%/20%、风格限额、熔断、容量阈值和三类必需基准，并新增分红/新闻评分及 Trade Plan 优化配置。`configs/first_release.v1.json` 保留用于历史结果回放；每次运行都会把实际配置版本和文件哈希写入 Manifest。
+当前生产默认使用 `configs/first_release.v3.json`：保留 15/8%/25%/20%、风格限额、熔断、容量阈值和三类必需基准，并新增聊天缓存、止损、买入监控和通知保留策略。`configs/first_release.v1.json` 与 `configs/first_release.v2.json` 保留用于历史结果回放；每次运行都会把实际配置版本和文件哈希写入 Manifest。
 
 ### 开发检查
 
@@ -219,9 +223,19 @@ docker compose -p ashare-ai -f compose.yaml -f compose.ghcr.yaml up -d
 - `GET /api/v1/app/bootstrap`
 - `GET|PUT /api/v1/assets`
 - `PUT /api/v1/assets/exit-monitor`
+- `PUT /api/v1/assets/market-refresh`
 - `GET /api/v1/exit-advice`
 - `GET /api/v1/exit-advice/{advice_id}`
+- `POST /api/v1/exit-advice/manual`
+- `GET|PUT /api/v1/buy-entry-monitors`
+- `GET /api/v1/notifications`
+- `GET /api/v1/notifications/summary`
+- `POST /api/v1/notifications/read`
+- `POST /api/v1/notifications/read-all`
+- `GET /api/v1/securities/resolve`
 - `GET /api/v1/ai/models`
+- `GET /api/v1/ai/chat/metrics`
+- `GET /api/v1/ai/costs?days=30`
 - `GET|POST /api/v1/ai/chat/threads`
 - `GET /api/v1/ai/chat/thread-index`
 - `PATCH|DELETE /api/v1/ai/chat/threads/{thread_id}`
@@ -236,10 +250,13 @@ docker compose -p ashare-ai -f compose.yaml -f compose.ghcr.yaml up -d
 - `POST /api/v1/me/data-imports/{import_id}/apply`
 - `GET|POST /api/v1/admin/users`
 - `PATCH /api/v1/admin/users/{user_id}`
+- `GET|PUT|DELETE /api/v1/admin/system-settings`
+- `DELETE /api/v1/admin/system-settings/{field}`
 - `GET /api/v1/market/quotes?symbols=600000.SH,000001.SZ`
+- `GET /api/v1/market/quotes/{symbol}`
 - `GET /api/v1/market/klines/{symbol}?period=1m|5m|15m|30m|60m|day`
 - `POST /api/v1/market/prefetch`
-- `GET /api/v1/market/status`
+- `GET /api/v1/market/status`（兼容新增 `market_session`，用于显示 A 股开闭市状态）
 - `GET /api/v1/search/financial?q=贵州茅台股价`
 - `GET /api/v1/search/status`
 - `POST /api/v1/research/runs`
@@ -287,9 +304,13 @@ Web、API、PostgreSQL 和 Redis 默认只绑定 `127.0.0.1`；物理手机联�
 生成模拟组合；组合接口会返回明确的观察模式状态，不会回退到同日旧组合。每日研究页按
 交易日展示最近 5 次运行及阶段、进度、失败原因和报告入口。
 
-行情以 AKShare 为主。实时快照使用共享 15 秒缓存与单次上游请求合并；日 K 使用独立的
-300 秒缓存。`POST /api/v1/market/prefetch` 单次最多接受 50 个去重后的标准代码，默认并发
-数为 4；它并行执行一批报价和逐股票后复权日 K 请求，单个股票失败只写入 `errors`，不会
+行情以 AKShare 为主。API 启动时会预热一个可复用的隔离行情进程，NumPy、Pandas 和
+PyArrow 不会进入 API 父进程，也不会在每次请求时重复导入。实时快照使用共享 15 秒缓存与
+单次上游请求合并；日 K 使用独立的 300 秒缓存。日线 AKShare 超过配置的短延迟阈值时会
+并发请求腾讯 HFQ 日线并采用首个有效结果，分钟线仍保持 AKShare HFQ 主路径。
+`POST /api/v1/market/prefetch` 单次最多接受 50 个去重后的标准代码，默认并发
+数为 4；默认并行执行一批报价和逐股票后复权日 K 请求。传入 `include_quotes=false` 时只预热
+日 K，供首页在报价请求完成后的空闲时段使用，避免重复读取报价。单个股票失败只写入 `errors`，不会
 丢弃其他成功结果。该接口要求登录和 CSRF 请求头。AKShare 异常时，
 无需密钥的新浪公开接口会提供实时报价和分钟线，腾讯公开接口提供后复权日线；配置
 `TUSHARE_TOKEN` 后会作为额外备用。响应会标注实际来源，且只在所有上游均不可用时才返回
@@ -302,8 +323,12 @@ Web、API、PostgreSQL 和 Redis 默认只绑定 `127.0.0.1`；物理手机联�
 MARKET_CACHE_SECONDS=15
 MARKET_KLINE_CACHE_SECONDS=300
 MARKET_PREFETCH_MAX_WORKERS=4
+MARKET_PROVIDER_MAX_WORKERS=4
+MARKET_PROVIDER_MAX_QUEUE=8
+MARKET_CACHE_MAX_ENTRIES=512
 MARKET_STALE_SECONDS=900
 MARKET_TIMEOUT_SECONDS=10
+MARKET_HEDGE_DELAY_SECONDS=0.5
 ```
 
 交互式金融搜索采用“AI 解析意图 + 确定性数据源取数”：标准证券代码和内置名称走直接
@@ -349,8 +374,10 @@ WebGUI 可选择动态市场股票池、从当前用户的自选与持仓中自�
 每位用户的自动日研默认关闭；研究页的设置悬浮窗提供报告 A、B 两套独立配置，可分别启停并设置
 全市场、动态自选与持仓或手工股票范围，以及总预算、单股最高投入和最高可接受股价。开启一套即
 运行单报告，两套均开启则在同一交易日提交两份独立任务，由默认串行 Worker 依次执行；配置相同
-也按 A/B 槽位生成两份报告。调度器在上海交易日 15:05 起检查数据就绪状态，未就绪时每 5 分钟
-重试、最长 2 小时，数据就绪前不创建运行或冻结 `decision_at`。自选与持仓在实际运行时动态读取，
+也按 A/B 槽位生成两份报告。调度器在上海交易日 15:05 起检查数据就绪状态，未就绪时按配置间隔
+重试至权威交易日历确定的下一交易日 09:25（上海时间）；数据未就绪时任务会以
+`DATA_READINESS_WAITING` 持久化其冻结的 `decision_at`、范围和预算，待基准齐备后才构建快照，
+并且绝不跨入下一交易时段重建前一日快照。自选与持仓在实际运行时动态读取，
 为空只跳过对应槽位且不阻塞另一槽位。每次自动任务会把槽位、配置版本、范围和预算冻结进 Manifest
 及输入哈希；同一用户、交易日和槽位只提交一次，当日首次提交后修改的配置从下一交易日起生效。
 旧版 `auto_enabled` 设置请求仍兼容。手动任务使用独立 `MANUAL` 幂等键，
@@ -358,7 +385,7 @@ WebGUI 可选择动态市场股票池、从当前用户的自选与持仓中自�
 配置 `TUSHARE_TOKEN` 后，Research Worker 也只在免费源失败、历史缺失或财报/公告字段
 不完整时补用 Tushare，并把各数据集的实际来源写入冻结记录。
 Demo 数据必须同时显式设置 `CANONICAL_BUNDLE_MODE=demo` 和 `ALLOW_DEMO_DATA=true`。
-管理员可在 WebGUI 的“模型设置”页配置 OpenAI-compatible Responses API。配置以不可变
+管理员可在 WebGUI 的“模型设置”页配置 OpenAI-compatible Responses API，并为每个已配置模型维护 `GROK`、`OPENAI` 或 `COMPATIBLE` 缓存档案、上下文窗口、输出/推理预留和每百万 token 单价。旧配置默认保持 `COMPATIBLE`，不会向未知网关发送专属缓存字段。聊天会按安全预算保留完整最近轮次；固定 PIT 上下文或当前问题超预算时明确拒绝。Grok 对话内部按严格追加消息链重放私有动态快照，OpenAI 可使用稳定缓存键和增量 Responses 续接；快照不会出现在消息、导出或公开 API 中。聊天页会显示本轮与近 30 天输入、缓存读取/写入、未缓存输入、命中率以及按管理员单价估算的支出和节省。配置以不可变
 版本保存，API Key 使用 `MODEL_SETTINGS_ENCRYPTION_KEYS` 加密且永不回传；搜索模型与研究
 模型可分别设置。启用新版本前必须通过严格 JSON Schema 连通性探测，失败时旧版本继续
 生效。每次日研会把配置 ID、版本和哈希固定到 Manifest，排队或运行中的任务不会跟随
@@ -407,5 +434,7 @@ Backtest Worker 校验 Manifest 状态、文件哈希、RAW 价格和时点约�
 本项目采用 [Apache License 2.0](LICENSE) 开源。使用、修改或分发本项目时，请遵守许可证条款，
 并保留所要求的版权及许可证声明。第三方数据、模型、服务和依赖仍适用各自的许可与使用条款。
 
-v1.0.0 发布详情见[中文发布说明](docs/releases/v1.0.0.zh-CN.md)和
+当前重大版本 v2.0.0 的完整变化、升级步骤与兼容性说明见
+[中文发布说明](docs/releases/v2.0.0.zh-CN.md)。历史首个稳定版见
+[v1.0.0 中文发布说明](docs/releases/v1.0.0.zh-CN.md)和
 [English Release Notes](docs/releases/v1.0.0.en.md)。

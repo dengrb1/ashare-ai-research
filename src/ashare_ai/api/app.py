@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any, Literal, NoReturn
+from threading import Lock
+from typing import Annotated, Any, Literal, NoReturn, cast
 from uuid import uuid4
 
 from fastapi import (
@@ -22,7 +24,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -37,9 +39,12 @@ from ashare_ai.agents.attachments import (
     inspect_image,
 )
 from ashare_ai.agents.chat import ChatStreamError, allow_chat_request, stream_chat_response
+from ashare_ai.agents.chat_context import resolve_security_mentions
+from ashare_ai.agents.chat_observability import chat_cost_summary, chat_metric_summary
 from ashare_ai.agents.chat_threads import ChatThreadService, InvalidThreadCursor
 from ashare_ai.agents.model_settings import (
     ModelConfigurationService,
+    ModelProfileDraft,
     ModelSettingsDraft,
     ModelSettingsError,
 )
@@ -68,11 +73,13 @@ from ashare_ai.api.schemas import (
     AIChatAttachmentResponse,
     AIChatBulkDeleteRequest,
     AIChatMessageResponse,
+    AIChatMetricResponse,
     AIChatSendRequest,
     AIChatThreadIndexResponse,
     AIChatThreadPatchRequest,
     AIChatThreadRequest,
     AIChatThreadResponse,
+    AICostSummaryResponse,
     AIModelOptionsResponse,
     AppBootstrapResponse,
     AppCapabilitiesResponse,
@@ -81,18 +88,28 @@ from ashare_ai.api.schemas import (
     AuditEventResponse,
     BacktestRequest,
     BacktestResponse,
+    BuyEntryMonitorRequest,
+    BuyEntryMonitorResponse,
     CandidateResponse,
     ExitAdviceResponse,
     ExitMonitorSettingsRequest,
     HealthResponse,
     KlineResponse,
     LoginRequest,
+    ManualExitAdviceRequest,
     MarketPrefetchRequest,
     MarketPrefetchResponse,
+    MarketRefreshSettingsRequest,
+    MarketSessionStatus,
     ModelListResponse,
     ModelProbeResponse,
+    ModelProfileSettings,
     ModelSettingsRequest,
     ModelSettingsResponse,
+    NotificationListResponse,
+    NotificationMarkReadRequest,
+    NotificationResponse,
+    NotificationSummaryResponse,
     PasswordResetRequest,
     PersonalArchiveApplyRequest,
     PersonalArchiveExportRequest,
@@ -101,16 +118,27 @@ from ashare_ai.api.schemas import (
     QuoteResponse,
     RefreshTokenRequest,
     ReportBodyResponse,
+    ReportExecutionStatusResponse,
+    ReportExecutionSymbolStatus,
     ReportResponse,
     ReportSymbolResponse,
     ResearchRequest,
     ResearchRunResponse,
     ResearchSettingsRequest,
     ResearchSettingsResponse,
+    RunActivityItem,
+    RunActivityResponse,
     RunListResponse,
     RunResponse,
     ScoreResponse,
+    SecurityResolveCandidate,
+    SecurityResolveResponse,
     SnapshotResponse,
+    SystemResourcesResponse,
+    SystemSettingsRequest,
+    SystemSettingsResponse,
+    SystemSettingsUnlockRequest,
+    SystemSettingsUnlockResponse,
     TokenResponse,
     TradePlanRequest,
     TradePlanResponse,
@@ -118,19 +146,35 @@ from ashare_ai.api.schemas import (
     UserResponse,
     UserUpdateRequest,
 )
+from ashare_ai.api.system_settings_unlock import issue_unlock, require_settings_unlock
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.hashing import sha256_bytes, stable_hash
 from ashare_ai.core.security import safe_error_message
-from ashare_ai.core.time import SHANGHAI
-from ashare_ai.market.service import get_market_data_service
+from ashare_ai.core.system_settings import (
+    SECRET_SETTING_FIELDS,
+    SystemConfigurationService,
+    SystemSettingsError,
+    get_effective_settings,
+)
+from ashare_ai.core.time import SHANGHAI, market_session
+from ashare_ai.market.service import get_market_data_service, reset_market_data_service
+from ashare_ai.notifications.service import InvalidNotificationCursor, NotificationService
 from ashare_ai.observability.audit import AuditLogger
+from ashare_ai.observability.runtime_resources import sample_runtime_resources
 from ashare_ai.orchestration.backtest_jobs import enqueue_backtest
 from ashare_ai.orchestration.daily import load_pipeline
+from ashare_ai.orchestration.exit_advice_jobs import (
+    ExitAdviceRequestError,
+    create_manual_exit_advice,
+    enqueue_exit_advice,
+)
+from ashare_ai.orchestration.operation_runs import create_operation_run
 from ashare_ai.orchestration.personal_archive_jobs import enqueue_personal_archive
 from ashare_ai.orchestration.research_jobs import enqueue_research, enqueue_research_at
 from ashare_ai.orchestration.research_schedule import (
     AKShareDataReadiness,
     FreeExchangeCalendar,
+    data_readiness_wait,
     resolve_manual_research_date,
 )
 from ashare_ai.orchestration.research_settings import ResearchSettingsService
@@ -140,6 +184,7 @@ from ashare_ai.orchestration.trade_plan_queue import (
 from ashare_ai.orchestration.trade_plan_queue import (
     enqueue_trade_plan,
 )
+from ashare_ai.orchestration.worker_status import read_heartbeats
 from ashare_ai.portfolio.user_assets import UNSET_TOTAL_ASSETS, UserAssetService
 from ashare_ai.reports.chinese_summary import component_summary, symbol_summary
 from ashare_ai.search.service import (
@@ -156,6 +201,7 @@ from ashare_ai.storage.models import (
     ApiIdempotencyKey,
     AuditEvent,
     BacktestRun,
+    BuyEntryMonitorRow,
     CandidateRow,
     ExitAdviceRow,
     JobRun,
@@ -163,9 +209,11 @@ from ashare_ai.storage.models import (
     PortfolioRow,
     ReportRow,
     ScoreRow,
+    SecurityMaster,
     SnapshotManifestRow,
     TradePlanRow,
     UserAccount,
+    UserAssetState,
 )
 from ashare_ai.storage.objects import LocalObjectStore, ObjectStore, S3ObjectStore
 from ashare_ai.storage.personal_archive import (
@@ -178,6 +226,7 @@ from ashare_ai.storage.personal_archive import (
 )
 from ashare_ai.storage.repositories import QueryRepository
 from ashare_ai.trading.default_rules import ensure_builtin_trading_rules
+from ashare_ai.trading.sellability import position_sellability
 
 logger = logging.getLogger(__name__)
 
@@ -191,7 +240,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         ModelConfigurationService().bootstrap_from_environment(session)
         AttachmentService(session).cleanup_expired()
         session.commit()
-    yield
+    market = get_market_data_service()
+    if not market.start():
+        logger.warning("AKShare market provider warmup failed; fallbacks remain available")
+    try:
+        yield
+    finally:
+        reset_market_data_service()
 
 
 _api_settings = get_settings()
@@ -212,6 +267,39 @@ Writer = Annotated[AuthContext, Depends(get_write_context)]
 IdempotencyKey = Annotated[
     str | None, Header(alias="Idempotency-Key", min_length=1, max_length=128)
 ]
+SystemSettingsUnlockToken = Annotated[
+    str | None, Header(alias="X-System-Settings-Unlock")
+]
+
+_market_session_calendar_cache: dict[date, tuple[date, ...]] = {}
+_market_session_calendar_cache_lock = Lock()
+
+
+def _market_session_status(now: datetime | None = None) -> MarketSessionStatus:
+    """Return a fail-closed live-session status without exposing calendar internals."""
+
+    current = (now or datetime.now(SHANGHAI)).astimezone(SHANGHAI)
+    trading_date = current.date()
+    with _market_session_calendar_cache_lock:
+        sessions = _market_session_calendar_cache.get(trading_date)
+    if sessions is None:
+        try:
+            sessions = FreeExchangeCalendar().sessions(trading_date, trading_date)
+        except Exception:
+            domain_status = market_session(current, None)
+        else:
+            with _market_session_calendar_cache_lock:
+                _market_session_calendar_cache[trading_date] = sessions
+            domain_status = market_session(current, sessions)
+    else:
+        domain_status = market_session(current, sessions)
+    return MarketSessionStatus(
+        state=domain_status.state,
+        as_of=current,
+        trading_date=trading_date,
+        is_trading_day=domain_status.is_trading_day,
+        reason=domain_status.reason,
+    )
 
 
 def _idempotency_fingerprint(
@@ -272,6 +360,8 @@ def _remember_idempotency(
             created_at=datetime.now(UTC),
         )
     )
+
+
 SearchService = Annotated[FinancialSearchService, Depends(get_financial_search_service)]
 
 
@@ -308,13 +398,41 @@ def _result_access(context: AuthContext) -> dict[str, Any]:
     }
 
 
+def _security_names_at(db: Session, symbols: set[str], decision_at: datetime) -> dict[str, str]:
+    """Return the latest point-in-time short name for every requested symbol."""
+
+    if not symbols:
+        return {}
+    rows = db.scalars(
+        select(SecurityMaster)
+        .where(
+            SecurityMaster.symbol.in_(symbols),
+            SecurityMaster.available_at <= decision_at,
+            SecurityMaster.effective_from <= decision_at.astimezone(SHANGHAI).date(),
+            or_(
+                SecurityMaster.effective_to.is_(None),
+                SecurityMaster.effective_to >= decision_at.astimezone(SHANGHAI).date(),
+            ),
+        )
+        .order_by(
+            SecurityMaster.symbol,
+            SecurityMaster.available_at.desc(),
+            SecurityMaster.fetched_at.desc(),
+        )
+    ).all()
+    names: dict[str, str] = {}
+    for row in rows:
+        names.setdefault(row.symbol, row.short_name)
+    return names
+
+
 def _manual_research_date(requested_date: date, now: datetime) -> date:
     current = now.astimezone(SHANGHAI) if now.tzinfo is not None else now.replace(tzinfo=SHANGHAI)
     if requested_date > current.date():
         raise HTTPException(
             status_code=422, detail="research requested_date cannot be in the future"
         )
-    if get_settings().canonical_bundle_mode in {"file", "demo"}:
+    if get_effective_settings().canonical_bundle_mode in {"file", "demo"}:
         return requested_date
     try:
         sessions = FreeExchangeCalendar().sessions(
@@ -336,7 +454,7 @@ def _manual_research_date(requested_date: date, now: datetime) -> date:
 
 def _research_readiness_wait(trading_date: date, now: datetime) -> dict[str, str | int] | None:
     """Return durable wait metadata without changing the selected session."""
-    if get_settings().canonical_bundle_mode in {"file", "demo"}:
+    if get_effective_settings().canonical_bundle_mode in {"file", "demo"}:
         return None
     current = now.astimezone(SHANGHAI) if now.tzinfo else now.replace(tzinfo=SHANGHAI)
     try:
@@ -345,22 +463,15 @@ def _research_readiness_wait(trading_date: date, now: datetime) -> dict[str, str
         ready = False
     if ready:
         return None
-    try:
-        sessions = FreeExchangeCalendar().sessions(
-            trading_date + timedelta(days=1), trading_date + timedelta(days=10)
-        )
-        next_session = next(value for value in sessions if value > trading_date)
-        deadline = datetime.combine(next_session, time(9, 0), tzinfo=SHANGHAI)
-    except Exception:
-        deadline = current + timedelta(minutes=get_settings().daily_research_retry_limit_minutes)
-    retry_at = min(
-        current + timedelta(minutes=get_settings().daily_research_retry_minutes), deadline
+    sessions = FreeExchangeCalendar().sessions(
+        trading_date, trading_date + timedelta(days=14)
     )
-    return {
-        "deadline_at": deadline.astimezone(UTC).isoformat(),
-        "next_retry_at": retry_at.astimezone(UTC).isoformat(),
-        "attempt_count": 0,
-    }
+    return data_readiness_wait(
+        trading_date=trading_date,
+        now=current,
+        sessions=sessions,
+        retry_minutes=get_effective_settings().daily_research_retry_minutes,
+    )
 
 
 def _trade_plan_policy_payload(run: JobRun) -> dict[str, Any]:
@@ -635,6 +746,12 @@ def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
                 "idempotency_key": True,
                 "paper_portfolio_only": True,
                 "profit_exit_monitor": True,
+                "stop_loss_monitor": True,
+                "buy_entry_monitor": True,
+                "market_refresh_interval_setting": True,
+                "notifications": True,
+                "chat_context_metrics": True,
+                "ai_cost_summary": True,
                 "persistent_ai_chat": True,
                 "chat_images_seven_day_retention": True,
                 "personal_archive_export_import": True,
@@ -643,13 +760,23 @@ def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
             endpoints={
                 "assets": "/api/v1/assets",
                 "exit_monitor_settings": "/api/v1/assets/exit-monitor",
+                "market_refresh_settings": "/api/v1/assets/market-refresh",
                 "research_runs": "/api/v1/research/runs",
                 "research_run": "/api/v1/research/runs/{run_id}",
                 "research_settings": "/api/v1/research/settings",
                 "report_symbols": "/api/v1/reports/{report_id}/symbols",
+                "report_execution_status": "/api/v1/reports/{report_id}/execution-status",
                 "report_trade_plans": "/api/v1/reports/{report_id}/trade-plans",
+                "run_activity": "/api/v1/runs/activity",
                 "trade_plan": "/api/v1/trade-plans/{plan_id}",
                 "exit_advice": "/api/v1/exit-advice",
+                "manual_exit_advice": "/api/v1/exit-advice/manual",
+                "buy_entry_monitors": "/api/v1/buy-entry-monitors",
+                "notifications": "/api/v1/notifications",
+                "notification_summary": "/api/v1/notifications/summary",
+                "security_resolve": "/api/v1/securities/resolve",
+                "chat_metrics": "/api/v1/ai/chat/metrics",
+                "ai_costs": "/api/v1/ai/costs",
                 "ai_chat_threads": "/api/v1/ai/chat/threads",
                 "ai_chat_thread_index": "/api/v1/ai/chat/thread-index",
                 "personal_data_exports": "/api/v1/me/data-exports",
@@ -685,17 +812,49 @@ def update_asset_state(
                 else previous.get("default_profit_trigger")
             )
         ),
+        (
+            bool(payload.stop_loss_monitor_enabled)
+            if "stop_loss_monitor_enabled" in payload.model_fields_set
+            else bool(previous.get("stop_loss_monitor_enabled", True))
+        ),
+        (
+            bool(payload.buy_monitor_enabled)
+            if "buy_monitor_enabled" in payload.model_fields_set
+            else bool(previous.get("buy_monitor_enabled", True))
+        ),
+        (
+            int(payload.market_refresh_interval_seconds)
+            if "market_refresh_interval_seconds" in payload.model_fields_set
+            and payload.market_refresh_interval_seconds is not None
+            else None
+        ),
     )
     return AssetStateResponse.model_validate(state)
 
 
 @app.put("/api/v1/assets/exit-monitor", response_model=AssetStateResponse)
 def update_exit_monitor_settings(
-    payload: ExitMonitorSettingsRequest, db: DbSession, context: Writer
+    payload: ExitMonitorSettingsRequest,
+    db: DbSession,
+    context: Writer,
+    idempotency_key: IdempotencyKey = None,
 ) -> AssetStateResponse:
     """Update only exit-monitor fields so native clients cannot overwrite stale asset data."""
 
+    if idempotency_key is None:
+        raise HTTPException(status_code=400, detail="Idempotency-Key is required")
+    route = "/api/v1/assets/exit-monitor"
+    fingerprint = _idempotency_fingerprint(
+        context.user.user_id, route, idempotency_key, payload.model_dump(mode="json")
+    )
+    replay = _find_idempotency(
+        db, user_id=context.user.user_id, route=route, fingerprint=fingerprint
+    )
     service = UserAssetService(db)
+    if replay is not None:
+        if replay.resource_type != "EXIT_MONITOR_SETTINGS":
+            raise HTTPException(status_code=409, detail="idempotent resource is unavailable")
+        return AssetStateResponse.model_validate(service.get(context.user.user_id))
     previous = service.get(context.user.user_id)
     state = service.save(
         context.user.user_id,
@@ -708,8 +867,190 @@ def update_exit_monitor_settings(
             if payload.default_profit_trigger is not None
             else None
         ),
+        (
+            payload.stop_loss_monitor_enabled
+            if payload.stop_loss_monitor_enabled is not None
+            else bool(previous.get("stop_loss_monitor_enabled", True))
+        ),
+        (
+            payload.buy_monitor_enabled
+            if payload.buy_monitor_enabled is not None
+            else bool(previous.get("buy_monitor_enabled", True))
+        ),
+        commit=False,
     )
+    _remember_idempotency(
+        db,
+        user_id=context.user.user_id,
+        route=route,
+        fingerprint=fingerprint,
+        resource_type="EXIT_MONITOR_SETTINGS",
+        resource_id=context.user.user_id,
+    )
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        winner = _find_idempotency(
+            db, user_id=context.user.user_id, route=route, fingerprint=fingerprint
+        )
+        if winner is not None and winner.resource_type == "EXIT_MONITOR_SETTINGS":
+            return AssetStateResponse.model_validate(service.get(context.user.user_id))
+        raise HTTPException(status_code=409, detail="exit monitor update conflicted") from exc
     return AssetStateResponse.model_validate(state)
+
+
+@app.put("/api/v1/assets/market-refresh", response_model=AssetStateResponse)
+def update_market_refresh_settings(
+    payload: MarketRefreshSettingsRequest,
+    db: DbSession,
+    context: Writer,
+    idempotency_key: IdempotencyKey = None,
+) -> AssetStateResponse:
+    """Persist only live-market polling settings, without replacing asset records."""
+
+    if idempotency_key is None:
+        raise HTTPException(status_code=400, detail="Idempotency-Key is required")
+    route = "/api/v1/assets/market-refresh"
+    fingerprint = _idempotency_fingerprint(
+        context.user.user_id, route, idempotency_key, payload.model_dump(mode="json")
+    )
+    replay = _find_idempotency(
+        db, user_id=context.user.user_id, route=route, fingerprint=fingerprint
+    )
+    service = UserAssetService(db)
+    if replay is not None:
+        if replay.resource_type != "MARKET_REFRESH_SETTINGS":
+            raise HTTPException(status_code=409, detail="idempotent resource is unavailable")
+        return AssetStateResponse.model_validate(service.get(context.user.user_id))
+    previous = service.get(context.user.user_id)
+    state = service.save(
+        context.user.user_id,
+        previous["watchlist"],
+        previous["positions"],
+        UNSET_TOTAL_ASSETS,
+        bool(previous.get("exit_monitor_enabled", False)),
+        previous.get("default_profit_trigger"),
+        bool(previous.get("stop_loss_monitor_enabled", True)),
+        bool(previous.get("buy_monitor_enabled", True)),
+        int(payload.market_refresh_interval_seconds),
+        commit=False,
+    )
+    _remember_idempotency(
+        db,
+        user_id=context.user.user_id,
+        route=route,
+        fingerprint=fingerprint,
+        resource_type="MARKET_REFRESH_SETTINGS",
+        resource_id=context.user.user_id,
+    )
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        winner = _find_idempotency(
+            db, user_id=context.user.user_id, route=route, fingerprint=fingerprint
+        )
+        if winner is not None and winner.resource_type == "MARKET_REFRESH_SETTINGS":
+            return AssetStateResponse.model_validate(service.get(context.user.user_id))
+        raise HTTPException(status_code=409, detail="market refresh update conflicted") from exc
+    return AssetStateResponse.model_validate(state)
+
+
+@app.post(
+    "/api/v1/exit-advice/manual",
+    response_model=ExitAdviceResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def submit_manual_exit_advice(
+    payload: ManualExitAdviceRequest,
+    response: Response,
+    db: DbSession,
+    context: Writer,
+    idempotency_key: IdempotencyKey = None,
+) -> ExitAdviceResponse:
+    """Queue a paper-only exit study for one of the caller's current positions."""
+
+    if idempotency_key is None:
+        raise HTTPException(status_code=400, detail="Idempotency-Key is required")
+    route = "/api/v1/exit-advice/manual"
+    fingerprint = _idempotency_fingerprint(
+        context.user.user_id, route, idempotency_key, payload.model_dump(mode="json")
+    )
+    replay = _find_idempotency(
+        db, user_id=context.user.user_id, route=route, fingerprint=fingerprint
+    )
+    if replay is not None:
+        row = db.get(ExitAdviceRow, replay.resource_id)
+        if (
+            replay.resource_type != "EXIT_ADVICE"
+            or row is None
+            or row.user_id != context.user.user_id
+        ):
+            raise HTTPException(status_code=409, detail="idempotent resource is unavailable")
+        response.status_code = status.HTTP_200_OK
+        return ExitAdviceResponse.model_validate(row).model_copy(
+            update={"status_url": f"/api/v1/exit-advice/{row.advice_id}"}
+        )
+    try:
+        row = create_manual_exit_advice(
+            db,
+            user_id=context.user.user_id,
+            symbol=payload.symbol,
+        )
+    except ExitAdviceRequestError as exc:
+        # Codes are stable client-facing states; provider errors and position data
+        # are deliberately not reflected in this public response.
+        raise HTTPException(status_code=422, detail=exc.code) from exc
+    if row.operation_run_id is None:
+        operation = create_operation_run(
+            db,
+            user_id=row.user_id,
+            run_type="EXIT_ADVICE",
+            resource_id=row.advice_id,
+            trading_date=row.decision_at.astimezone(SHANGHAI).date(),
+            decision_at=row.decision_at,
+            input_hash=row.input_hash,
+            manifest={"symbol": row.symbol, "trigger_type": row.trigger_type},
+            created_at=row.created_at,
+        )
+        row.operation_run_id = operation.run_id
+    _remember_idempotency(
+        db,
+        user_id=context.user.user_id,
+        route=route,
+        fingerprint=fingerprint,
+        resource_type="EXIT_ADVICE",
+        resource_id=row.advice_id,
+    )
+    try:
+        db.commit()
+        enqueue_exit_advice(row.advice_id)
+    except IntegrityError as exc:
+        db.rollback()
+        replay = _find_idempotency(
+            db, user_id=context.user.user_id, route=route, fingerprint=fingerprint
+        )
+        if replay is not None:
+            winner = db.get(ExitAdviceRow, replay.resource_id)
+            if winner is not None and winner.user_id == context.user.user_id:
+                response.status_code = status.HTTP_200_OK
+                return ExitAdviceResponse.model_validate(winner).model_copy(
+                    update={"status_url": f"/api/v1/exit-advice/{winner.advice_id}"}
+                )
+        raise HTTPException(status_code=409, detail="exit advice submission conflicted") from exc
+    except Exception as exc:
+        db.rollback()
+        failed = db.get(ExitAdviceRow, row.advice_id)
+        if failed is not None:
+            failed.status = "FAILED"
+            failed.error_message = "QUEUE_UNAVAILABLE"
+            failed.completed_at = datetime.now(UTC)
+            db.commit()
+        raise HTTPException(status_code=503, detail="exit advice queue unavailable") from exc
+    return ExitAdviceResponse.model_validate(row).model_copy(
+        update={"status_url": f"/api/v1/exit-advice/{row.advice_id}"}
+    )
 
 
 @app.get("/api/v1/exit-advice", response_model=list[ExitAdviceResponse])
@@ -739,6 +1080,183 @@ def exit_advice_detail(advice_id: str, db: DbSession, context: Current) -> ExitA
     return ExitAdviceResponse.model_validate(row)
 
 
+@app.get("/api/v1/buy-entry-monitors", response_model=list[BuyEntryMonitorResponse])
+def buy_entry_monitor_list(
+    db: DbSession,
+    context: Current,
+    limit: int = Query(default=50, ge=1, le=200),
+    before: datetime | None = None,
+) -> list[BuyEntryMonitorResponse]:
+    statement = select(BuyEntryMonitorRow).where(BuyEntryMonitorRow.user_id == context.user.user_id)
+    if before is not None:
+        statement = statement.where(BuyEntryMonitorRow.updated_at < before)
+    rows = db.scalars(
+        statement.order_by(
+            BuyEntryMonitorRow.updated_at.desc(),
+            BuyEntryMonitorRow.monitor_id.desc(),
+        ).limit(limit)
+    ).all()
+    return [BuyEntryMonitorResponse.model_validate(row) for row in rows]
+
+
+@app.put("/api/v1/buy-entry-monitors", response_model=list[BuyEntryMonitorResponse])
+def update_buy_entry_monitor(
+    payload: BuyEntryMonitorRequest,
+    db: DbSession,
+    context: Writer,
+    idempotency_key: IdempotencyKey = None,
+) -> list[BuyEntryMonitorResponse]:
+    """Enable or cancel a watchlist symbol's derived paper-entry monitors."""
+
+    if idempotency_key is None:
+        raise HTTPException(status_code=400, detail="Idempotency-Key is required")
+    assets = UserAssetService(db).get(context.user.user_id)
+    if payload.enabled and payload.symbol not in set(assets["watchlist"]):
+        raise HTTPException(status_code=422, detail="SYMBOL_NOT_IN_WATCHLIST")
+    route = "/api/v1/buy-entry-monitors"
+    fingerprint = _idempotency_fingerprint(
+        context.user.user_id, route, idempotency_key, payload.model_dump(mode="json")
+    )
+    replay = _find_idempotency(
+        db, user_id=context.user.user_id, route=route, fingerprint=fingerprint
+    )
+    if replay is None:
+        now = datetime.now(UTC)
+        rows = list(
+            db.scalars(
+                select(BuyEntryMonitorRow).where(
+                    BuyEntryMonitorRow.user_id == context.user.user_id,
+                    BuyEntryMonitorRow.symbol == payload.symbol,
+                    BuyEntryMonitorRow.status == "ACTIVE",
+                )
+            ).all()
+        )
+        if not payload.enabled:
+            for row in rows:
+                row.status = "CANCELLED"
+                row.updated_at = now
+        _remember_idempotency(
+            db,
+            user_id=context.user.user_id,
+            route=route,
+            fingerprint=fingerprint,
+            resource_type="BUY_ENTRY_MONITOR_SETTING",
+            resource_id=payload.symbol,
+        )
+        db.commit()
+    return [
+        BuyEntryMonitorResponse.model_validate(row)
+        for row in db.scalars(
+            select(BuyEntryMonitorRow)
+            .where(
+                BuyEntryMonitorRow.user_id == context.user.user_id,
+                BuyEntryMonitorRow.symbol == payload.symbol,
+            )
+            .order_by(BuyEntryMonitorRow.updated_at.desc())
+        ).all()
+    ]
+
+
+@app.get("/api/v1/notifications", response_model=NotificationListResponse)
+def notification_list(
+    db: DbSession,
+    context: Current,
+    limit: int = Query(default=50, ge=1, le=200),
+    cursor: str | None = None,
+    unread_only: bool = False,
+) -> NotificationListResponse:
+    try:
+        items, next_cursor = NotificationService(db).list(
+            context.user.user_id,
+            limit=limit,
+            cursor=cursor,
+            unread_only=unread_only,
+        )
+    except InvalidNotificationCursor as exc:
+        raise HTTPException(status_code=422, detail="invalid notification cursor") from exc
+    return NotificationListResponse(
+        items=[NotificationResponse.model_validate(item) for item in items],
+        next_cursor=next_cursor,
+    )
+
+
+@app.get("/api/v1/notifications/summary", response_model=NotificationSummaryResponse)
+def notification_summary(db: DbSession, context: Current) -> NotificationSummaryResponse:
+    summary = NotificationService(db).summary(context.user.user_id)
+    return NotificationSummaryResponse(
+        unread_count=summary["unread_count"],
+        high_risk_unread_count=summary["high_risk_unread_count"],
+        latest=[NotificationResponse.model_validate(item) for item in summary["latest"]],
+    )
+
+
+@app.post("/api/v1/notifications/read", response_model=NotificationSummaryResponse)
+def mark_notifications_read(
+    payload: NotificationMarkReadRequest,
+    db: DbSession,
+    context: Writer,
+    idempotency_key: IdempotencyKey = None,
+) -> NotificationSummaryResponse:
+    if idempotency_key is None:
+        raise HTTPException(status_code=400, detail="Idempotency-Key is required")
+    route = "/api/v1/notifications/read"
+    fingerprint = _idempotency_fingerprint(
+        context.user.user_id, route, idempotency_key, payload.model_dump(mode="json")
+    )
+    replay = _find_idempotency(
+        db, user_id=context.user.user_id, route=route, fingerprint=fingerprint
+    )
+    if replay is None:
+        NotificationService(db).mark_read(context.user.user_id, payload.notification_ids)
+        _remember_idempotency(
+            db,
+            user_id=context.user.user_id,
+            route=route,
+            fingerprint=fingerprint,
+            resource_type="NOTIFICATION_READ",
+            resource_id=context.user.user_id,
+        )
+        db.commit()
+    summary = NotificationService(db).summary(context.user.user_id)
+    return NotificationSummaryResponse(
+        unread_count=summary["unread_count"],
+        high_risk_unread_count=summary["high_risk_unread_count"],
+        latest=[NotificationResponse.model_validate(item) for item in summary["latest"]],
+    )
+
+
+@app.post("/api/v1/notifications/read-all", response_model=NotificationSummaryResponse)
+def mark_all_notifications_read(
+    db: DbSession,
+    context: Writer,
+    idempotency_key: IdempotencyKey = None,
+) -> NotificationSummaryResponse:
+    if idempotency_key is None:
+        raise HTTPException(status_code=400, detail="Idempotency-Key is required")
+    route = "/api/v1/notifications/read-all"
+    fingerprint = _idempotency_fingerprint(context.user.user_id, route, idempotency_key, {})
+    replay = _find_idempotency(
+        db, user_id=context.user.user_id, route=route, fingerprint=fingerprint
+    )
+    if replay is None:
+        NotificationService(db).mark_all_read(context.user.user_id)
+        _remember_idempotency(
+            db,
+            user_id=context.user.user_id,
+            route=route,
+            fingerprint=fingerprint,
+            resource_type="NOTIFICATION_READ",
+            resource_id=context.user.user_id,
+        )
+        db.commit()
+    summary = NotificationService(db).summary(context.user.user_id)
+    return NotificationSummaryResponse(
+        unread_count=summary["unread_count"],
+        high_risk_unread_count=summary["high_risk_unread_count"],
+        latest=[NotificationResponse.model_validate(item) for item in summary["latest"]],
+    )
+
+
 @app.get("/api/v1/ai/models", response_model=AIModelOptionsResponse)
 def ai_model_options(db: DbSession, _: Current) -> AIModelOptionsResponse:
     runtime = ModelConfigurationService().resolve(db)
@@ -750,7 +1268,76 @@ def ai_model_options(db: DbSession, _: Current) -> AIModelOptionsResponse:
     return AIModelOptionsResponse(
         models=models,
         reasoning_efforts=["low", "medium", "high", "xhigh"],
-        web_search_available=bool(get_settings().searxng_base_url),
+        web_search_available=bool(get_effective_settings().searxng_base_url),
+    )
+
+
+@app.get("/api/v1/securities/resolve", response_model=SecurityResolveResponse)
+def resolve_security(
+    _: Current,
+    q: str = Query(min_length=1, max_length=64),
+    decision_at: datetime | None = None,
+) -> SecurityResolveResponse:
+    if decision_at is not None and decision_at.tzinfo is None:
+        raise HTTPException(status_code=422, detail="decision_at must include a timezone")
+    current = decision_at.astimezone(UTC) if decision_at is not None else datetime.now(UTC)
+    if current > datetime.now(UTC) + timedelta(seconds=30):
+        raise HTTPException(status_code=422, detail="decision_at must not be in the future")
+    result = resolve_security_mentions(f"@{q.strip()}", [], decision_at=current)
+    status_item = result.statuses[0] if result.statuses else {}
+    status_state = str(status_item.get("state") or "MISSING")
+    response_state: Literal["RESOLVED", "UNRESOLVED", "AMBIGUOUS"]
+    candidates: list[SecurityResolveCandidate]
+    if status_state == "RESOLVED":
+        response_state = "RESOLVED"
+        candidates = [SecurityResolveCandidate(**item) for item in result.refs]
+    elif status_state == "AMBIGUOUS":
+        response_state = "AMBIGUOUS"
+        candidates = []
+    else:
+        response_state = "UNRESOLVED"
+        candidates = []
+    return SecurityResolveResponse(
+        query=q.strip(),
+        state=response_state,
+        candidates=candidates,
+        reason_code=str(status_item.get("reason_code") or "SECURITY_MASTER_NOT_FOUND"),
+        decision_at=current,
+    )
+
+
+@app.get("/api/v1/ai/chat/metrics", response_model=list[AIChatMetricResponse])
+def ai_chat_metrics(db: DbSession, context: Current) -> list[AIChatMetricResponse]:
+    return [AIChatMetricResponse(**item) for item in chat_metric_summary(db, context.user.user_id)]
+
+
+@app.get("/api/v1/ai/costs", response_model=AICostSummaryResponse)
+def ai_costs(
+    db: DbSession,
+    context: Current,
+    days: int = Query(default=30, ge=1, le=90),
+    limit: int = Query(default=30, ge=1, le=90),
+    before: date | None = None,
+    thread_id: str | None = None,
+) -> AICostSummaryResponse:
+    if thread_id is not None:
+        owned = db.scalar(
+            select(AIChatThread.thread_id).where(
+                AIChatThread.thread_id == thread_id,
+                AIChatThread.user_id == context.user.user_id,
+            )
+        )
+        if owned is None:
+            raise HTTPException(status_code=404, detail="AI chat thread not found")
+    return AICostSummaryResponse(
+        **chat_cost_summary(
+            db,
+            context.user.user_id,
+            days=days,
+            limit=limit,
+            before=before,
+            thread_id=thread_id,
+        )
     )
 
 
@@ -817,9 +1404,7 @@ def create_ai_chat_thread(
     return AIChatThreadResponse.model_validate(row)
 
 
-@app.patch(
-    "/api/v1/ai/chat/threads/{thread_id}", response_model=AIChatThreadResponse
-)
+@app.patch("/api/v1/ai/chat/threads/{thread_id}", response_model=AIChatThreadResponse)
 def patch_ai_chat_thread(
     thread_id: str,
     payload: AIChatThreadPatchRequest,
@@ -850,9 +1435,7 @@ def delete_ai_chat_thread(thread_id: str, db: DbSession, context: Writer) -> Res
 def bulk_delete_ai_chat_threads(
     payload: AIChatBulkDeleteRequest, db: DbSession, context: Writer
 ) -> dict[str, int]:
-    deleted = ChatThreadService(db).bulk_delete(
-        context.user.user_id, payload.thread_ids
-    )
+    deleted = ChatThreadService(db).bulk_delete(context.user.user_id, payload.thread_ids)
     return {"deleted": deleted}
 
 
@@ -878,9 +1461,9 @@ def ai_chat_messages(
     statement = select(AIChatMessage).where(AIChatMessage.thread_id == thread_id)
     if before is not None:
         statement = statement.where(AIChatMessage.created_at < before)
-    rows = list(
-        db.scalars(statement.order_by(AIChatMessage.created_at.desc()).limit(limit)).all()
-    )[::-1]
+    rows = list(db.scalars(statement.order_by(AIChatMessage.created_at.desc()).limit(limit)).all())[
+        ::-1
+    ]
     return [AIChatMessageResponse.model_validate(row) for row in rows]
 
 
@@ -931,9 +1514,7 @@ async def upload_ai_chat_attachments(
 
 
 @app.get("/api/v1/ai/chat/attachments/{attachment_id}/content")
-def ai_chat_attachment_content(
-    attachment_id: str, db: DbSession, context: Current
-) -> Response:
+def ai_chat_attachment_content(attachment_id: str, db: DbSession, context: Current) -> Response:
     service = AttachmentService(db)
     row = service.get_owned(context.user.user_id, attachment_id)
     if row is None:
@@ -1009,9 +1590,7 @@ def create_personal_data_export(
     return PersonalArchiveJobResponse.model_validate(row)
 
 
-@app.get(
-    "/api/v1/me/data-exports/{export_id}", response_model=PersonalArchiveJobResponse
-)
+@app.get("/api/v1/me/data-exports/{export_id}", response_model=PersonalArchiveJobResponse)
 def personal_data_export_status(
     export_id: str, db: DbSession, context: Current
 ) -> PersonalArchiveJobResponse:
@@ -1021,9 +1600,7 @@ def personal_data_export_status(
 
 
 @app.get("/api/v1/me/data-exports/{export_id}/download")
-def download_personal_data_export(
-    export_id: str, db: DbSession, context: Current
-) -> Response:
+def download_personal_data_export(export_id: str, db: DbSession, context: Current) -> Response:
     row = _owned_archive_job(db, context.user.user_id, export_id)
     if row.expires_at <= datetime.now(UTC):
         raise HTTPException(status_code=410, detail="personal archive expired")
@@ -1043,12 +1620,8 @@ def download_personal_data_export(
     )
 
 
-@app.delete(
-    "/api/v1/me/data-exports/{export_id}", status_code=status.HTTP_204_NO_CONTENT
-)
-def delete_personal_data_export(
-    export_id: str, db: DbSession, context: Writer
-) -> Response:
+@app.delete("/api/v1/me/data-exports/{export_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_personal_data_export(export_id: str, db: DbSession, context: Writer) -> Response:
     row = db.scalar(
         select(PersonalArchiveJob)
         .where(
@@ -1085,17 +1658,13 @@ async def upload_personal_data_import(
     archive_id = str(uuid4())
     try:
         encrypted_secret = wrap_job_secret(passphrase, archive_id)
-        path = private_archive_target_path(
-            context.user.user_id, archive_id, "source.ashare"
-        )
+        path = private_archive_target_path(context.user.user_id, archive_id, "source.ashare")
         total = 0
         with path.open("wb") as handle:
             while chunk := await archive.read(1024 * 1024):
                 total += len(chunk)
                 if total > MAX_ARCHIVE_BYTES:
-                    raise PersonalArchiveError(
-                        "档案超过大小上限", code="ARCHIVE_TOO_LARGE"
-                    )
+                    raise PersonalArchiveError("档案超过大小上限", code="ARCHIVE_TOO_LARGE")
                 handle.write(chunk)
         if total == 0:
             raise PersonalArchiveError("档案为空", code="ARCHIVE_FORMAT_INVALID")
@@ -1134,9 +1703,7 @@ async def upload_personal_data_import(
     return PersonalArchiveJobResponse.model_validate(row)
 
 
-@app.get(
-    "/api/v1/me/data-imports/{import_id}", response_model=PersonalArchiveJobResponse
-)
+@app.get("/api/v1/me/data-imports/{import_id}", response_model=PersonalArchiveJobResponse)
 def personal_data_import_status(
     import_id: str, db: DbSession, context: Current
 ) -> PersonalArchiveJobResponse:
@@ -1239,6 +1806,11 @@ def stream_ai_chat_message(
     context: Writer,
     idempotency_key: IdempotencyKey = None,
 ) -> StreamingResponse:
+    if payload.decision_at is not None:
+        if payload.decision_at.tzinfo is None:
+            raise HTTPException(status_code=422, detail="decision_at must include a timezone")
+        if payload.decision_at.astimezone(UTC) > datetime.now(UTC) + timedelta(seconds=30):
+            raise HTTPException(status_code=422, detail="decision_at must not be in the future")
     owned = db.scalar(
         select(AIChatThread.thread_id).where(
             AIChatThread.thread_id == thread_id,
@@ -1273,7 +1845,7 @@ def stream_ai_chat_message(
                 web_search=payload.web_search,
                 attachment_ids=payload.attachment_ids,
                 mention_refs=[item.model_dump() for item in payload.mention_refs],
-                decision_at=payload.decision_at or datetime.now(UTC),
+                decision_at=payload.decision_at,
                 idempotency_key=effective_key,
                 request_id=request_id,
             ):
@@ -1400,7 +1972,11 @@ def reset_password(
 
 
 def _model_draft(payload: ModelSettingsRequest) -> ModelSettingsDraft:
-    return ModelSettingsDraft(**payload.model_dump())
+    values = payload.model_dump(exclude={"model_profiles"})
+    values["model_profiles"] = tuple(
+        ModelProfileDraft(**item.model_dump()) for item in payload.model_profiles
+    )
+    return ModelSettingsDraft(**values)
 
 
 def _model_settings_response(db: Session) -> ModelSettingsResponse:
@@ -1419,12 +1995,15 @@ def _model_settings_response(db: Session) -> ModelSettingsResponse:
             search_reasoning_effort="low",
             research_model="gpt-5.6-sol",
             research_reasoning_effort="high",
+            model_profiles=[],
             timeout_seconds=90,
             enabled=False,
             configured=False,
             reachable=False,
             degraded=False,
             status_message="尚未配置模型 API",
+            structured_output_supported=False,
+            streaming_supported=False,
         )
     health = service.status(db)
     return ModelSettingsResponse(
@@ -1439,6 +2018,10 @@ def _model_settings_response(db: Session) -> ModelSettingsResponse:
         search_reasoning_effort=runtime.search_reasoning_effort,
         research_model=runtime.research_model,
         research_reasoning_effort=runtime.research_reasoning_effort,
+        model_profiles=[
+            ModelProfileSettings.model_validate(profile.public_dict())
+            for profile in runtime.model_profiles
+        ],
         timeout_seconds=runtime.timeout_seconds,
         enabled=runtime.enabled,
         configured=bool(health["configured"]),
@@ -1446,7 +2029,99 @@ def _model_settings_response(db: Session) -> ModelSettingsResponse:
         degraded=bool(health["degraded"]),
         status_message=str(health["message"]),
         checked_at=(health["checked_at"] if isinstance(health["checked_at"], datetime) else None),
+        structured_output_supported=bool(health.get("structured_output_supported")),
+        streaming_supported=bool(health.get("streaming_supported")),
     )
+
+
+_SYSTEM_QUEUE_KEYS = {
+    "personal_archive": ("ashare:personal-archive:pending", "ashare:personal-archive:processing"),
+    "research": ("ashare:research:pending", "ashare:research:processing"),
+    "trade_plan": ("ashare:trade-plan:pending", "ashare:trade-plan:processing"),
+    "backtest": ("ashare:backtest:pending", "ashare:backtest:processing"),
+}
+
+
+def _system_worker_snapshot(
+    topology_sha256: str,
+) -> tuple[str, bool, list[dict[str, object]], dict[str, dict[str, int]]]:
+    """Read best-effort operator data without making settings availability depend on Redis."""
+    try:
+        import redis
+
+        client = redis.Redis.from_url(get_settings().redis_url, decode_responses=True)
+        heartbeats = read_heartbeats(client)
+        queues = {
+            name: {
+                "pending": int(client.llen(pending)),
+                "processing": int(client.llen(processing)),
+            }
+            for name, (pending, processing) in _SYSTEM_QUEUE_KEYS.items()
+        }
+    except Exception:
+        heartbeats, queues = [], {
+            name: {"pending": 0, "processing": 0} for name in _SYSTEM_QUEUE_KEYS
+        }
+    job_workers = [item for item in heartbeats if item.get("role") == "job-worker"]
+    modes = {str(item.get("loaded_mode")) for item in job_workers}
+    actual_mode = (
+        next(iter(modes)) if len(modes) == 1 and modes <= {"SERIAL", "DUAL"} else "UNKNOWN"
+    )
+    matching_job = any(item.get("topology_sha256") == topology_sha256 for item in job_workers)
+    return actual_mode, not matching_job, heartbeats, queues
+
+
+def _system_settings_response(db: Session) -> SystemSettingsResponse:
+    view = SystemConfigurationService().public_view(db)
+    saved_values = cast(dict[str, Any], view["values"])
+    actual_mode, restart_required, workers, queues = _system_worker_snapshot(
+        str(view["topology_sha256"])
+    )
+    return SystemSettingsResponse.model_validate(
+        {
+            **view,
+            "actual_loaded_mode": actual_mode,
+            "restart_required": restart_required,
+            "workers": workers,
+            "queues": queues,
+            "compose_restart_command": _system_settings_restart_command(
+                str(saved_values["research_execution_mode"])
+            ),
+        }
+    )
+
+
+def _system_settings_restart_command(execution_mode: str) -> str:
+    """Return the operator command required to apply a persisted topology.
+
+    Compose profiles are evaluated before a container runs, whereas the
+    execution mode is stored in PostgreSQL.  The API deliberately has no
+    Docker socket, so it gives the operator the exact command instead.
+    """
+
+    prefix = "docker compose -p ashare-ai-src -f compose.yaml"
+    if execution_mode == "DUAL":
+        return (
+            f"{prefix} --profile dual-research up -d --force-recreate "
+            "job-worker research-worker"
+        )
+    return (
+        f"{prefix} --profile dual-research stop research-worker; "
+        f"{prefix} up -d --force-recreate job-worker"
+    )
+
+
+def _system_settings_payload(
+    payload: SystemSettingsRequest,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    values = payload.model_dump(exclude_unset=True)
+    secrets = {
+        field: value
+        for field, value in values.items()
+        if field in SECRET_SETTING_FIELDS and isinstance(value, str)
+    }
+    public = {field: value for field, value in values.items() if field not in SECRET_SETTING_FIELDS}
+    return public, secrets
 
 
 @app.get("/api/v1/admin/model-settings", response_model=ModelSettingsResponse)
@@ -1496,6 +2171,138 @@ async def list_model_settings_models(
         models = await ModelConfigurationService().list_models(_model_draft(payload), db)
         return ModelListResponse(models=models)
     except ModelSettingsError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/admin/system-settings", response_model=SystemSettingsResponse)
+def get_system_settings(db: DbSession, context: Current) -> SystemSettingsResponse:
+    _admin(context)
+    try:
+        return _system_settings_response(db)
+    except SystemSettingsError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/admin/system-resources", response_model=SystemResourcesResponse)
+def get_system_resources(context: Current) -> SystemResourcesResponse:
+    _admin(context)
+    try:
+        _, _, workers, _ = _system_worker_snapshot("")
+        return SystemResourcesResponse.model_validate(sample_runtime_resources(workers))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="runtime resources unavailable") from exc
+
+
+@app.post(
+    "/api/v1/admin/system-settings/unlock",
+    response_model=SystemSettingsUnlockResponse,
+)
+def unlock_system_settings(
+    payload: SystemSettingsUnlockRequest,
+    request: Request,
+    context: Writer,
+) -> SystemSettingsUnlockResponse:
+    _admin(context)
+    token, expires_at = issue_unlock(request, context, payload.password)
+    return SystemSettingsUnlockResponse(unlock_token=token, expires_at=expires_at)
+
+
+@app.put("/api/v1/admin/system-settings", response_model=SystemSettingsResponse)
+def put_system_settings(
+    payload: SystemSettingsRequest,
+    db: DbSession,
+    context: Writer,
+    idempotency_key: IdempotencyKey = None,
+    unlock_token: SystemSettingsUnlockToken = None,
+) -> SystemSettingsResponse:
+    _admin(context)
+    require_settings_unlock(context, unlock_token)
+    public, secrets = _system_settings_payload(payload)
+    if not public and not secrets:
+        raise HTTPException(status_code=422, detail="submit at least one system setting")
+    body = payload.model_dump(mode="json", exclude_unset=True)
+    fingerprint = _idempotency_fingerprint(
+        context.user.user_id, "/api/v1/admin/system-settings", idempotency_key, body
+    )
+    replay = _find_idempotency(
+        db,
+        user_id=context.user.user_id,
+        route="/api/v1/admin/system-settings",
+        fingerprint=fingerprint,
+    )
+    if replay is not None:
+        return _system_settings_response(db)
+    try:
+        runtime = SystemConfigurationService().save(
+            db,
+            public_updates=public,
+            secret_updates=secrets,
+            user_id=context.user.user_id,
+        )
+        _remember_idempotency(
+            db,
+            user_id=context.user.user_id,
+            route="/api/v1/admin/system-settings",
+            fingerprint=fingerprint,
+            resource_type="SYSTEM_CONFIGURATION",
+            resource_id=runtime.configuration_id or "environment",
+        )
+        db.commit()
+        # Cached adapters are recreated on the next request so non-topology
+        # values (search, market and storage tuning) hot-load without a Docker
+        # restart.  Worker topology itself is intentionally boot-time only.
+        reset_market_data_service()
+        get_market_data_service().start()
+        get_financial_search_service.cache_clear()
+        logger.info(
+            "administrator saved system configuration version=%s hash=%s",
+            runtime.version,
+            runtime.config_sha256,
+        )
+        return _system_settings_response(db)
+    except SystemSettingsError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.delete("/api/v1/admin/system-settings/{field}", response_model=SystemSettingsResponse)
+def restore_system_setting(
+    field: str,
+    db: DbSession,
+    context: Writer,
+    unlock_token: SystemSettingsUnlockToken = None,
+) -> SystemSettingsResponse:
+    _admin(context)
+    require_settings_unlock(context, unlock_token)
+    try:
+        SystemConfigurationService().restore_field(db, field=field, user_id=context.user.user_id)
+        db.commit()
+        reset_market_data_service()
+        get_market_data_service().start()
+        get_financial_search_service.cache_clear()
+        return _system_settings_response(db)
+    except SystemSettingsError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.delete("/api/v1/admin/system-settings", response_model=SystemSettingsResponse)
+def restore_all_system_settings(
+    db: DbSession,
+    context: Writer,
+    unlock_token: SystemSettingsUnlockToken = None,
+) -> SystemSettingsResponse:
+    _admin(context)
+    require_settings_unlock(context, unlock_token)
+    try:
+        SystemConfigurationService().restore_all(db, user_id=context.user.user_id)
+        db.commit()
+        reset_market_data_service()
+        get_market_data_service().start()
+        get_financial_search_service.cache_clear()
+        return _system_settings_response(db)
+    except SystemSettingsError as exc:
+        db.rollback()
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
@@ -1564,6 +2371,12 @@ def candidates(
     trading_date: date, db: DbSession, context: Current, run_id: str | None = None
 ) -> list[CandidateResponse]:
     rows = QueryRepository(db).candidates(trading_date, run_id=run_id, **_result_access(context))
+    run = db.get(JobRun, rows[0].run_id) if rows else None
+    names = (
+        _security_names_at(db, {row.symbol for row in rows}, run.decision_at)
+        if run is not None
+        else {}
+    )
     scores = (
         {
             (item.run_id, item.symbol): item
@@ -1581,6 +2394,7 @@ def candidates(
         CandidateResponse.model_validate(
             {
                 **{column.name: getattr(row, column.name) for column in row.__table__.columns},
+                "name": names.get(row.symbol),
                 "base_total_score": (
                     scores[(row.run_id, row.symbol)].base_total_score
                     if (row.run_id, row.symbol) in scores
@@ -1677,7 +2491,7 @@ def report_content(report_id: str, db: DbSession, context: Current) -> ReportBod
     run = db.get(JobRun, row.run_id)
     if run is None or not _owns(run, context):
         raise HTTPException(status_code=404, detail="report not found")
-    settings = get_settings()
+    settings = get_effective_settings()
     if row.object_uri.startswith("s3://"):
         store: ObjectStore = S3ObjectStore(
             bucket=settings.object_store_bucket,
@@ -1721,6 +2535,7 @@ def report_symbols(report_id: str, db: DbSession, context: Current) -> list[Repo
     )
     quality = manifest.get("symbol_data_quality")
     quality = quality if isinstance(quality, dict) else {}
+    names = _security_names_at(db, {score.symbol for score in scores}, run.decision_at)
     global_fused = run.status == "FUSED"
     result: list[ReportSymbolResponse] = []
     for score in scores:
@@ -1750,6 +2565,7 @@ def report_symbols(report_id: str, db: DbSession, context: Current) -> list[Repo
         result.append(
             ReportSymbolResponse(
                 symbol=score.symbol,
+                name=names.get(score.symbol),
                 research_status=status_value,
                 advice_eligible=advice_eligible,
                 recommendation=None if advice_eligible else "NO_BUY",
@@ -1763,6 +2579,7 @@ def report_symbols(report_id: str, db: DbSession, context: Current) -> list[Repo
                 rank=candidate.rank if candidate else None,
                 prediction_percentile=candidate.prediction_percentile if candidate else None,
                 industry_code=candidate.industry_code if candidate else None,
+                industry_name=candidate.industry_name if candidate else None,
                 plain_language_summary=symbol_summary(
                     total_score=score.total_score,
                     fundamental_score=score.fundamental_score,
@@ -1779,6 +2596,50 @@ def report_symbols(report_id: str, db: DbSession, context: Current) -> list[Repo
             )
         )
     return result
+
+
+@app.get(
+    "/api/v1/reports/{report_id}/execution-status",
+    response_model=ReportExecutionStatusResponse,
+)
+def report_execution_status(
+    report_id: str, db: DbSession, context: Current
+) -> ReportExecutionStatusResponse:
+    report_row = db.get(ReportRow, report_id)
+    if report_row is None:
+        raise HTTPException(status_code=404, detail="report not found")
+    run = db.get(JobRun, report_row.run_id)
+    if run is None or not _owns(run, context):
+        raise HTTPException(status_code=404, detail="report not found")
+    assets = db.get(UserAssetState, context.user.user_id)
+    positions = {
+        str(item.get("symbol", "")).upper(): dict(item)
+        for item in (assets.positions if assets is not None else [])
+        if item.get("symbol")
+    }
+    symbols = list(
+        db.scalars(
+            select(ScoreRow.symbol).where(ScoreRow.run_id == run.run_id).order_by(ScoreRow.symbol)
+        )
+    )
+    as_of = datetime.now(UTC)
+    items = []
+    for symbol in symbols:
+        position = positions.get(symbol)
+        if position is None:
+            continue
+        eligibility = position_sellability(position, trading_date=as_of.astimezone(SHANGHAI).date())
+        items.append(
+            ReportExecutionSymbolStatus(
+                symbol=symbol,
+                held_quantity=eligibility.held_quantity,
+                acquired_on=eligibility.acquired_on,
+                sellable_quantity=eligibility.sellable_quantity,
+                t1_restricted=eligibility.t1_restricted,
+                blockers=list(eligibility.blockers),
+            )
+        )
+    return ReportExecutionStatusResponse(report_id=report_id, as_of=as_of, items=items)
 
 
 @app.post(
@@ -1938,6 +2799,22 @@ def submit_trade_plan(
     )
     db.add(row)
     db.flush()
+    operation = create_operation_run(
+        db,
+        user_id=row.user_id,
+        run_type="TRADE_PLAN",
+        resource_id=row.plan_id,
+        trading_date=row.trading_date,
+        decision_at=row.decision_at,
+        input_hash=row.input_hash,
+        manifest={
+            "report_id": row.report_id,
+            "research_run_id": row.run_id,
+            "symbols": row.symbols,
+        },
+        created_at=row.created_at,
+    )
+    row.operation_run_id = operation.run_id
     AuditLogger(db).record(
         run.run_id,
         "TRADE_PLAN_SUBMITTED",
@@ -2086,7 +2963,13 @@ def submit_research(
     requested_date = payload.trading_date
     submitted_at = datetime.now(SHANGHAI)
     actual_research_date = _manual_research_date(requested_date, submitted_at)
-    readiness_wait = _research_readiness_wait(actual_research_date, submitted_at)
+    try:
+        readiness_wait = _research_readiness_wait(actual_research_date, submitted_at)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="authoritative trading calendar unavailable for data readiness",
+        ) from exc
     if payload.scope == "WATCHLIST":
         assets = UserAssetService(db).get(context.user.user_id)
         available_symbols = sorted(
@@ -2146,7 +3029,13 @@ def submit_research(
         .order_by(JobRun.started_at.desc())
     )
     if existing is not None:
-        if existing.status in {"PENDING", "RUNNING", "PROCESSING", "CANCEL_REQUESTED"}:
+        if existing.status in {
+            "PENDING",
+            "RUNNING",
+            "PROCESSING",
+            "CANCEL_REQUESTED",
+            "DATA_READINESS_WAITING",
+        }:
             response.status_code = 200
             return RunResponse.model_validate(existing)
         existing.active_research_key = None
@@ -2292,9 +3181,7 @@ def submit_research(
         {
             **{column.name: getattr(run, column.name) for column in run.__table__.columns},
             "data_readiness_state": (
-                "WAITING_FOR_BENCHMARKS"
-                if run.status == "DATA_READINESS_WAITING"
-                else None
+                "WAITING_FOR_BENCHMARKS" if run.status == "DATA_READINESS_WAITING" else None
             ),
             "next_retry_at": (dict(run.manifest).get("data_readiness_wait") or {}).get(
                 "next_retry_at"
@@ -2442,6 +3329,107 @@ def runs(
     return [RunListResponse.model_validate(row) for row in rows]
 
 
+@app.get("/api/v1/runs/activity", response_model=RunActivityResponse)
+def run_activity(
+    db: DbSession,
+    context: Current,
+    cursor: str | None = None,
+    limit: int = Query(default=30, ge=1, le=100),
+    run_type: str | None = Query(default=None, alias="type"),
+    status_filter: str | None = Query(default=None, alias="status"),
+) -> RunActivityResponse:
+    statement = select(JobRun).where(JobRun.user_id == context.user.user_id)
+    allowed_types = {"DAILY", "RESEARCH", "BACKTEST", "TRADE_PLAN", "EXIT_ADVICE"}
+    if run_type:
+        requested = {item.strip().upper() for item in run_type.split(",")}
+        statement = statement.where(JobRun.run_type.in_(requested & allowed_types))
+    if status_filter:
+        statement = statement.where(JobRun.status == status_filter.upper())
+    if cursor:
+        try:
+            raw = base64.urlsafe_b64decode(cursor.encode() + b"===").decode()
+            stamp_value, cursor_run_id = raw.split("|", 1)
+            stamp = datetime.fromisoformat(stamp_value)
+        except (ValueError, UnicodeDecodeError, TypeError):
+            raise HTTPException(status_code=422, detail="invalid activity cursor") from None
+        statement = statement.where(
+            (JobRun.started_at < stamp)
+            | ((JobRun.started_at == stamp) & (JobRun.run_id < cursor_run_id))
+        )
+    rows = list(
+        db.scalars(
+            statement.order_by(JobRun.started_at.desc(), JobRun.run_id.desc()).limit(limit + 1)
+        ).all()
+    )
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    items: list[RunActivityItem] = []
+    for row in rows:
+        resource_type = cast(
+            Literal["RESEARCH", "BACKTEST", "TRADE_PLAN", "EXIT_ADVICE"],
+            {
+            "DAILY": "RESEARCH",
+            "RESEARCH": "RESEARCH",
+            "BACKTEST": "BACKTEST",
+            "TRADE_PLAN": "TRADE_PLAN",
+            "EXIT_ADVICE": "EXIT_ADVICE",
+            }.get(row.run_type, "RESEARCH"),
+        )
+        resource_id = str((row.manifest or {}).get("resource_id") or "") or None
+        resource_url = None
+        title = row.run_type.replace("_", " ")
+        symbol = None
+        if resource_type == "TRADE_PLAN" and resource_id:
+            plan = db.get(TradePlanRow, resource_id)
+            if plan:
+                symbol = plan.symbols[0] if plan.symbols else None
+                resource_url = (
+                    f"/reports?date={plan.trading_date.isoformat()}&run_id={plan.run_id}"
+                    + (f"&symbol={symbol}" if symbol else "")
+                )
+                title = "买入方案"
+        elif resource_type == "EXIT_ADVICE" and resource_id:
+            advice = db.get(ExitAdviceRow, resource_id)
+            if advice:
+                symbol = advice.symbol
+                resource_url = f"/exit-advice?advice_id={advice.advice_id}"
+                title = "卖出建议"
+        elif resource_type == "BACKTEST":
+            backtest = db.scalar(select(BacktestRun).where(BacktestRun.run_id == row.run_id))
+            if backtest:
+                resource_id = backtest.backtest_id
+                resource_url = f"/backtest?backtest_id={backtest.backtest_id}"
+                title = backtest.name
+        else:
+            report = db.scalar(select(ReportRow).where(ReportRow.run_id == row.run_id))
+            if report:
+                resource_id = report.report_id
+                resource_url = (
+                    f"/reports?date={report.trading_date.isoformat()}&run_id={row.run_id}"
+                )
+                title = "研究报告"
+        items.append(
+            RunActivityItem(
+                **RunResponse.model_validate(row).model_dump(),
+                user_id=row.user_id,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                resource_url=resource_url,
+                title=title,
+                symbol=symbol,
+            )
+        )
+    next_cursor = None
+    if has_more and rows:
+        last = rows[-1]
+        next_cursor = (
+            base64.urlsafe_b64encode(f"{last.started_at.isoformat()}|{last.run_id}".encode())
+            .decode()
+            .rstrip("=")
+        )
+    return RunActivityResponse(items=items, next_cursor=next_cursor)
+
+
 @app.get("/api/v1/runs/{run_id}", response_model=RunResponse)
 def run(run_id: str, db: DbSession, context: Current) -> RunResponse:
     row = QueryRepository(db).run(run_id)
@@ -2541,8 +3529,10 @@ def submit_backtest(
     except KeyError as exc:
         raise HTTPException(status_code=422, detail="snapshot lacks a verified file hash") from exc
     requested_config = dict(request.config)
+    runtime_settings = get_effective_settings()
+    system_configuration = SystemConfigurationService().resolve(db).manifest_reference()
     executor_config = {
-        "artifact_root": str(get_settings().lake_root.parent / "artifacts"),
+        "artifact_root": str(runtime_settings.lake_root.parent / "artifacts"),
         "snapshot_file_hashes": file_hashes,
         "requested_start_date": request.start_date.isoformat(),
         "requested_end_date": request.end_date.isoformat(),
@@ -2570,7 +3560,11 @@ def submit_backtest(
         decision_at=now,
         status="PENDING",
         idempotency_key=input_hash,
-        manifest={"snapshot_ids": request.snapshot_ids, "config": requested_config},
+        manifest={
+            "snapshot_ids": request.snapshot_ids,
+            "config": requested_config,
+            "system_configuration": system_configuration,
+        },
         input_hash=input_hash,
         started_at=now,
     )
@@ -2598,6 +3592,7 @@ def submit_backtest(
             "backtest_id": backtest.backtest_id,
             "input_hash": input_hash,
             "user_id": context.user.user_id,
+            "system_configuration": system_configuration,
         },
     )
     _remember_idempotency(
@@ -2741,6 +3736,17 @@ def retry_backtest(backtest_id: str, db: DbSession, context: Writer) -> Backtest
     return _backtest_response(db, row)
 
 
+@app.get("/api/v1/market/quotes/{symbol}", response_model=QuoteResponse)
+def market_quote(symbol: str, _: Current, refresh: bool = False) -> QuoteResponse:
+    try:
+        row = get_market_data_service().quote(symbol, force_refresh=refresh)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="market quote unavailable") from exc
+    return QuoteResponse.model_validate(row)
+
+
 @app.get("/api/v1/market/quotes", response_model=list[QuoteResponse])
 def market_quotes(symbols: str, _: Current, refresh: bool = False) -> list[QuoteResponse]:
     try:
@@ -2788,6 +3794,7 @@ def market_prefetch(request: MarketPrefetchRequest, _: Writer) -> MarketPrefetch
             request.symbols,
             periods=request.periods,
             limit=request.limit,
+            include_quotes=request.include_quotes,
         )
         return MarketPrefetchResponse.model_validate(payload)
     except ValueError as exc:
@@ -2796,7 +3803,10 @@ def market_prefetch(request: MarketPrefetchRequest, _: Writer) -> MarketPrefetch
 
 @app.get("/api/v1/market/status")
 def market_status(_: Current) -> dict[str, Any]:
-    return get_market_data_service().status()
+    return {
+        **get_market_data_service().status(),
+        "market_session": _market_session_status().model_dump(mode="json"),
+    }
 
 
 @app.get("/api/v1/search/financial", response_model=FinancialSearchResponse)

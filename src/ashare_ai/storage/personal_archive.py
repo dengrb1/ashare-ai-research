@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 from ashare_ai import __version__
 from ashare_ai.core.config import Settings, get_settings
 from ashare_ai.core.hashing import canonical_json, sha256_bytes, stable_hash
+from ashare_ai.core.system_settings import get_effective_settings
 from ashare_ai.storage.models import (
     AgentCall,
     AIChatMessage,
@@ -363,6 +364,7 @@ def _preview_history_classification(
                 "request_sha256",
                 "attachment_ids",
                 "attachments",
+                "private_context_snapshot",
             },
         ),
         (
@@ -578,6 +580,9 @@ def _collect_profile(
         sanitized_message = _sanitize_paths(_row_dict(row) or {})
         item = sanitized_message if isinstance(sanitized_message, dict) else {}
         item["content"] = _strip_image_data_urls(str(item.get("content") or ""))
+        # The normalized prompt snapshot is an internal cache-replay artifact,
+        # never user-visible conversation content and never exportable data.
+        item.pop("private_context_snapshot", None)
         attachment_count = len(item.pop("attachment_ids", []) or [])
         item.pop("idempotency_key_sha256", None)
         item.pop("request_sha256", None)
@@ -707,7 +712,7 @@ def _sanitize_export_record(
 
 def _read_domain_object(uri: str) -> bytes | None:
     try:
-        settings = get_settings()
+        settings = get_effective_settings()
         if uri.startswith("s3://"):
             store = S3ObjectStore(
                 bucket=settings.object_store_bucket,
@@ -1163,6 +1168,7 @@ def _import_threads(
                     "request_sha256",
                     "attachment_ids",
                     "attachments",
+                    "private_context_snapshot",
                 },
             )
         ):
@@ -1189,6 +1195,7 @@ def _import_threads(
                     "request_sha256",
                     "attachment_ids",
                     "attachments",
+                    "private_context_snapshot",
                 },
             ):
                 raise PersonalArchiveError(
