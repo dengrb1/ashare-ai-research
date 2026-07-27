@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { NavLink, Outlet, useLocation } from 'react-router-dom'
+import { NavLink, Outlet, useLocation } from 'react-router'
 import { useAuth } from '../context/AuthContext'
 import { MARKET_REFRESH_INTERVAL_OPTIONS, useMarket } from '../context/MarketContext'
 import { formatTime } from './Ui'

@@ -1,4 +1,4 @@
-import { Navigate, Outlet, Route, Routes } from 'react-router-dom'
+import { Navigate, Outlet, Route, Routes } from 'react-router'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import { MarketProvider } from './context/MarketContext'
 import { AppShell } from './components/AppShell'

@@ -1,5 +1,5 @@
 import { cleanup, render, screen } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter } from 'react-router'
 import { afterEach, expect, it, vi } from 'vitest'
 import { RefreshProvider } from '../context/RefreshContext'
 import { CandidatesPage } from '../pages/CandidatesPage'
