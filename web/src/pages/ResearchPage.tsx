@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api'
+import { MarketClosedNotice } from '../components/MarketClosedNotice'
 import { ErrorNotice, formatNumber, formatTime, Loading, Panel, StatusPill, today } from '../components/Ui'
 import { useMarket } from '../context/MarketContext'
 import { usePageRefresh } from '../context/RefreshContext'
@@ -217,6 +218,7 @@ export function ResearchPage() {
     </div>}
     <Panel title="发起每日研究" eyebrow="NEW RESEARCH RUN" className="full-span">
       <div className="run-form research-run-form">
+        {scope !== 'MARKET' && <MarketClosedNotice />}
         <label>交易日<input type="date" value={date} max={today()} onChange={(event) => setDate(event.target.value)} /></label>
         <label>研究范围<select value={scope} onChange={(event) => setScope(event.target.value as ResearchScope)}><option value="MARKET">动态市场股票池</option><option value="WATCHLIST">我的自选与持仓</option><option value="CUSTOM">手工指定股票</option></select></label>
         {scope === 'CUSTOM' && <label className="wide">股票代码<textarea rows={3} value={customSymbols} onChange={(event) => setCustomSymbols(event.target.value)} placeholder="600519 或 600519.SH；多个代码用空格、逗号或换行分隔" /><small>已识别 {parsedCustomSymbols.length} 只：{parsedCustomSymbols.join('、') || '—'}</small></label>}

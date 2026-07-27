@@ -54,6 +54,8 @@ class CanonicalMarketProvider(Protocol):
 
     def dividends(self, symbol: str) -> list[dict[str, Any]]: ...
 
+    def industry_membership(self, symbol: str) -> list[dict[str, Any]]: ...
+
     def trading_calendar(self, start_date: date, end_date: date) -> list[date]: ...
 
 
@@ -80,6 +82,7 @@ class MarketDataAcquisitionError(RuntimeError):
             "disclosures": "巨潮公告",
             "news": "免费新闻",
             "dividends": "历史现金分红",
+            "industry_membership": "个股行业信息",
             "trading_calendar": "交易日历",
         }
         label = labels.get(operation, "市场数据")
@@ -420,6 +423,40 @@ class AKShareCanonicalProvider:
             ),
         )
 
+    def industry_membership(self, symbol: str) -> list[dict[str, Any]]:
+        sdk = self._sdk()
+        normalized = str(normalize_symbol(symbol))
+        stock_code = normalized.split(".", 1)[0]
+
+        def eastmoney_rows() -> list[dict[str, Any]]:
+            rows = self._records(sdk.stock_individual_info_em(symbol=stock_code))
+            industry = next(
+                (
+                    str(row.get("value")).strip()
+                    for row in rows
+                    if str(row.get("item", "")).strip() == "行业"
+                    and row.get("value") is not None
+                    and str(row.get("value")).strip()
+                ),
+                None,
+            )
+            if industry is None:
+                return []
+            return [
+                {
+                    "industry_name": industry,
+                    "taxonomy": "EM_INDUSTRY",
+                    "taxonomy_version": "em-individual-info-v1",
+                    "_canonical_source": "eastmoney",
+                }
+            ]
+
+        return self._fetch(
+            operation="industry_membership",
+            subject=normalized,
+            fetchers=(("eastmoney", eastmoney_rows),),
+        )
+
     def trading_calendar(self, start_date: date, end_date: date) -> list[date]:
         sdk = self._sdk()
         rows = self._fetch(
@@ -525,6 +562,24 @@ class TushareCanonicalProvider:
         return [
             {**row, "_canonical_source": "tushare"}
             for row in vendor_records(frame)
+        ]
+
+    def industry_membership(self, symbol: str) -> list[dict[str, Any]]:
+        frame = self.client.stock_basic(
+            ts_code=str(normalize_symbol(symbol)),
+            fields="ts_code,industry",
+        )
+        if frame is None or frame.empty:
+            return []
+        return [
+            {
+                "industry_name": industry,
+                "taxonomy": "TUSHARE_INDUSTRY",
+                "taxonomy_version": "tushare-stock-basic-v1",
+                "_canonical_source": "tushare",
+            }
+            for row in vendor_records(frame)
+            if (industry := str(row.get("industry") or "").strip())
         ]
 
     def trading_calendar(self, start_date: date, end_date: date) -> list[date]:
@@ -646,6 +701,19 @@ class FallbackCanonicalProvider:
             except Exception:
                 continue
         return rows
+
+    def industry_membership(self, symbol: str) -> list[dict[str, Any]]:
+        for provider in (self.primary, self.fallback):
+            fetcher = getattr(provider, "industry_membership", None)
+            if not callable(fetcher):
+                continue
+            try:
+                rows = fetcher(symbol)
+            except Exception:
+                continue
+            if rows:
+                return self._tag_preserving(rows, provider.source)
+        return []
 
     def trading_calendar(self, start_date: date, end_date: date) -> list[date]:
         for provider in (self.primary, self.fallback):
@@ -876,27 +944,81 @@ class AKShareCanonicalBundleBuilder:
                     effective_from=trading_date,
                 )
             )
-            industry_bucket = int(stable_hash(symbol)[:8], 16) % 5
-            industries.append(
-                IndustryMembership(
-                    **_pit(
-                        symbol,
-                        trading_date,
-                        market_available_at,
-                        fetched_at,
-                        f"industry-placeholder-{symbol}",
-                        ingestion_id,
-                        "akshare-neutral-placeholder",
-                        {"reason": "AKShare spot/history has no PIT industry taxonomy"},
-                        AvailabilityBasis.DERIVED,
-                    ),
-                    taxonomy="PLACEHOLDER",
-                    taxonomy_version="neutral-v1",
-                    industry_code=f"PLACEHOLDER_{industry_bucket}",
-                    industry_name=f"未知行业占位桶 {industry_bucket + 1}",
-                    effective_from=trading_date,
+            industry_rows: list[dict[str, Any]] = []
+            industry_error: str | None = None
+            industry_fetcher = getattr(self.provider, "industry_membership", None)
+            try:
+                if callable(industry_fetcher):
+                    industry_rows = industry_fetcher(symbol)
+            except Exception as exc:
+                industry_error = type(exc).__name__
+                self.acquisition_events.append(
+                    {
+                        "operation": "industry_membership",
+                        "subject": symbol,
+                        "outcome": "placeholder_for_symbol",
+                        "error_type": industry_error,
+                    }
                 )
+            industry_row = next(
+                (row for row in industry_rows if str(row.get("industry_name") or "").strip()),
+                None,
             )
+            industry_placeholder = industry_row is None
+            if industry_row is not None:
+                industry_name = str(industry_row["industry_name"]).strip()
+                # A real vendor observation, so not DERIVED; the vendor only exposes
+                # a current-classification snapshot without its own timestamp, so we
+                # conservatively assert post-close availability via
+                # market_available_at, matching SecurityMasterRecord/StatusRecord.
+                # FIRST_OBSERVED would require available_at == fetched_at and trip
+                # the bundle future-record validation.
+                industries.append(
+                    IndustryMembership(
+                        **_pit(
+                            symbol,
+                            trading_date,
+                            market_available_at,
+                            fetched_at,
+                            f"industry-{symbol}",
+                            ingestion_id,
+                            str(industry_row.get("_canonical_source", self.provider.source)),
+                            industry_row,
+                            AvailabilityBasis.DATE_ONLY_CONSERVATIVE,
+                        ),
+                        taxonomy=str(industry_row.get("taxonomy", "EM_INDUSTRY")),
+                        taxonomy_version=str(
+                            industry_row.get("taxonomy_version", "em-individual-info-v1")
+                        ),
+                        # The vendor has no industry code; the industry name itself is
+                        # the deterministic code (fits CandidateRow.industry_code).
+                        industry_code=industry_name,
+                        industry_name=industry_name,
+                        effective_from=trading_date,
+                    )
+                )
+            else:
+                industry_bucket = int(stable_hash(symbol)[:8], 16) % 5
+                industries.append(
+                    IndustryMembership(
+                        **_pit(
+                            symbol,
+                            trading_date,
+                            market_available_at,
+                            fetched_at,
+                            f"industry-placeholder-{symbol}",
+                            ingestion_id,
+                            "akshare-neutral-placeholder",
+                            {"reason": "AKShare spot/history has no PIT industry taxonomy"},
+                            AvailabilityBasis.DERIVED,
+                        ),
+                        taxonomy="PLACEHOLDER",
+                        taxonomy_version="neutral-v1",
+                        industry_code=f"PLACEHOLDER_{industry_bucket}",
+                        industry_name=f"未知行业占位桶 {industry_bucket + 1}",
+                        effective_from=trading_date,
+                    )
+                )
             previous: Decimal | None = None
             for item in history:
                 available_at = datetime.combine(
@@ -1066,7 +1188,9 @@ class AKShareCanonicalBundleBuilder:
                 "market_price_basis": "RAW",
                 "fundamental_placeholder": bool(fundamental_reasons),
                 "sentiment_placeholder": bool(sentiment_reasons),
-                "industry_placeholder": True,
+                "industry_placeholder": industry_placeholder,
+                "industry_source": _record_sources(industry_rows),
+                "industry_acquisition_error": industry_error,
                 "security_master_placeholder": security["name"] == symbol,
                 "list_date_placeholder": True,
                 "tracked_only": tracked_only,

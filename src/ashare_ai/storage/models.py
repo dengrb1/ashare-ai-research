@@ -532,6 +532,7 @@ class CandidateRow(Base):
     total_score: Mapped[float] = mapped_column(Float, nullable=False)
     prediction_percentile: Mapped[float] = mapped_column(Float, nullable=False)
     industry_code: Mapped[str] = mapped_column(String(32), nullable=False)
+    industry_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     event_risk_multiplier: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
     style_exposures: Mapped[dict[str, float]] = mapped_column(JSON, nullable=False, default=dict)
     evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)

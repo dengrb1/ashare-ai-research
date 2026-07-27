@@ -2,11 +2,12 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { api, unwrapEnvelope } from '../api'
 import { marketPrefetchSymbols } from '../marketAssets'
 import { mergeKlineBars } from '../marketKlines'
-import type { KlineBar, KlineLoadOptions, KlinePayload, KlineRange, MarketDataStatus, PaperPosition, Quote } from '../types'
+import type { KlineBar, KlineLoadOptions, KlinePayload, KlineRange, MarketDataStatus, MarketSessionStatus, PaperPosition, Quote } from '../types'
 
 const PREFETCH_INTERVAL_MS = 5 * 60 * 1000
 const DAILY_CACHE_MS = 5 * 60 * 1000
 const INTRADAY_CACHE_MS = 30 * 1000
+const MARKET_STATUS_POLL_MS = 60 * 1000
 export const MARKET_REFRESH_INTERVAL_OPTIONS = [15, 30, 60, 120] as const
 type MarketRefreshIntervalSeconds = (typeof MARKET_REFRESH_INTERVAL_OPTIONS)[number]
 
@@ -41,6 +42,7 @@ interface MarketValue {
   source: string
   updatedAt?: string
   error?: string
+  marketSession: MarketSessionStatus | null
   klineVersion: number
   addWatch: (symbol: string) => Promise<void>
   removeWatch: (symbol: string) => Promise<void>
@@ -114,6 +116,7 @@ export function MarketProvider({ children }: { children: ReactNode }) {
   const [assetsSaving, setAssetsSaving] = useState(false)
   const [quotesLoading, setQuotesLoading] = useState(true)
   const [quotes, setQuotes] = useState<Record<string, Quote>>({})
+  const [marketSession, setMarketSession] = useState<MarketSessionStatus | null>(null)
   const [meta, setMeta] = useState<{ delayed: boolean; source: string; updatedAt?: string; error?: string }>({ delayed: false, source: 'AKShare' })
   const subscribers = useRef(new Map<string, number>())
   const [subscriptionVersion, setSubscriptionVersion] = useState(0)
@@ -149,6 +152,30 @@ export function MarketProvider({ children }: { children: ReactNode }) {
       setMeta((current) => ({ ...current, error: error instanceof Error ? error.message : '自选与持仓加载失败' }))
     }).finally(() => { if (active) setAssetsLoading(false) })
     return () => { active = false }
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    const refreshMarketSession = () => {
+      void api.marketStatus().then((status) => {
+        if (active) setMarketSession(status.market_session || null)
+      }).catch(() => {
+        if (active) setMarketSession(null)
+      })
+    }
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') refreshMarketSession()
+    }
+    refreshMarketSession()
+    const timer = window.setInterval(refreshMarketSession, MARKET_STATUS_POLL_MS)
+    window.addEventListener('focus', refreshWhenVisible)
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+      window.removeEventListener('focus', refreshWhenVisible)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+    }
   }, [])
 
   const mergeQuotes = useCallback((rows: Quote[]) => {
@@ -543,7 +570,7 @@ export function MarketProvider({ children }: { children: ReactNode }) {
     return work
   }, [])
 
-  const value = useMemo(() => ({ quotes, watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, stopLossMonitorEnabled, buyMonitorEnabled, marketRefreshIntervalSeconds, assetsLoading, assetsSaving, quotesLoading, ...meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings, saveMarketRefreshInterval, subscribe, refresh, refreshSymbol, refreshRemaining, prefetch, getKline, loadKline }), [quotes, watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, stopLossMonitorEnabled, buyMonitorEnabled, marketRefreshIntervalSeconds, assetsLoading, assetsSaving, quotesLoading, meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings, saveMarketRefreshInterval, subscribe, refresh, refreshSymbol, refreshRemaining, prefetch, getKline, loadKline])
+  const value = useMemo(() => ({ quotes, watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, stopLossMonitorEnabled, buyMonitorEnabled, marketRefreshIntervalSeconds, assetsLoading, assetsSaving, quotesLoading, marketSession, ...meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings, saveMarketRefreshInterval, subscribe, refresh, refreshSymbol, refreshRemaining, prefetch, getKline, loadKline }), [quotes, watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, stopLossMonitorEnabled, buyMonitorEnabled, marketRefreshIntervalSeconds, assetsLoading, assetsSaving, quotesLoading, marketSession, meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings, saveMarketRefreshInterval, subscribe, refresh, refreshSymbol, refreshRemaining, prefetch, getKline, loadKline])
   return <MarketContext.Provider value={value}>{children}</MarketContext.Provider>
 }
 

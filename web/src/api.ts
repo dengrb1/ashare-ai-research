@@ -1,4 +1,4 @@
-import type { AIChatAttachment, AIChatMessage, AIChatThread, AICostSummary, AssetState, AuditEvent, BuyEntryMonitor, Candidate, DataEnvelope, ExitAdvice, FinancialSearchResult, FinancialSearchStatus, KlineBar, KlineQueryOptions, MarketPrefetchResponse, ModelSettings, ModelSettingsDraft, Notification, NotificationSummary, PersonalArchiveJob, Portfolio, Quote, Report, ReportExecutionStatus, ReportSymbol, ResearchSettings, ResearchSubmission, Run, RunActivityResponse, Score, Snapshot, SystemResources, SystemSettings, SystemSettingsDraft, SystemSettingsUnlock, TokenPair, TradePlan, User } from './types'
+import type { AIChatAttachment, AIChatMessage, AIChatThread, AICostSummary, AssetState, AuditEvent, BuyEntryMonitor, Candidate, DataEnvelope, ExitAdvice, FinancialSearchResult, FinancialSearchStatus, KlineBar, KlineQueryOptions, MarketPrefetchResponse, MarketServiceStatus, ModelSettings, ModelSettingsDraft, Notification, NotificationSummary, PersonalArchiveJob, Portfolio, Quote, Report, ReportExecutionStatus, ReportSymbol, ResearchSettings, ResearchSubmission, Run, RunActivityResponse, Score, Snapshot, SystemResources, SystemSettings, SystemSettingsDraft, SystemSettingsUnlock, TokenPair, TradePlan, User } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api/v1').replace(/\/$/, '')
 
@@ -149,7 +149,7 @@ export const api = {
       errors: payload.errors || {},
     }
   },
-  marketStatus: () => request<Record<string, unknown>>('/market/status'),
+  marketStatus: () => request<MarketServiceStatus>('/market/status'),
   financialSearch: (query: string) => request<FinancialSearchResult>(`/search/financial${params({ q: query })}`),
   financialSearchStatus: () => request<FinancialSearchStatus>('/search/status'),
 

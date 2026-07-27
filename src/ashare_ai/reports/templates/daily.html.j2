@@ -42,10 +42,19 @@
   {% set exclusions = excluded_symbols|default({}) %}
   {% set risk_code = risk_reason_code|default(None) %}
   {% set risk_message = risk_reason_message|default(None) %}
+  {% set buy_exec = buy_execution_date|default(None) %}
+  {% set t1_sell = t1_earliest_sell_date|default(None) %}
   <h1>{{ trading_date }} A股 AI 投研日报</h1>
   <p>决策时点：{{ decision_at }}；运行状态：{{ run_status }}</p>
   <p class="info">本报告是正式研究报告；是否允许生成交易建议，由个股数据门禁和全局风控分别决定。</p>
   {% if fused %}<p class="warning">当前为观察模式：{{ risk_message or '正式组合条件未满足' }}。仅输出研究结果，不生成新增模拟仓位。</p>{% endif %}
+  <h2>T+1 交易时序</h2>
+  <p class="info">本报告结论供<strong>下一交易日</strong>买入执行；A股实行 T+1 制度，当日买入的股票最早在再下一交易日才能卖出。</p>
+  <div class="config">
+    <div><span>买入执行日</span><strong>{{ buy_exec or '下一交易日（以交易所日历为准）' }}</strong></div>
+    <div><span>最早可卖日(T+1)</span><strong>{{ t1_sell or '买入执行日的下一交易日（以交易所日历为准）' }}</strong></div>
+  </div>
+  <p class="muted">calendar_source={{ trade_calendar_source|default('UNSPECIFIED', true) }}</p>
   <h2>本次研究配置</h2>
   <div class="config">
     <div><span>研究范围</span><strong>{{ {'MARKET': '动态市场股票池', 'WATCHLIST': '我的自选与持仓', 'CUSTOM': '手工指定股票'}.get(scope, scope) }}</strong></div>
@@ -73,6 +82,7 @@
   <article class="symbol-report">
     <div class="symbol-head">
       <h3>{{ row.name }}（{{ row.symbol }}）</h3>
+      {% if row.get('candidate') and row.get('candidate').industry_name %}<span class="tag">{{ row.get('candidate').industry_name }}</span>{% endif %}
       <span class="tag {{ '' if row.advice_eligible else 'blocked' }}">{{ '正式可建议' if row.advice_eligible else ('风险禁买' if row.research_status == 'RISK_BLOCKED' else '数据受限') }}</span>
       <span class="tag {{ 'blocked' if row.recommendation == 'NO_BUY' else '' }}">{{ '暂不买入' if row.recommendation == 'NO_BUY' else '可查看模拟方案' }}</span>
     </div>
@@ -102,6 +112,7 @@
   </article>
   {% endfor %}
   <h2>下一交易日模拟组合</h2>
+  <p class="muted">买入执行日：{{ buy_exec or '下一交易日' }} · 按 T+1 规则最早可卖日：{{ t1_sell or '买入执行日的下一交易日' }}</p>
   <div class="table-scroll"><table>
     <thead><tr><th>证券</th><th>权重</th><th>目标股数</th><th>参考价</th></tr></thead>
     <tbody>{% for row in positions %}<tr><td>{{ row.symbol }}</td><td>{{ "%.2f%%"|format(row.weight * 100) }}</td><td>{{ row.target_shares }}</td><td>{{ row.reference_price }}</td></tr>{% endfor %}</tbody>

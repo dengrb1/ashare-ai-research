@@ -58,7 +58,7 @@ services:
   api:
     <<: *app-service
     command: ["sh", "-c", "ashare-ai migrate && ashare-ai api --host 0.0.0.0 --port 8000"]
-    ports: ["${SERVICE_BIND_ADDRESS:-127.0.0.1}:8000:8000"]
+    ports: ["${API_BIND_ADDRESS:-127.0.0.1}:8000:8000"]
     mem_limit: 384m
     depends_on:
       private-data-init:

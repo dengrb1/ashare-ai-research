@@ -23,6 +23,9 @@ def test_daily_report_is_content_addressed(tmp_path) -> None:
             "decision_at": "2026-07-14T18:00:00+08:00",
             "run_status": "SUCCEEDED",
             "fused": False,
+            "buy_execution_date": "2026-07-15",
+            "t1_earliest_sell_date": "2026-07-16",
+            "trade_calendar_source": "builtin-demo",
             "candidates": [],
             "report_symbols": [],
             "positions": [],
@@ -49,7 +52,9 @@ def test_daily_report_is_content_addressed(tmp_path) -> None:
         },
     )
     session.commit()
-    assert store.get(report.object_uri).startswith(b"<!doctype html>")
+    content = store.get(report.object_uri)
+    assert content.startswith(b"<!doctype html>")
+    assert "T+1 交易时序" in content.decode("utf-8")
     assert report.object_uri.endswith(report.content_sha256)
 
 
@@ -66,6 +71,9 @@ def test_daily_report_prefers_chinese_plain_language_summary(tmp_path) -> None:
             "decision_at": "2026-07-14T18:00:00+08:00",
             "run_status": "SUCCEEDED",
             "fused": False,
+            "buy_execution_date": "2026-07-15",
+            "t1_earliest_sell_date": "2026-07-16",
+            "trade_calendar_source": "builtin-demo",
             "candidates": [],
             "report_symbols": [
                 {
@@ -125,3 +133,50 @@ def test_daily_report_prefers_chinese_plain_language_summary(tmp_path) -> None:
     assert "给家人看的总结" not in content
     assert "综合评分 70.00 分" not in content
     assert "english factor should not be rendered" not in content
+
+
+def test_daily_report_renders_t1_fallback_without_calendar_dates(tmp_path) -> None:
+    engine = create_engine("sqlite+pysqlite://")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    store = LocalObjectStore(tmp_path / "objects")
+    report = DailyReportService(session, store).generate(
+        run_id="run-t1-fallback",
+        trading_date=date(2026, 7, 14),
+        context={
+            "trading_date": "2026-07-14",
+            "decision_at": "2026-07-14T18:00:00+08:00",
+            "run_status": "SUCCEEDED",
+            "fused": False,
+            "buy_execution_date": None,
+            "t1_earliest_sell_date": None,
+            "trade_calendar_source": None,
+            "candidates": [],
+            "report_symbols": [],
+            "positions": [],
+            "risks": [],
+            "run_id": "run-t1-fallback",
+            "input_hash": "a" * 64,
+            "formula_version": "v1",
+            "trade_rule_version": "v1",
+            "research_scope": "MARKET",
+            "target_symbols": [],
+            "research_budget": {},
+            "research_only_reason": None,
+            "portfolio_outcome": {},
+            "quality_summary": {
+                "symbol_count": 0,
+                "fundamental_placeholder_count": 0,
+                "sentiment_placeholder_count": 0,
+                "industry_placeholder_count": 0,
+            },
+            "formal_eligible_symbols": [],
+            "excluded_symbols": {},
+            "risk_reason_code": None,
+            "risk_reason_message": None,
+        },
+    )
+    content = store.get(report.object_uri).decode("utf-8")
+    assert "T+1 交易时序" in content
+    assert "下一交易日（以交易所日历为准）" in content
+    assert "买入执行日的下一交易日" in content

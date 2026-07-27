@@ -291,6 +291,21 @@ export interface MarketDataStatus {
   message?: string | null
 }
 
+export type MarketSessionState = 'OPEN' | 'PRE_OPEN' | 'BREAK' | 'CLOSED' | 'UNKNOWN'
+
+export interface MarketSessionStatus {
+  state: MarketSessionState
+  as_of: string
+  trading_date: string
+  is_trading_day: boolean | null
+  reason: 'TRADING_SESSION' | 'BEFORE_OPEN' | 'MIDDAY_BREAK' | 'AFTER_CLOSE' | 'NON_TRADING_DAY' | 'CALENDAR_UNAVAILABLE'
+}
+
+export interface MarketServiceStatus {
+  market_session?: MarketSessionStatus
+  [key: string]: unknown
+}
+
 export interface Snapshot {
   snapshot_id: string
   dataset: string
@@ -570,6 +585,7 @@ export interface Candidate {
   dividend_bonus?: number
   prediction_percentile?: number
   industry_code?: string
+  industry_name?: string | null
   event_risk_multiplier?: number
 }
 
@@ -585,6 +601,7 @@ export interface ReportSymbol {
   rank?: number | null
   prediction_percentile?: number | null
   industry_code?: string | null
+  industry_name?: string | null
   plain_language_summary?: string | null
   component_summaries?: Record<string, string>
 }

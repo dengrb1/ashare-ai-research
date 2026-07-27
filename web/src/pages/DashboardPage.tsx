@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, unwrapList } from '../api'
+import { MarketClosedNotice } from '../components/MarketClosedNotice'
 import { useMarket } from '../context/MarketContext'
 import type { Run } from '../types'
 import { Empty, formatAmount, formatNumber, formatTime, Panel, StatusPill, today } from '../components/Ui'
@@ -34,6 +35,7 @@ export function DashboardPage() {
       <div className="hero-stat"><span>执行中</span><strong>{running}</strong><small>异步任务</small></div>
       <div className="hero-stat"><span>自选覆盖</span><strong>{watchlist.length}</strong><small>只活跃刷新</small></div>
     </div>
+    <MarketClosedNotice />
     <div className="metric-grid">
       {quoteSymbols.length ? quoteSymbols.map((symbol, index) => {
         const quote = quotes[symbol]

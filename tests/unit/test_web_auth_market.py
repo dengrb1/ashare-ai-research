@@ -11,9 +11,14 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from ashare_ai.api.app import app
+from ashare_ai.api.app import (
+    _market_session_calendar_cache,
+    _market_session_status,
+    app,
+)
 from ashare_ai.api.auth import hash_password
 from ashare_ai.api.dependencies import get_db
+from ashare_ai.api.schemas import MarketSessionStatus
 from ashare_ai.core.config import Settings
 from ashare_ai.market.service import (
     AKShareMarketProvider,
@@ -1026,6 +1031,91 @@ def test_market_status_reports_compatible_process_and_hedge_fields() -> None:
     assert status["provider_process_state"] == "READY"
     assert status["provider_process_degraded"] is False
     assert status["hedge_delay_seconds"] == 0.7
+
+
+def test_market_session_status_caches_successful_calendar_results_and_fails_closed(
+    monkeypatch,
+) -> None:
+    class Calendar:
+        calls = 0
+
+        def sessions(self, start: date, end: date) -> tuple[date, ...]:
+            assert start == end == date(2026, 7, 20)
+            type(self).calls += 1
+            return (start,)
+
+    _market_session_calendar_cache.clear()
+    monkeypatch.setattr("ashare_ai.api.app.FreeExchangeCalendar", Calendar)
+    current = datetime(2026, 7, 20, 15, tzinfo=UTC)
+    try:
+        first = _market_session_status(current)
+        second = _market_session_status(current)
+    finally:
+        _market_session_calendar_cache.clear()
+
+    assert (first.state, first.is_trading_day, first.reason) == (
+        "CLOSED",
+        True,
+        "AFTER_CLOSE",
+    )
+    assert second == first
+    assert Calendar.calls == 1
+
+    class UnavailableCalendar:
+        def sessions(self, start: date, end: date) -> tuple[date, ...]:
+            del start, end
+            raise RuntimeError("calendar offline")
+
+    monkeypatch.setattr("ashare_ai.api.app.FreeExchangeCalendar", UnavailableCalendar)
+    unavailable = _market_session_status(current)
+    assert (unavailable.state, unavailable.is_trading_day, unavailable.reason) == (
+        "UNKNOWN",
+        None,
+        "CALENDAR_UNAVAILABLE",
+    )
+
+
+def test_market_status_api_exposes_compatible_market_session(monkeypatch) -> None:
+    session, _, _ = _database()
+
+    class StubMarket:
+        def status(self) -> dict[str, object]:
+            return {"primary": "fixture", "live_data_isolated_from_snapshots": True}
+
+    expected = MarketSessionStatus(
+        state="CLOSED",
+        as_of=datetime(2026, 7, 20, 15, tzinfo=UTC),
+        trading_date=date(2026, 7, 20),
+        is_trading_day=True,
+        reason="AFTER_CLOSE",
+    )
+
+    def override_db():
+        yield session
+
+    monkeypatch.setattr("ashare_ai.api.app.get_market_data_service", lambda: StubMarket())
+    monkeypatch.setattr("ashare_ai.api.app._market_session_status", lambda: expected)
+    app.dependency_overrides[get_db] = override_db
+    try:
+        anonymous = TestClient(app)
+        assert anonymous.get("/api/v1/market/status").status_code == 401
+        client = TestClient(app)
+        assert client.post(
+            "/api/v1/auth/login",
+            json={"username": "alice", "password": "alice-password"},
+        ).status_code == 200
+        response = client.get("/api/v1/market/status")
+        assert response.status_code == 200
+        assert response.json()["market_session"] == {
+            "state": "CLOSED",
+            "as_of": "2026-07-20T15:00:00Z",
+            "trading_date": "2026-07-20",
+            "is_trading_day": True,
+            "reason": "AFTER_CLOSE",
+        }
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
 
 
 def test_kline_timeout_degrades_to_recent_cache() -> None:

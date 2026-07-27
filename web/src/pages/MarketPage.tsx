@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { CandlestickChart } from '../components/CandlestickChart'
+import { MarketClosedNotice } from '../components/MarketClosedNotice'
 import { ErrorNotice, formatAmount, formatNumber, Loading, Panel } from '../components/Ui'
 import { usePageRefresh } from '../context/RefreshContext'
 import { useMarket, useQuoteSubscription, type KlineCacheEntry } from '../context/MarketContext'
@@ -179,6 +180,7 @@ export function MarketPage() {
   const targetDates = `${new Date(plan.start).toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai' })} — ${new Date(plan.end).toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
 
   return <div className="market-layout">
+    <MarketClosedNotice />
     <Panel className="watch-panel" eyebrow="ACTIVE SYMBOLS" title="自选行情" action={<span className="count-badge">{watchlist.length}</span>}>
       <div className="symbol-search"><input value={search} onChange={(event) => setSearch(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && locate()} placeholder="输入代码 600519" /><button onClick={locate}>定位</button></div>
       <div className="watch-list">

@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from ashare_ai.core.config import Settings
+from ashare_ai.core.contracts import AvailabilityBasis, Candidate
 from ashare_ai.core.hashing import stable_hash
 from ashare_ai.core.time import SHANGHAI
 from ashare_ai.orchestration.akshare_bundle import (
@@ -139,7 +140,11 @@ def test_akshare_bundle_uses_real_market_history_and_labeled_neutral_placeholder
     assert all(item.source == "akshare-neutral-placeholder" for item in bundle.financial_facts)
     assert all(item["market_history_real"] for item in bundle.data_quality.values())
     assert all(item["fundamental_placeholder"] for item in bundle.data_quality.values())
+    # The stub provider has no industry_membership method, so every symbol keeps
+    # the deterministic neutral placeholder buckets.
     assert len({item.industry_code for item in bundle.industries}) == 5
+    assert {item.taxonomy for item in bundle.industries} == {"PLACEHOLDER"}
+    assert all(item["industry_placeholder"] for item in bundle.data_quality.values())
     assert set(bundle.benchmark_returns) == {
         "CSI300",
         "CSI500",
@@ -231,6 +236,165 @@ def test_free_multi_source_news_and_official_dividends_are_pit_frozen() -> None:
     )
     assert all(item.available_at <= bundle.decision_at for item in bundle.financial_facts)
     assert all(item.available_at <= bundle.decision_at for item in bundle.disclosures)
+
+
+class IndustryProvider(CompleteProvider):
+    def __init__(self, trading_date: date) -> None:
+        super().__init__(trading_date)
+        self.industry_calls: list[str] = []
+
+    def industry_membership(self, symbol):
+        self.industry_calls.append(symbol)
+        return [
+            {
+                "industry_name": "银行",
+                "taxonomy": "EM_INDUSTRY",
+                "taxonomy_version": "em-individual-info-v1",
+                "_canonical_source": "eastmoney",
+            }
+        ]
+
+
+def test_akshare_provider_parses_eastmoney_individual_info_industry(monkeypatch) -> None:
+    class Frame:
+        def to_dict(self, *, orient):
+            assert orient == "records"
+            return [
+                {"item": "总市值", "value": 1000000},
+                {"item": "行业", "value": "银行"},
+            ]
+
+    class SDK:
+        @staticmethod
+        def stock_individual_info_em(symbol):
+            assert symbol == "600000"
+            return Frame()
+
+    monkeypatch.setattr(AKShareCanonicalProvider, "_sdk", staticmethod(lambda: SDK()))
+    rows = AKShareCanonicalProvider(backoff_seconds=0).industry_membership("600000.SH")
+    assert rows == [
+        {
+            "industry_name": "银行",
+            "taxonomy": "EM_INDUSTRY",
+            "taxonomy_version": "em-individual-info-v1",
+            "_canonical_source": "eastmoney",
+        }
+    ]
+
+
+def test_bundle_uses_real_industry_membership_when_provider_exposes_it() -> None:
+    trading_date = date(2026, 7, 15)
+    provider = IndustryProvider(trading_date)
+    builder = AKShareCanonicalBundleBuilder(
+        provider=provider,
+        clock=lambda: datetime(2026, 7, 15, 20, tzinfo=SHANGHAI),
+        bundle_size=20,
+        history_sessions=65,
+    )
+    bundle = builder.build(trading_date, datetime(2026, 7, 15, 18, tzinfo=SHANGHAI))
+
+    market_available_at = datetime(2026, 7, 15, 15, 5, tzinfo=SHANGHAI)
+    assert len(provider.industry_calls) == 20
+    assert {item.taxonomy for item in bundle.industries} == {"EM_INDUSTRY"}
+    assert {item.industry_name for item in bundle.industries} == {"银行"}
+    assert {item.industry_code for item in bundle.industries} == {"银行"}
+    assert all(item.available_at == market_available_at for item in bundle.industries)
+    assert all(
+        item.availability_basis == AvailabilityBasis.DATE_ONLY_CONSERVATIVE
+        for item in bundle.industries
+    )
+    assert all(not item["industry_placeholder"] for item in bundle.data_quality.values())
+    assert all(
+        item["industry_source"] == ["eastmoney"] for item in bundle.data_quality.values()
+    )
+    assert all(
+        item["industry_acquisition_error"] is None for item in bundle.data_quality.values()
+    )
+
+
+def test_bundle_falls_back_to_industry_placeholder_when_acquisition_fails() -> None:
+    trading_date = date(2026, 7, 15)
+
+    class FailingIndustryProvider(IndustryProvider):
+        def industry_membership(self, symbol):
+            if symbol == "600000.SH":
+                raise MarketDataAcquisitionError(
+                    operation="industry_membership",
+                    subject=symbol,
+                    attempt_count=2,
+                    sources=("eastmoney",),
+                )
+            return super().industry_membership(symbol)
+
+    builder = AKShareCanonicalBundleBuilder(
+        provider=FailingIndustryProvider(trading_date),
+        clock=lambda: datetime(2026, 7, 15, 20, tzinfo=SHANGHAI),
+        bundle_size=20,
+        history_sessions=65,
+    )
+    bundle = builder.build(trading_date, datetime(2026, 7, 15, 18, tzinfo=SHANGHAI))
+
+    failed = next(item for item in bundle.industries if item.symbol == "600000.SH")
+    assert failed.taxonomy == "PLACEHOLDER"
+    assert failed.industry_code.startswith("PLACEHOLDER_")
+    assert bundle.data_quality["600000.SH"]["industry_placeholder"] is True
+    assert (
+        bundle.data_quality["600000.SH"]["industry_acquisition_error"]
+        == "MarketDataAcquisitionError"
+    )
+    others = [item for item in bundle.industries if item.symbol != "600000.SH"]
+    assert {item.taxonomy for item in others} == {"EM_INDUSTRY"}
+    assert {
+        (event["operation"], event["subject"], event["outcome"])
+        for event in builder.acquisition_events
+    } == {("industry_membership", "600000.SH", "placeholder_for_symbol")}
+
+
+def test_fallback_provider_probes_fallback_industry_membership() -> None:
+    trading_date = date(2026, 7, 15)
+
+    class FallbackWithIndustry(IndustryProvider):
+        source = "tushare"
+
+        def industry_membership(self, symbol):
+            del symbol
+            return [
+                {
+                    "industry_name": "白酒",
+                    "taxonomy": "TUSHARE_INDUSTRY",
+                    "taxonomy_version": "tushare-stock-basic-v1",
+                    "_canonical_source": "tushare",
+                }
+            ]
+
+    provider = FallbackCanonicalProvider(
+        Provider(trading_date),
+        FallbackWithIndustry(trading_date),
+        minimum_history_rows=65,
+    )
+    rows = provider.industry_membership("600519.SH")
+    assert rows == [
+        {
+            "industry_name": "白酒",
+            "taxonomy": "TUSHARE_INDUSTRY",
+            "taxonomy_version": "tushare-stock-basic-v1",
+            "_canonical_source": "tushare",
+        }
+    ]
+
+
+def test_candidate_deserializes_legacy_json_without_industry_name() -> None:
+    legacy = {
+        "symbol": "600000.SH",
+        "trading_date": "2026-07-15",
+        "decision_at": "2026-07-15T18:00:00+08:00",
+        "total_score": 70,
+        "prediction_percentile": 0.5,
+        "industry_code": "PLACEHOLDER_1",
+        "volatility": 0.2,
+    }
+    candidate = Candidate.model_validate(legacy)
+    assert candidate.industry_name is None
 
 
 def test_akshare_bundle_rejects_historical_live_reconstruction() -> None:

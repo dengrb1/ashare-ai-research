@@ -975,7 +975,7 @@ class BuiltinDailyBackend:
         score_artifact = self._read_stage(run_id, "scores", ScoreArtifact)
         feature_artifact = self._read_stage(run_id, "features", FeatureArtifact)
         features = {item.symbol: item for item in feature_artifact.items}
-        industries = {item.symbol: item.industry_code for item in bundle.industries}
+        industries = {item.symbol: item for item in bundle.industries}
         universe = self._read_stage(run_id, "universe", UniverseResult)
         formal_eligible, _ = self._formal_eligibility(bundle, universe)
         formal_scores = tuple(
@@ -1004,7 +1004,8 @@ class BuiltinDailyBackend:
                 base_total_score=score.base_total_score,
                 dividend_bonus=score.dividend_bonus,
                 prediction_percentile=percentiles[score.symbol],
-                industry_code=industries[score.symbol],
+                industry_code=industries[score.symbol].industry_code,
+                industry_name=industries[score.symbol].industry_name,
                 volatility=max(
                     features[score.symbol].technical.annualized_volatility_20d or 0.0,
                     0.01,
@@ -1037,6 +1038,7 @@ class BuiltinDailyBackend:
                         total_score=candidate.total_score,
                         prediction_percentile=candidate.prediction_percentile,
                         industry_code=candidate.industry_code,
+                        industry_name=candidate.industry_name,
                         event_risk_multiplier=candidate.event_risk_multiplier,
                         style_exposures=candidate.style_exposures,
                         evidence_hash=score_by_symbol[candidate.symbol].evidence_bundle_sha256,
@@ -1482,6 +1484,13 @@ class BuiltinDailyBackend:
             if existing is not None:
                 session.commit()
                 return existing.report_id
+            buy_execution_date = bundle.next_trading_date
+            # Fail closed: without a later frozen calendar session the T+1 earliest
+            # sell date stays None instead of a weekend+1 guess.
+            t1_earliest_sell_date = next(
+                (item for item in bundle.trading_calendar if item > bundle.next_trading_date),
+                None,
+            )
             report = DailyReportService(session, self.object_store).generate(
                 run_id=run_id,
                 trading_date=bundle.trading_date,
@@ -1490,6 +1499,13 @@ class BuiltinDailyBackend:
                     "decision_at": bundle.decision_at.isoformat(),
                     "run_status": "FUSED" if risk_state == "OBSERVE_ONLY" else "SUCCEEDED",
                     "fused": risk_state == "OBSERVE_ONLY",
+                    "buy_execution_date": buy_execution_date.isoformat(),
+                    "t1_earliest_sell_date": (
+                        t1_earliest_sell_date.isoformat()
+                        if t1_earliest_sell_date is not None
+                        else None
+                    ),
+                    "trade_calendar_source": bundle.calendar_source,
                     "candidates": candidates.candidates,
                     "report_symbols": self._report_symbol_rows(
                         bundle=bundle,

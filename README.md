@@ -256,7 +256,7 @@ docker compose -p ashare-ai -f compose.yaml -f compose.ghcr.yaml up -d
 - `GET /api/v1/market/quotes/{symbol}`
 - `GET /api/v1/market/klines/{symbol}?period=1m|5m|15m|30m|60m|day`
 - `POST /api/v1/market/prefetch`
-- `GET /api/v1/market/status`
+- `GET /api/v1/market/status`（兼容新增 `market_session`，用于显示 A 股开闭市状态）
 - `GET /api/v1/search/financial?q=贵州茅台股价`
 - `GET /api/v1/search/status`
 - `POST /api/v1/research/runs`
@@ -434,5 +434,7 @@ Backtest Worker 校验 Manifest 状态、文件哈希、RAW 价格和时点约�
 本项目采用 [Apache License 2.0](LICENSE) 开源。使用、修改或分发本项目时，请遵守许可证条款，
 并保留所要求的版权及许可证声明。第三方数据、模型、服务和依赖仍适用各自的许可与使用条款。
 
-v1.0.0 发布详情见[中文发布说明](docs/releases/v1.0.0.zh-CN.md)和
+当前重大版本 v2.0.0 的完整变化、升级步骤与兼容性说明见
+[中文发布说明](docs/releases/v2.0.0.zh-CN.md)。历史首个稳定版见
+[v1.0.0 中文发布说明](docs/releases/v1.0.0.zh-CN.md)和
 [English Release Notes](docs/releases/v1.0.0.en.md)。

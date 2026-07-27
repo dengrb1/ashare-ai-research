@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
+import { MarketClosedNotice } from '../components/MarketClosedNotice'
 import { Empty, ErrorNotice, formatAmount, formatNumber, Loading, Panel } from '../components/Ui'
 import { useMarket, useQuoteSubscription } from '../context/MarketContext'
 import type { BuyEntryMonitor, PaperPosition } from '../types'
@@ -192,6 +193,7 @@ export function AssetsPage() {
   const busy = saving || assetsSaving
 
   return <div className="page-stack">
+    <MarketClosedNotice />
     <div className="summary-grid">
       <div><span>账户总资金</span><strong>{hasAccountTotal ? `¥ ${formatAmount(totalAssets)}` : '—'}</strong><small>{hasAccountTotal ? '含持仓市值与可用现金' : '请先填写账户总资金'}</small></div>
       <div><span>已记录持仓市值</span><strong>¥ {formatAmount(totals.market)}</strong><small>{totals.estimatedCount ? `含 ${totals.estimatedCount} 只成本价估算` : '按最新行情计算'}</small></div>

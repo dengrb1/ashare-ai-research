@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from threading import Lock
 from typing import Annotated, Any, Literal, NoReturn, cast
 from uuid import uuid4
 
@@ -99,6 +100,7 @@ from ashare_ai.api.schemas import (
     MarketPrefetchRequest,
     MarketPrefetchResponse,
     MarketRefreshSettingsRequest,
+    MarketSessionStatus,
     ModelListResponse,
     ModelProbeResponse,
     ModelProfileSettings,
@@ -154,7 +156,7 @@ from ashare_ai.core.system_settings import (
     SystemSettingsError,
     get_effective_settings,
 )
-from ashare_ai.core.time import SHANGHAI
+from ashare_ai.core.time import SHANGHAI, market_session
 from ashare_ai.market.service import get_market_data_service, reset_market_data_service
 from ashare_ai.notifications.service import InvalidNotificationCursor, NotificationService
 from ashare_ai.observability.audit import AuditLogger
@@ -268,6 +270,36 @@ IdempotencyKey = Annotated[
 SystemSettingsUnlockToken = Annotated[
     str | None, Header(alias="X-System-Settings-Unlock")
 ]
+
+_market_session_calendar_cache: dict[date, tuple[date, ...]] = {}
+_market_session_calendar_cache_lock = Lock()
+
+
+def _market_session_status(now: datetime | None = None) -> MarketSessionStatus:
+    """Return a fail-closed live-session status without exposing calendar internals."""
+
+    current = (now or datetime.now(SHANGHAI)).astimezone(SHANGHAI)
+    trading_date = current.date()
+    with _market_session_calendar_cache_lock:
+        sessions = _market_session_calendar_cache.get(trading_date)
+    if sessions is None:
+        try:
+            sessions = FreeExchangeCalendar().sessions(trading_date, trading_date)
+        except Exception:
+            domain_status = market_session(current, None)
+        else:
+            with _market_session_calendar_cache_lock:
+                _market_session_calendar_cache[trading_date] = sessions
+            domain_status = market_session(current, sessions)
+    else:
+        domain_status = market_session(current, sessions)
+    return MarketSessionStatus(
+        state=domain_status.state,
+        as_of=current,
+        trading_date=trading_date,
+        is_trading_day=domain_status.is_trading_day,
+        reason=domain_status.reason,
+    )
 
 
 def _idempotency_fingerprint(
@@ -2547,6 +2579,7 @@ def report_symbols(report_id: str, db: DbSession, context: Current) -> list[Repo
                 rank=candidate.rank if candidate else None,
                 prediction_percentile=candidate.prediction_percentile if candidate else None,
                 industry_code=candidate.industry_code if candidate else None,
+                industry_name=candidate.industry_name if candidate else None,
                 plain_language_summary=symbol_summary(
                     total_score=score.total_score,
                     fundamental_score=score.fundamental_score,
@@ -3770,7 +3803,10 @@ def market_prefetch(request: MarketPrefetchRequest, _: Writer) -> MarketPrefetch
 
 @app.get("/api/v1/market/status")
 def market_status(_: Current) -> dict[str, Any]:
-    return get_market_data_service().status()
+    return {
+        **get_market_data_service().status(),
+        "market_session": _market_session_status().model_dump(mode="json"),
+    }
 
 
 @app.get("/api/v1/search/financial", response_model=FinancialSearchResponse)

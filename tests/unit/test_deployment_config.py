@@ -41,9 +41,10 @@ def test_compose_declares_low_memory_control_plane() -> None:
     assert ".env.docker" in services["api"]["env_file"]
     assert "host.docker.internal:host-gateway" in services["job-worker"]["extra_hosts"]
     web_loopback = "${WEB_BIND_ADDRESS:-127.0.0.1}"
+    api_loopback = "${API_BIND_ADDRESS:-127.0.0.1}"
     service_loopback = "${SERVICE_BIND_ADDRESS:-127.0.0.1}"
     assert services["web"]["ports"] == [f"{web_loopback}:80:80"]
-    assert services["api"]["ports"] == [f"{service_loopback}:8000:8000"]
+    assert services["api"]["ports"] == [f"{api_loopback}:8000:8000"]
     assert services["postgres"]["ports"] == [f"{service_loopback}:5432:5432"]
     assert services["redis"]["ports"] == [f"{service_loopback}:6379:6379"]
 

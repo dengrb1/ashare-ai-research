@@ -698,6 +698,8 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 
 返回当前行情服务状态对象，主要字段包括 `primary`、`fallback`、`fallbacks`、`cache_seconds`、`kline_cache_seconds`、`prefetch_max_workers`、`prefetch_max_symbols`、`stale_seconds`、`adjustment`、`live_data_isolated_from_snapshots` 和可选 `quotes` 缓存状态。兼容新增的 `provider_process_mode`、`provider_process_state`、`provider_process_degraded` 与 `hedge_delay_seconds` 用于观察可复用 AKShare 隔离进程和日线延迟竞速；这些字段不暴露 PID、命令行、环境变量或内部错误。
 
+`market_session` 为兼容性新增对象，用于界面标注实时行情是否已收盘：`state` 取值为 `OPEN`、`PRE_OPEN`、`BREAK`、`CLOSED` 或 `UNKNOWN`；并返回上海时区的 `as_of`、`trading_date`、`is_trading_day` 和原因码 `reason`。交易日 15:00 起及非交易日返回 `CLOSED`；午间休市返回 `BREAK`。交易日历暂不可用时返回 `UNKNOWN`，客户端不得将其视为已收盘。旧客户端可忽略该新增字段。
+
 ## 11. 财务检索
 
 ### `GET /api/v1/search/financial`

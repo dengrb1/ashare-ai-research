@@ -734,6 +734,7 @@ class CandidateResponse(OrmResponse):
     dividend_bonus: float = 0
     prediction_percentile: float
     industry_code: str
+    industry_name: str | None = None
     event_risk_multiplier: float
     style_exposures: dict[str, float]
     evidence_hash: str
@@ -751,6 +752,7 @@ class ReportSymbolResponse(BaseModel):
     rank: int | None = None
     prediction_percentile: float | None = None
     industry_code: str | None = None
+    industry_name: str | None = None
     plain_language_summary: str | None = None
     component_summaries: dict[str, str] = Field(default_factory=dict)
 
@@ -1075,6 +1077,21 @@ class ReportBodyResponse(BaseModel):
     report_id: str
     content_type: str
     content: str
+
+
+class MarketSessionStatus(BaseModel):
+    state: Literal["OPEN", "PRE_OPEN", "BREAK", "CLOSED", "UNKNOWN"]
+    as_of: datetime
+    trading_date: date
+    is_trading_day: bool | None = None
+    reason: Literal[
+        "TRADING_SESSION",
+        "BEFORE_OPEN",
+        "MIDDAY_BREAK",
+        "AFTER_CLOSE",
+        "NON_TRADING_DAY",
+        "CALENDAR_UNAVAILABLE",
+    ]
 
 
 class MarketDataStatus(BaseModel):

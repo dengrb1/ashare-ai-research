@@ -1,8 +1,9 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MarketProvider, useMarket } from '../context/MarketContext'
+import { MarketClosedNotice } from '../components/MarketClosedNotice'
 import { ThemeProvider, ThemeToggle, useTheme } from '../context/ThemeContext'
 
 function jsonResponse(body: unknown, status = 200) {
@@ -136,6 +137,36 @@ describe('market prefetch and client cache', () => {
     cleanup()
     vi.unstubAllGlobals()
     document.cookie = 'ashare_csrf=; Max-Age=0; path=/'
+  })
+
+  it('polls the server session status and only shows the close notice after final close', async () => {
+    vi.useFakeTimers()
+    let state = 'CLOSED'
+    const mockFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/assets')) return jsonResponse({ watchlist: [], positions: [] })
+      if (url.endsWith('/market/status')) return jsonResponse({
+        market_session: {
+          state,
+          as_of: '2026-07-20T15:00:00+08:00',
+          trading_date: '2026-07-20',
+          is_trading_day: true,
+          reason: state === 'CLOSED' ? 'AFTER_CLOSE' : 'TRADING_SESSION',
+        },
+      })
+      throw new Error(`unexpected request ${url}`)
+    })
+    vi.stubGlobal('fetch', mockFetch)
+    render(<MarketProvider><MarketClosedNotice /></MarketProvider>)
+
+    await act(async () => { await Promise.resolve() })
+    expect(screen.getByRole('status')).toHaveTextContent('A 股已收盘，当前展示为收盘后行情。')
+
+    state = 'OPEN'
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+    expect(screen.queryByText('A 股已收盘，当前展示为收盘后行情。')).not.toBeInTheDocument()
+    expect(mockFetch.mock.calls.filter(([url]) => String(url).endsWith('/market/status'))).toHaveLength(2)
+    vi.useRealTimers()
   })
 
   it('prefetches watchlist plus holdings and reruns after watchlist changes', async () => {

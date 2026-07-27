@@ -153,6 +153,8 @@ code, pre, .eyebrow, .kicker { font-family: 'Cascadia Mono', 'SFMono-Regular', C
 .user-menu strong, .user-menu small { display: block; }.user-menu strong { font-size: 11px; }.user-menu small { color: #60767d; font-size: 11px; }
 .user-menu button { margin-left: 5px; color: #71868c; background: none; border: 0; font-size: 11px; }.user-menu button:hover { color: var(--danger); }
 .stale-banner { padding: 8px 30px; color: #d5aa64; background: rgba(210,155,63,.08); border-bottom: 1px solid rgba(210,155,63,.18); font-size: 11px; }
+.market-closed-notice { padding: 9px 12px; color: var(--gold); background: color-mix(in srgb, var(--gold) 9%, var(--surface)); border: 1px solid color-mix(in srgb, var(--gold) 28%, var(--line)); border-radius: 7px; font-size: var(--font-xs); line-height: 1.5; }
+.market-layout > .market-closed-notice { grid-column: 1 / -1; }
 .content { flex: 1; padding: 25px 28px 35px; }
 .disclaimer { padding: 15px 30px; color: #43575d; border-top: 1px solid var(--line); font-size: 11px; text-align: center; letter-spacing: .05em; }
 
