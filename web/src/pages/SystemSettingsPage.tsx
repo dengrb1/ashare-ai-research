@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Cpu, Eye, EyeOff, HardDrive, LockKeyhole, MemoryStick, RefreshCw, Server, ShieldCheck, UnlockKeyhole, X } from 'lucide-react'
-import { Link, Navigate } from 'react-router-dom'
+import { Link, Navigate } from 'react-router'
 import { ApiError, api } from '../api'
 import { ErrorNotice, formatTime, Loading, Panel, StatusPill } from '../components/Ui'
 import { useAuth } from '../context/AuthContext'

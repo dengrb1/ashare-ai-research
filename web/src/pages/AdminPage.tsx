@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { Navigate } from 'react-router-dom'
+import { Navigate } from 'react-router'
 import { api } from '../api'
 import { useAuth } from '../context/AuthContext'
 import type { User } from '../types'

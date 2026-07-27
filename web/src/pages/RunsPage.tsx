@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link } from 'react-router'
 import { api } from '../api'
 import type { AuditEvent, RunActivity } from '../types'
 import { Empty, ErrorNotice, formatTime, Loading, Panel, StatusPill } from '../components/Ui'
