@@ -295,46 +295,49 @@ class ModelConfigurationService:
         api_key = draft.api_key or (current.api_key if current else None)
         if not api_key:
             raise ModelSettingsError("API key is required")
-        model = draft.search_model.strip()
-        profile = next(
-            item
-            for item in _normalize_profiles(
-                draft.model_profiles,
-                models=(draft.search_model.strip(), draft.research_model.strip()),
-            )
-            if item.model == model
+        profiles = _normalize_profiles(
+            draft.model_profiles,
+            models=(draft.search_model.strip(), draft.research_model.strip()),
         )
-        client = OpenAICompatibleStructuredLLMClient(
-            base_url=base_url,
-            api_key=api_key,
-            model=model,
-            reasoning_effort=draft.search_reasoning_effort,
-            timeout_seconds=draft.timeout_seconds,
-            max_retries=0,
-            cache_policy=profile.cache_policy,
+        profile_by_model = {item.model: item for item in profiles}
+        configured_models = (
+            (draft.search_model.strip(), draft.search_reasoning_effort),
+            (draft.research_model.strip(), draft.research_reasoning_effort),
         )
+        clients: list[OpenAICompatibleStructuredLLMClient] = []
         checked_at = datetime.now(UTC)
-        try:
-            result = await client.generate_structured(
-                schema=ModelConnectionProbe,
-                messages=(
-                    {
-                        "role": "system",
-                        "content": "Return only the requested schema. Set ok to true.",
-                    },
-                    {"role": "user", "content": "Connectivity probe."},
-                ),
-                idempotency_key=stable_hash(
-                    {"kind": "model-settings-probe", "model": model, "at": checked_at}
-                ),
+        for model, effort in dict.fromkeys(configured_models):
+            client = OpenAICompatibleStructuredLLMClient(
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                reasoning_effort=effort,
+                timeout_seconds=draft.timeout_seconds,
+                max_retries=0,
+                cache_policy=profile_by_model[model].cache_policy,
             )
-            if result.output.get("ok") is not True:
-                raise ModelSettingsError("model probe returned an unexpected result")
-        except (OpenAICompatibleError, httpx.HTTPError) as exc:
-            raise ModelSettingsError(_safe_error(exc)) from exc
+            try:
+                result = await client.generate_structured(
+                    schema=ModelConnectionProbe,
+                    messages=(
+                        {
+                            "role": "system",
+                            "content": "Return only the requested schema. Set ok to true.",
+                        },
+                        {"role": "user", "content": "Connectivity probe."},
+                    ),
+                    idempotency_key=stable_hash(
+                        {"kind": "model-settings-probe", "model": model, "at": checked_at}
+                    ),
+                )
+                if result.output.get("ok") is not True:
+                    raise ModelSettingsError("model probe returned an unexpected result")
+            except (OpenAICompatibleError, httpx.HTTPError) as exc:
+                raise ModelSettingsError(f"模型 {model} 探测失败：{_safe_error(exc)}") from exc
+            clients.append(client)
         streaming_supported = False
         try:
-            streaming_supported = await client.probe_stream()
+            streaming_supported = await clients[0].probe_stream()
         except (OpenAICompatibleError, httpx.HTTPError):
             # A compatible one-shot Responses gateway remains usable for chat;
             # the persisted capability makes the eventual degradation visible.
@@ -342,11 +345,11 @@ class ModelConfigurationService:
         return ModelProbeResult(
             reachable=True,
             message=(
-                "Responses API structured and streaming probes succeeded"
+                "所有已配置模型的 Responses API 结构化探测与搜索模型流式探测均成功"
                 if streaming_supported
-                else "Responses API structured probe succeeded; streaming will degrade"
+                else "所有已配置模型的 Responses API 结构化探测成功；搜索模型流式响应将降级"
             ),
-            model=model,
+            model=draft.search_model.strip(),
             checked_at=checked_at,
             structured_output_supported=True,
             streaming_supported=streaming_supported,
@@ -600,5 +603,7 @@ def _safe_error(exc: Exception) -> str:
     if isinstance(exc, httpx.RequestError):
         return "model endpoint connection failed"
     if isinstance(exc, OpenAICompatibleError):
-        return "model endpoint rejected the structured-output probe"
+        if exc.status_code is not None:
+            return f"模型端点拒绝了结构化输出探测（HTTP {exc.status_code}）"
+        return "模型端点返回的内容未通过结构化输出校验"
     return "model endpoint validation failed"

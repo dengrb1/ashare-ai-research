@@ -143,6 +143,7 @@ class OpenAICompatibleStructuredLLMClient:
         }
         started = perf_counter()
         attempts = 0
+        schema_fallback_used = False
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(timeout=self._timeout)
         try:
@@ -160,11 +161,24 @@ class OpenAICompatibleStructuredLLMClient:
                     if response.status_code in _RETRYABLE_STATUS_CODES:
                         raise _RetryableResponseError(response)
                     if response.is_error:
-                        raise OpenAICompatibleError(
+                        error = OpenAICompatibleError(
                             _http_error_message(response),
                             code=_status_error_code(response.status_code),
                             status_code=response.status_code,
                         )
+                        if (
+                            not schema_fallback_used
+                            and response.status_code in {400, 404, 422}
+                        ):
+                            # A number of OpenAI-compatible gateways implement the
+                            # Responses API but only accept JSON Object mode.  The
+                            # response is still parsed and validated against the
+                            # Pydantic schema below, so this relaxes only the wire
+                            # contract and not the application's output contract.
+                            request_body["text"] = {"format": {"type": "json_object"}}
+                            schema_fallback_used = True
+                            continue
+                        raise error
                     response_data = _decode_response(response)
                     parsed_output = _parse_output(_extract_output_text(response_data))
                     try:

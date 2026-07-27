@@ -121,8 +121,12 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 买入监控 | GET/PUT | `/api/v1/buy-entry-monitors` | 登录/写入、幂等 |
 | 通知 | GET | `/api/v1/notifications` | 登录、cursor 分页 |
 | 通知 | GET | `/api/v1/notifications/summary` | 登录 |
+| 通知 | GET | `/api/v1/notifications/{notification_id}` | 登录、资源归属 |
 | 通知 | POST | `/api/v1/notifications/read` | 写入、幂等 |
 | 通知 | POST | `/api/v1/notifications/read-all` | 写入、幂等 |
+| 推送设备 | POST | `/api/v1/devices` | App Bearer、注册或更新设备 |
+| 推送设备 | DELETE | `/api/v1/devices/{device_id}` | App Bearer、资源归属 |
+| 推送回执 | POST | `/api/v1/devices/{device_id}/deliveries` | App Bearer、资源归属 |
 | 证券解析 | GET | `/api/v1/securities/resolve` | 登录 |
 | AI 对话 | GET | `/api/v1/ai/models` | 登录 |
 | AI 对话 | GET | `/api/v1/ai/chat/metrics` | 登录 |
@@ -309,6 +313,8 @@ Web 登录。请求体为 `LoginRequest`：
 `GET /api/v1/buy-entry-monitors` 按 `updated_at desc, monitor_id desc` 返回当前用户的监控资源；`PUT /api/v1/buy-entry-monitors` 请求 `{"symbol":"600519.SH","enabled":true}` 且要求 `Idempotency-Key`。启用时标的必须在用户自选中。系统仅把已完成正式研究、评分合格且 Trade Plan 结果为 `BUY` 的次交易日入场区间转为监控；首次进入区间时通知用户并关联模拟方案，不会买入。资产页会显示有效日、入场区间和触发/到期状态。
 
 通知接口全部按用户隔离。`GET /notifications` 使用稳定的 URL-safe `cursor`，`limit` 范围 1-200，支持 `unread_only=true`；响应为 `{items,next_cursor}`。`GET /notifications/summary` 只返回未读计数、高风险未读计数和最多 5 条未读摘要，适合可见页面轮询。两个已读写接口均要求 `Idempotency-Key`。已读通知保留 90 天，未读保留 180 天，由后台分批清理。
+
+原生客户端使用 `POST /devices` 绑定小米推送 `regId`。请求包含稳定的 `installation_id`、`registration_id`、`provider=MIPUSH` 及可选设备版本信息；响应不回传 `registration_id`。服务端使用 `PERSONAL_DATA_ENCRYPTION_KEYS` 加密保存注册 ID，并由维护任务消费事务投递表。注销使用 `DELETE /devices/{device_id}`。客户端收到或打开通知后，可向 `/devices/{device_id}/deliveries` 提交 `{notification_id,status}`，其中 `status` 为 `DELIVERED` 或 `OPENED`。所有设备与回执操作均校验当前用户归属。
 
 ### 5.3 AI 对话、证券解析与指标
 

@@ -230,8 +230,12 @@ docker compose -p ashare-ai -f compose.yaml -f compose.ghcr.yaml up -d
 - `GET|PUT /api/v1/buy-entry-monitors`
 - `GET /api/v1/notifications`
 - `GET /api/v1/notifications/summary`
+- `GET /api/v1/notifications/{notification_id}`
 - `POST /api/v1/notifications/read`
 - `POST /api/v1/notifications/read-all`
+- `POST /api/v1/devices`
+- `DELETE /api/v1/devices/{device_id}`
+- `POST /api/v1/devices/{device_id}/deliveries`
 - `GET /api/v1/securities/resolve`
 - `GET /api/v1/ai/models`
 - `GET /api/v1/ai/chat/metrics`

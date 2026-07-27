@@ -115,6 +115,10 @@ from ashare_ai.api.schemas import (
     PersonalArchiveExportRequest,
     PersonalArchiveJobResponse,
     PortfolioResponse,
+    PushDeliveryReceiptRequest,
+    PushDeliveryResponse,
+    PushDeviceRequest,
+    PushDeviceResponse,
     QuoteResponse,
     RefreshTokenRequest,
     ReportBodyResponse,
@@ -158,6 +162,7 @@ from ashare_ai.core.system_settings import (
 )
 from ashare_ai.core.time import SHANGHAI, market_session
 from ashare_ai.market.service import get_market_data_service, reset_market_data_service
+from ashare_ai.notifications.push import PushConfigurationError, PushDeviceService
 from ashare_ai.notifications.service import InvalidNotificationCursor, NotificationService
 from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.observability.runtime_resources import sample_runtime_resources
@@ -267,9 +272,7 @@ Writer = Annotated[AuthContext, Depends(get_write_context)]
 IdempotencyKey = Annotated[
     str | None, Header(alias="Idempotency-Key", min_length=1, max_length=128)
 ]
-SystemSettingsUnlockToken = Annotated[
-    str | None, Header(alias="X-System-Settings-Unlock")
-]
+SystemSettingsUnlockToken = Annotated[str | None, Header(alias="X-System-Settings-Unlock")]
 
 _market_session_calendar_cache: dict[date, tuple[date, ...]] = {}
 _market_session_calendar_cache_lock = Lock()
@@ -463,9 +466,7 @@ def _research_readiness_wait(trading_date: date, now: datetime) -> dict[str, str
         ready = False
     if ready:
         return None
-    sessions = FreeExchangeCalendar().sessions(
-        trading_date, trading_date + timedelta(days=14)
-    )
+    sessions = FreeExchangeCalendar().sessions(trading_date, trading_date + timedelta(days=14))
     return data_readiness_wait(
         trading_date=trading_date,
         now=current,
@@ -1188,6 +1189,76 @@ def notification_summary(db: DbSession, context: Current) -> NotificationSummary
         high_risk_unread_count=summary["high_risk_unread_count"],
         latest=[NotificationResponse.model_validate(item) for item in summary["latest"]],
     )
+
+
+@app.get("/api/v1/notifications/{notification_id}", response_model=NotificationResponse)
+def notification_detail(
+    notification_id: str,
+    db: DbSession,
+    context: Current,
+) -> NotificationResponse:
+    from ashare_ai.storage.models import NotificationRow
+
+    row = db.scalar(
+        select(NotificationRow).where(
+            NotificationRow.notification_id == notification_id,
+            NotificationRow.user_id == context.user.user_id,
+        )
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="notification not found")
+    return NotificationResponse.model_validate(row)
+
+
+@app.post("/api/v1/devices", response_model=PushDeviceResponse)
+def register_push_device(
+    payload: PushDeviceRequest,
+    db: DbSession,
+    context: Writer,
+) -> PushDeviceResponse:
+    try:
+        row = PushDeviceService(db).register(
+            user_id=context.user.user_id,
+            installation_id=payload.installation_id,
+            registration_id=payload.registration_id,
+            app_version=payload.app_version,
+            os_version=payload.os_version,
+            device_model=payload.device_model,
+        )
+    except PushConfigurationError as exc:
+        raise HTTPException(status_code=503, detail="push registration is unavailable") from exc
+    db.commit()
+    return PushDeviceResponse.model_validate(row)
+
+
+@app.delete("/api/v1/devices/{device_id}", status_code=204)
+def unregister_push_device(device_id: str, db: DbSession, context: Writer) -> Response:
+    if not PushDeviceService(db).disable(user_id=context.user.user_id, device_id=device_id):
+        raise HTTPException(status_code=404, detail="device not found")
+    db.commit()
+    return Response(status_code=204)
+
+
+@app.post(
+    "/api/v1/devices/{device_id}/deliveries",
+    response_model=PushDeliveryResponse,
+)
+def acknowledge_push_delivery(
+    device_id: str,
+    payload: PushDeliveryReceiptRequest,
+    db: DbSession,
+    context: Writer,
+) -> PushDeliveryResponse:
+    row = PushDeviceService(db).acknowledge(
+        user_id=context.user.user_id,
+        device_id=device_id,
+        notification_id=payload.notification_id,
+        status=payload.status,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="delivery not found")
+    db.commit()
+    return PushDeliveryResponse.model_validate(row)
 
 
 @app.post("/api/v1/notifications/read", response_model=NotificationSummaryResponse)
@@ -2059,9 +2130,10 @@ def _system_worker_snapshot(
             for name, (pending, processing) in _SYSTEM_QUEUE_KEYS.items()
         }
     except Exception:
-        heartbeats, queues = [], {
-            name: {"pending": 0, "processing": 0} for name in _SYSTEM_QUEUE_KEYS
-        }
+        heartbeats, queues = (
+            [],
+            {name: {"pending": 0, "processing": 0} for name in _SYSTEM_QUEUE_KEYS},
+        )
     job_workers = [item for item in heartbeats if item.get("role") == "job-worker"]
     modes = {str(item.get("loaded_mode")) for item in job_workers}
     actual_mode = (
@@ -2101,10 +2173,7 @@ def _system_settings_restart_command(execution_mode: str) -> str:
 
     prefix = "docker compose -p ashare-ai-src -f compose.yaml"
     if execution_mode == "DUAL":
-        return (
-            f"{prefix} --profile dual-research up -d --force-recreate "
-            "job-worker research-worker"
-        )
+        return f"{prefix} --profile dual-research up -d --force-recreate job-worker research-worker"
     return (
         f"{prefix} --profile dual-research stop research-worker; "
         f"{prefix} up -d --force-recreate job-worker"
@@ -3368,11 +3437,11 @@ def run_activity(
         resource_type = cast(
             Literal["RESEARCH", "BACKTEST", "TRADE_PLAN", "EXIT_ADVICE"],
             {
-            "DAILY": "RESEARCH",
-            "RESEARCH": "RESEARCH",
-            "BACKTEST": "BACKTEST",
-            "TRADE_PLAN": "TRADE_PLAN",
-            "EXIT_ADVICE": "EXIT_ADVICE",
+                "DAILY": "RESEARCH",
+                "RESEARCH": "RESEARCH",
+                "BACKTEST": "BACKTEST",
+                "TRADE_PLAN": "TRADE_PLAN",
+                "EXIT_ADVICE": "EXIT_ADVICE",
             }.get(row.run_type, "RESEARCH"),
         )
         resource_id = str((row.manifest or {}).get("resource_id") or "") or None

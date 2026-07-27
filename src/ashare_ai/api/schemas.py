@@ -459,6 +459,39 @@ class NotificationMarkReadRequest(BaseModel):
     notification_ids: list[str] = Field(min_length=1, max_length=100)
 
 
+class PushDeviceRequest(BaseModel):
+    installation_id: str = Field(min_length=8, max_length=64)
+    registration_id: str = Field(min_length=8, max_length=512)
+    provider: Literal["MIPUSH"] = "MIPUSH"
+    app_version: str | None = Field(default=None, max_length=32)
+    os_version: str | None = Field(default=None, max_length=32)
+    device_model: str | None = Field(default=None, max_length=96)
+
+
+class PushDeviceResponse(OrmResponse):
+    device_id: str
+    installation_id: str
+    provider: str
+    app_version: str | None = None
+    os_version: str | None = None
+    device_model: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class PushDeliveryReceiptRequest(BaseModel):
+    notification_id: str = Field(min_length=1, max_length=36)
+    status: Literal["DELIVERED", "OPENED"] = "DELIVERED"
+
+
+class PushDeliveryResponse(OrmResponse):
+    delivery_id: str
+    notification_id: str
+    device_id: str
+    status: str
+    delivered_at: datetime | None = None
+
+
 class BuyEntryMonitorResponse(OrmResponse):
     monitor_id: str
     symbol: str

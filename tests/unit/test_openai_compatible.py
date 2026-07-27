@@ -128,6 +128,39 @@ async def test_generate_structured_retries_transient_failure_with_same_idempoten
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_generate_structured_falls_back_to_json_object_for_compatible_gateway() -> None:
+    route = respx.post("http://llm.local/v1/responses").mock(
+        side_effect=[
+            httpx.Response(400, json={"error": {"message": "json_schema unsupported"}}),
+            httpx.Response(
+                200,
+                json={"output_text": '{"recommendation": "hold", "confidence": 0.6}'},
+            ),
+        ]
+    )
+    client = OpenAICompatibleStructuredLLMClient(
+        base_url="http://llm.local",
+        api_key="secret",
+        model="compatible-model",
+        max_retries=0,
+    )
+
+    generation = await client.generate_structured(
+        schema=_Result,
+        messages=({"role": "user", "content": "Assess."},),
+        idempotency_key="schema-fallback",
+    )
+
+    assert route.call_count == 2
+    first = json.loads(route.calls[0].request.content)
+    second = json.loads(route.calls[1].request.content)
+    assert first["text"]["format"]["type"] == "json_schema"
+    assert second["text"]["format"] == {"type": "json_object"}
+    assert generation.output == {"recommendation": "hold", "confidence": 0.6}
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_stream_text_normalizes_response_deltas_and_usage() -> None:
     payload = (
         'data: {"type":"response.output_text.delta","delta":"你"}\n\n'
