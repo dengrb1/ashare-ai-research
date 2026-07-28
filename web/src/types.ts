@@ -171,6 +171,27 @@ export interface ExitAdvice {
   status_url?: string | null
 }
 
+export interface TradeAdviceMonitor {
+  monitor_id: string
+  symbol: string
+  enabled: boolean
+  manual_buy_price?: number | string | null
+  manual_sell_price?: number | string | null
+  ai_buy_price?: number | string | null
+  ai_sell_price?: number | string | null
+  stop_loss_price?: number | string | null
+  rationale: Record<string, unknown>
+  generated_for?: string | null
+  generated_at?: string | null
+  model_name?: string | null
+  model_source?: string | null
+  last_alert_at?: string | null
+  last_alert_types: string[]
+  error_code?: string | null
+  created_at: string
+  updated_at: string
+}
+
 export interface AIChatThread {
   thread_id: string
   title: string

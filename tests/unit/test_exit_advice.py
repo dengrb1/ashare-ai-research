@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
@@ -28,6 +30,109 @@ class _Market:
                 "status": {"collected_at": "2026-07-20T10:00:00+08:00"},
             }
         ]
+
+
+def test_hold_exit_advice_allows_an_empty_sell_ladder() -> None:
+    analysis = exit_advice_jobs.ExitAdviceAnalysis.model_validate(
+        {
+            "action": "HOLD",
+            "confidence": 0.78,
+            "summary": "现有证据不足以支持卖出，继续观察。",
+            "ladder": [],
+        }
+    )
+
+    assert analysis.ladder == []
+
+
+@pytest.mark.parametrize("action", ["REDUCE", "SELL"])
+def test_exit_actions_still_require_a_sell_ladder(action: str) -> None:
+    with pytest.raises(ValueError, match="must include at least one ladder item"):
+        exit_advice_jobs.ExitAdviceAnalysis.model_validate(
+            {
+                "action": action,
+                "confidence": 0.78,
+                "summary": "需要执行退出方案。",
+                "ladder": [],
+            }
+        )
+
+
+def test_exit_advice_output_parser_accepts_fenced_json_and_presentation_aliases() -> None:
+    analysis = exit_advice_jobs._parse_exit_advice_output(
+        """```json
+        {"建议":"继续持有","confidence":"0.78","结论":"继续观察", "ladder":null, "risks":null}
+        ```"""
+    )
+
+    assert analysis.action == "HOLD"
+    assert analysis.ladder == []
+    assert analysis.risks == []
+
+
+@pytest.mark.parametrize(
+    ("text", "code"),
+    [
+        ("not json", "MODEL_OUTPUT_INVALID_JSON"),
+        (
+            '{"action":"SELL","confidence":0.8,"summary":"卖出","ladder":[]}',
+            "MODEL_OUTPUT_SCHEMA_INVALID",
+        ),
+    ],
+)
+def test_exit_advice_output_parser_rejects_invalid_contracts(text: str, code: str) -> None:
+    with pytest.raises(exit_advice_jobs.ExitAdviceOutputError) as caught:
+        exit_advice_jobs._parse_exit_advice_output(text)
+
+    assert caught.value.code == code
+
+
+def test_exit_advice_generation_repairs_invalid_first_output_once() -> None:
+    class _Client:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        async def generate_json_object_from_stream(self, **kwargs: object) -> SimpleNamespace:
+            self.calls.append(kwargs)
+            text = (
+                "not json"
+                if len(self.calls) == 1
+                else '{"action":"HOLD","confidence":0.8,"summary":"继续观察",'
+                '"ladder":[],"risks":[]}'
+            )
+            return SimpleNamespace(text=text, metadata=SimpleNamespace())
+
+    client = _Client()
+    audit_texts: list[str] = []
+
+    analysis, _generation, repaired = exit_advice_jobs._generate_exit_advice_with_repair(
+        client,
+        messages=({"role": "user", "content": "analyse"},),
+        request_sha="request-hash",
+        on_repair=audit_texts.append,
+    )
+
+    assert analysis.action == "HOLD"
+    assert repaired is True
+    assert audit_texts == ["not json"]
+    assert len(client.calls) == 2
+    assert client.calls[1]["idempotency_key"] != "request-hash"
+
+
+def test_exit_advice_generation_fails_safely_after_invalid_repair() -> None:
+    class _Client:
+        async def generate_json_object_from_stream(self, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(text="not json", metadata=SimpleNamespace())
+
+    with pytest.raises(OpenAICompatibleError) as caught:
+        exit_advice_jobs._generate_exit_advice_with_repair(
+            _Client(),
+            messages=({"role": "user", "content": "analyse"},),
+            request_sha="request-hash",
+            on_repair=lambda _text: None,
+        )
+
+    assert caught.value.code == "MODEL_OUTPUT_REPAIR_FAILED"
 
 
 def test_intraday_profit_trigger_is_queued_once_until_material_change(monkeypatch) -> None:
@@ -216,9 +321,9 @@ def test_exit_worker_persists_stable_model_and_processing_failure_codes(monkeypa
         processing_failure = session.get(ExitAdviceRow, "processing-failure")
         assert model_failure is not None and processing_failure is not None
         assert model_failure.status == "UNAVAILABLE"
-        assert model_failure.error_message == "MODEL_UNAVAILABLE"
+        assert model_failure.error_message == "MODEL_RESPONSE_ERROR"
         assert model_failure.result == {
-            "failure_code": "MODEL_UNAVAILABLE",
+            "failure_code": "MODEL_RESPONSE_ERROR",
             "paper_trade_only": True,
         }
         assert processing_failure.status == "FAILED"

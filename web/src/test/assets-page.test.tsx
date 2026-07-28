@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, expect, it, vi } from 'vitest'
 import { MarketProvider, useMarket } from '../context/MarketContext'
 import { AssetsPage } from '../pages/AssetsPage'
+import { ToastProvider } from '../context/ToastContext'
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
@@ -44,7 +45,7 @@ it('edits holdings and adds watchlist symbols through the persisted asset API', 
   })
   vi.stubGlobal('fetch', mockFetch)
 
-  render(<MarketProvider><AssetsPage /></MarketProvider>)
+  render(<ToastProvider><MarketProvider><AssetsPage /></MarketProvider></ToastProvider>)
   expect(await screen.findByText('贵州茅台')).toBeInTheDocument()
   await userEvent.click(screen.getByRole('button', { name: '编辑' }))
   const quantity = screen.getByLabelText('持仓数量')
@@ -238,7 +239,7 @@ it('submits a paper-only manual exit study with an idempotency key', async () =>
   })
   vi.stubGlobal('fetch', mockFetch)
 
-  render(<MarketProvider><AssetsPage /></MarketProvider>)
+  render(<ToastProvider><MarketProvider><AssetsPage /></MarketProvider></ToastProvider>)
   expect(await screen.findByText('贵州茅台')).toBeInTheDocument()
   await userEvent.click(screen.getByRole('button', { name: '退出研究' }))
   expect(

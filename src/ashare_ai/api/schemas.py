@@ -520,6 +520,39 @@ class BuyEntryMonitorRequest(BaseModel):
         return value.strip().upper() if isinstance(value, str) else value
 
 
+class TradeAdviceMonitorRequest(BaseModel):
+    symbol: str = Field(pattern=r"^\d{6}\.(SH|SZ|BJ)$")
+    enabled: bool = True
+    manual_buy_price: Decimal | None = Field(default=None, gt=0, le=Decimal("10000000"))
+    manual_sell_price: Decimal | None = Field(default=None, gt=0, le=Decimal("10000000"))
+
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def normalize_symbol(cls, value: object) -> object:
+        return value.strip().upper() if isinstance(value, str) else value
+
+
+class TradeAdviceMonitorResponse(OrmResponse):
+    monitor_id: str
+    symbol: str
+    enabled: bool
+    manual_buy_price: Decimal | None = None
+    manual_sell_price: Decimal | None = None
+    ai_buy_price: Decimal | None = None
+    ai_sell_price: Decimal | None = None
+    stop_loss_price: Decimal | None = None
+    rationale: dict[str, Any] = Field(default_factory=dict)
+    generated_for: date | None = None
+    generated_at: datetime | None = None
+    model_name: str | None = None
+    model_source: str | None = None
+    last_alert_at: datetime | None = None
+    last_alert_types: list[str] = Field(default_factory=list)
+    error_code: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
 class AIChatThreadRequest(BaseModel):
     title: str = Field(default="新对话", min_length=1, max_length=128)
 

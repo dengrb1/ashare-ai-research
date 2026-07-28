@@ -145,6 +145,8 @@ from ashare_ai.api.schemas import (
     SystemSettingsUnlockRequest,
     SystemSettingsUnlockResponse,
     TokenResponse,
+    TradeAdviceMonitorRequest,
+    TradeAdviceMonitorResponse,
     TradePlanRequest,
     TradePlanResponse,
     UserCreateRequest,
@@ -217,6 +219,7 @@ from ashare_ai.storage.models import (
     ScoreRow,
     SecurityMaster,
     SnapshotManifestRow,
+    TradeAdviceMonitorRow,
     TradePlanRow,
     UserAccount,
     UserAssetState,
@@ -831,6 +834,17 @@ def update_asset_state(
             else None
         ),
     )
+    removed = set(previous["watchlist"]) - set(payload.watchlist)
+    if removed:
+        for monitor in db.scalars(
+            select(TradeAdviceMonitorRow).where(
+                TradeAdviceMonitorRow.user_id == context.user.user_id,
+                TradeAdviceMonitorRow.symbol.in_(removed),
+                TradeAdviceMonitorRow.enabled.is_(True),
+            )
+        ):
+            monitor.enabled = False
+        db.commit()
     return AssetStateResponse.model_validate(state)
 
 
@@ -1099,6 +1113,51 @@ def buy_entry_monitor_list(
         ).limit(limit)
     ).all()
     return [BuyEntryMonitorResponse.model_validate(row) for row in rows]
+
+
+@app.get("/api/v1/trade-advice-monitors", response_model=list[TradeAdviceMonitorResponse])
+def trade_advice_monitor_list(db: DbSession, context: Current) -> list[TradeAdviceMonitorResponse]:
+    rows = db.scalars(
+        select(TradeAdviceMonitorRow)
+        .where(TradeAdviceMonitorRow.user_id == context.user.user_id)
+        .order_by(TradeAdviceMonitorRow.enabled.desc(), TradeAdviceMonitorRow.symbol.asc())
+    ).all()
+    return [TradeAdviceMonitorResponse.model_validate(row) for row in rows]
+
+
+@app.put("/api/v1/trade-advice-monitors", response_model=TradeAdviceMonitorResponse)
+def save_trade_advice_monitor(
+    payload: TradeAdviceMonitorRequest,
+    db: DbSession,
+    context: Writer,
+    idempotency_key: IdempotencyKey = None,
+) -> TradeAdviceMonitorResponse:
+    if idempotency_key is None:
+        raise HTTPException(status_code=400, detail="Idempotency-Key is required")
+    assets = UserAssetService(db).get(context.user.user_id)
+    if payload.enabled and payload.symbol not in set(assets["watchlist"]):
+        raise HTTPException(status_code=422, detail="SYMBOL_NOT_IN_WATCHLIST")
+    row = db.scalar(
+        select(TradeAdviceMonitorRow).where(
+            TradeAdviceMonitorRow.user_id == context.user.user_id,
+            TradeAdviceMonitorRow.symbol == payload.symbol,
+        )
+    )
+    now = datetime.now(UTC)
+    if row is None:
+        row = TradeAdviceMonitorRow(
+            user_id=context.user.user_id, symbol=payload.symbol, created_at=now, updated_at=now
+        )
+        db.add(row)
+    row.enabled, row.manual_buy_price, row.manual_sell_price, row.updated_at = (
+        payload.enabled,
+        payload.manual_buy_price,
+        payload.manual_sell_price,
+        now,
+    )
+    db.commit()
+    db.refresh(row)
+    return TradeAdviceMonitorResponse.model_validate(row)
 
 
 @app.put("/api/v1/buy-entry-monitors", response_model=list[BuyEntryMonitorResponse])

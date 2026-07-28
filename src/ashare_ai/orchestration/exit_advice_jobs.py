@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime, time
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -16,6 +18,7 @@ from ashare_ai.agents.openai_compatible import (
     OpenAICompatibleError,
     OpenAICompatibleStructuredLLMClient,
 )
+from ashare_ai.agents.protocols import TextGeneration
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.hashing import canonical_json, sha256_bytes, stable_hash
 from ashare_ai.core.time import SHANGHAI
@@ -45,7 +48,8 @@ from ashare_ai.storage.models import (
 from ashare_ai.trading.rules import RuleContext, TradingRuleRepository
 from ashare_ai.trading.sellability import position_sellability
 
-PROMPT_VERSION = "exit-advice-v1"
+PROMPT_VERSION = "exit-advice-v2"
+_JSON_FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", flags=re.DOTALL | re.IGNORECASE)
 
 
 def enqueue_exit_advice(advice_id: str, redis_url: str | None = None) -> None:
@@ -67,15 +71,158 @@ class ExitAdviceAnalysis(BaseModel):
     action: Literal["HOLD", "REDUCE", "SELL"]
     confidence: float = Field(ge=0, le=1)
     summary: str = Field(min_length=1, max_length=1000)
-    ladder: list[ExitLadderItem] = Field(min_length=1, max_length=5)
+    ladder: list[ExitLadderItem] = Field(default_factory=list, max_length=5)
     stop_loss_price: Decimal | None = Field(default=None, gt=0)
     risks: list[str] = Field(default_factory=list, max_length=8)
+
+    @model_validator(mode="after")
+    def require_ladder_for_exit_actions(self) -> ExitAdviceAnalysis:
+        """A HOLD conclusion is valid without an executable sell ladder."""
+        if self.action in {"REDUCE", "SELL"} and not self.ladder:
+            raise ValueError("REDUCE and SELL advice must include at least one ladder item")
+        return self
 
 
 class ExitAdviceRequestError(ValueError):
     def __init__(self, message: str, *, code: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class ExitAdviceOutputError(OpenAICompatibleError):
+    """A non-persisted parse or contract failure eligible for one repair attempt."""
+
+
+def _parse_exit_advice_output(text: str) -> ExitAdviceAnalysis:
+    """Normalize narrowly-defined JSON variants and enforce the domain contract."""
+
+    cleaned = text.strip().lstrip("\ufeff")
+    fenced = _JSON_FENCE.match(cleaned)
+    if fenced:
+        cleaned = fenced.group(1).strip()
+    try:
+        payload = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise ExitAdviceOutputError(
+            "Exit advice output is not a JSON object", code="MODEL_OUTPUT_INVALID_JSON"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ExitAdviceOutputError(
+            "Exit advice output is not a JSON object", code="MODEL_OUTPUT_INVALID_JSON"
+        )
+    normalized = dict(payload)
+    _normalize_exit_advice_fields(normalized)
+    try:
+        return ExitAdviceAnalysis.model_validate(normalized)
+    except ValueError as exc:
+        raise ExitAdviceOutputError(
+            "Exit advice output does not satisfy the domain contract",
+            code="MODEL_OUTPUT_SCHEMA_INVALID",
+        ) from exc
+
+
+def _normalize_exit_advice_fields(payload: dict[str, Any]) -> None:
+    """Accept only predictable presentation aliases before strict validation."""
+
+    aliases = {
+        "recommendation": "action",
+        "建议": "action",
+        "结论": "summary",
+        "analysis": "summary",
+        "sell_ladder": "ladder",
+        "分批卖出": "ladder",
+    }
+    for source, target in aliases.items():
+        if target not in payload and source in payload:
+            payload[target] = payload.pop(source)
+    action = payload.get("action")
+    if isinstance(action, str):
+        payload["action"] = {
+            "持有": "HOLD",
+            "继续持有": "HOLD",
+            "减仓": "REDUCE",
+            "分批减仓": "REDUCE",
+            "卖出": "SELL",
+        }.get(action.strip().upper(), action.strip().upper())
+    for field in ("ladder", "risks"):
+        if payload.get(field) is None:
+            payload[field] = []
+    if payload.get("stop_loss_price") in {"", "-", "无", "none", "null"}:
+        payload["stop_loss_price"] = None
+    ladder = payload.get("ladder")
+    if isinstance(ladder, list):
+        for item in ladder:
+            if not isinstance(item, dict):
+                continue
+            if "target_price" not in item and "price" in item:
+                item["target_price"] = item.pop("price")
+
+
+def _format_repair_messages(raw_output: str) -> tuple[dict[str, str], dict[str, str]]:
+    """Ask once for syntax/shape repair only; do not request new investment analysis."""
+
+    contract = {
+        "action": "HOLD | REDUCE | SELL",
+        "confidence": "0 到 1 的数字",
+        "summary": "非空文本",
+        "ladder": [
+            {"target_price": "正数", "quantity": "正整数", "reason": "非空文本"}
+        ],
+        "stop_loss_price": "正数或 null",
+        "risks": ["文本"],
+    }
+    return (
+        {
+            "role": "system",
+            "content": (
+                "你只负责把已有退出建议转换为指定 JSON 对象，不能改变其投资结论、"
+                "不能补充事实。只返回 JSON，不要 Markdown。HOLD 的 ladder 必须为空；"
+                "REDUCE 或 SELL 的 ladder 必须有 1 到 5 项。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": canonical_json(
+                {"contract": contract, "output_to_repair": raw_output}
+            ).decode("utf-8"),
+        },
+    )
+
+
+def _generate_exit_advice_with_repair(
+    client: Any,
+    *,
+    messages: tuple[dict[str, str], ...],
+    request_sha: str,
+    on_repair: Callable[[str], None],
+) -> tuple[ExitAdviceAnalysis, TextGeneration, bool]:
+    """Generate once, then make one format-only repair attempt if required."""
+
+    generation = asyncio.run(
+        client.generate_json_object_from_stream(
+            messages=messages,
+            idempotency_key=request_sha,
+        )
+    )
+    try:
+        return _parse_exit_advice_output(generation.text), generation, False
+    except ExitAdviceOutputError:
+        on_repair(generation.text)
+        repair_sha = stable_hash({"request_sha": request_sha, "attempt": "format-repair"})
+        repair_generation = asyncio.run(
+            client.generate_json_object_from_stream(
+                messages=_format_repair_messages(generation.text),
+                idempotency_key=repair_sha,
+            )
+        )
+        try:
+            analysis = _parse_exit_advice_output(repair_generation.text)
+        except ExitAdviceOutputError as exc:
+            raise OpenAICompatibleError(
+                "Exit advice format repair did not produce a valid contract",
+                code="MODEL_OUTPUT_REPAIR_FAILED",
+            ) from exc
+        return analysis, repair_generation, True
 
 
 def request_manual_exit_advice(
@@ -605,12 +752,16 @@ def execute_exit_advice(advice_id: str) -> dict[str, Any]:
             "position": row.position_snapshot,
             "formal_research": row.research_context,
         }
-        messages = (
+        messages: tuple[dict[str, str], ...] = (
             {
                 "role": "system",
                 "content": (
                     "你是A股模拟持仓退出研究Agent。根据给定数据决定继续持有、分批减仓或卖出，"
-                    "并给出1到5档目标价格和每档卖出股数。不得使用未提供事实，不得承诺收益。"
+                    "不得使用未提供事实，不得承诺收益。只返回一个 JSON 对象，"
+                    "不要 Markdown、说明文字或代码块。"
+                    "对象字段必须为 action、confidence、summary、ladder、stop_loss_price、risks。"
+                    "若结论为继续持有，ladder 必须为空；若结论为分批减仓或卖出，"
+                    "ladder 必须为1到5档。"
                     "数量建议会由服务端按T+1、持仓上限和生效交易规则复核。"
                 ),
             },
@@ -633,6 +784,7 @@ def execute_exit_advice(advice_id: str) -> dict[str, Any]:
                 AIResponseCacheRow.expires_at > now,
             )
         )
+        format_repair_used = False
         if cached is not None:
             analysis = ExitAdviceAnalysis.model_validate(cached.response)
             cached.hit_count += 1
@@ -652,30 +804,42 @@ def execute_exit_advice(advice_id: str) -> dict[str, Any]:
                 max_retries=1,
                 cache_policy=runtime.profile_for(runtime.research_model).cache_policy,
             )
-            generation = asyncio.run(
-                client.generate_structured(
-                    schema=ExitAdviceAnalysis,
-                    messages=messages,
-                    idempotency_key=request_sha,
+            def record_format_repair(raw_output: str) -> None:
+                transition_operation_run(
+                    session,
+                    row.operation_run_id,
+                    status="RUNNING",
+                    event_type="EXIT_ADVICE_FORMAT_REPAIR_STARTED",
+                    message="Exit advice output format repair started",
+                    details={
+                        "advice_id": row.advice_id,
+                        "output_sha256": sha256_bytes(raw_output.encode("utf-8")),
+                        "output_length": len(raw_output),
+                    },
                 )
+            analysis, generation, format_repair_used = _generate_exit_advice_with_repair(
+                client,
+                messages=messages,
+                request_sha=request_sha,
+                on_repair=record_format_repair,
             )
-            analysis = ExitAdviceAnalysis.model_validate(generation.output)
             input_tokens = generation.metadata.input_tokens
             cached_input_tokens = generation.metadata.cached_input_tokens
             cache_write_tokens = generation.metadata.cache_write_tokens
             output_tokens = generation.metadata.output_tokens
             reasoning_tokens = generation.metadata.reasoning_tokens
             cache_hit = False
+            cached_response = analysis.model_dump(mode="json")
             session.add(
                 AIResponseCacheRow(
                     user_id=row.user_id,
                     purpose="EXIT_ADVICE",
                     request_sha256=request_sha,
-                    response_sha256=stable_hash(generation.output),
+                    response_sha256=stable_hash(cached_response),
                     model_name=generation.metadata.model_name,
                     reasoning_effort=generation.metadata.reasoning_effort,
                     prompt_version=PROMPT_VERSION,
-                    response=generation.output,
+                    response=cached_response,
                     input_tokens=input_tokens,
                     cached_input_tokens=cached_input_tokens,
                     cache_write_tokens=cache_write_tokens,
@@ -710,7 +874,11 @@ def execute_exit_advice(advice_id: str) -> dict[str, Any]:
             status="SUCCEEDED",
             event_type="EXIT_ADVICE_COMPLETED",
             message="Exit advice generation completed",
-            details={"advice_id": row.advice_id, "symbol": row.symbol},
+            details={
+                "advice_id": row.advice_id,
+                "symbol": row.symbol,
+                "format_repair_used": cached is None and format_repair_used,
+            },
             output_hash=row.response_sha256,
         )
         NotificationService(session).create(
@@ -808,7 +976,7 @@ def _validate_sell_ladder(
 def run_exit_advice_job(advice_id: str) -> dict[str, Any]:
     try:
         return execute_exit_advice(advice_id)
-    except OpenAICompatibleError:
+    except OpenAICompatibleError as exc:
         with SessionLocal() as session:
             row = session.get(ExitAdviceRow, advice_id)
             if row is not None:
@@ -816,7 +984,7 @@ def run_exit_advice_job(advice_id: str) -> dict[str, Any]:
                     session,
                     row,
                     status="UNAVAILABLE",
-                    failure_code="MODEL_UNAVAILABLE",
+                    failure_code=_exit_model_failure_code(exc),
                     notification_type="EXIT_ADVICE_UNAVAILABLE",
                     title=f"{row.symbol} 模拟退出研究暂不可用",
                 )
@@ -834,6 +1002,21 @@ def run_exit_advice_job(advice_id: str) -> dict[str, Any]:
                     title=f"{row.symbol} 模拟退出研究失败",
                 )
         return {}
+
+
+def _exit_model_failure_code(error: OpenAICompatibleError) -> str:
+    """Expose only stable, actionable model failure categories."""
+
+    supported = {
+        "MODEL_TIMEOUT",
+        "MODEL_RATE_LIMITED",
+        "MODEL_GATEWAY_UNAVAILABLE",
+        "MODEL_STREAM_INCOMPLETE",
+        "MODEL_OUTPUT_INVALID_JSON",
+        "MODEL_OUTPUT_SCHEMA_INVALID",
+        "MODEL_OUTPUT_REPAIR_FAILED",
+    }
+    return error.code if error.code in supported else "MODEL_RESPONSE_ERROR"
 
 
 def _record_exit_failure(

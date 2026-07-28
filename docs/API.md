@@ -788,3 +788,7 @@ curl -sS "$BASE_URL/api/v1/search/financial?q=%E8%B4%B5%E5%B7%9E%E8%8C%85%E5%8F%
 - OpenAPI JSON：`GET /openapi.json`。
 
 生产环境会关闭这些公共入口；客户端契约应以本文件和版本化代码为准。
+# 交易建议监控
+
+- `GET /api/v1/trade-advice-monitors`：返回当前用户的自选股买入、卖出和止损监控，按启用状态与股票代码稳定排序。
+- `PUT /api/v1/trade-advice-monitors`：创建或更新一只自选股的监控；需要 `Idempotency-Key`。请求为 `symbol`、`enabled`、可选 `manual_buy_price` 与 `manual_sell_price`。启用不属于自选股的代码返回 `422 SYMBOL_NOT_IN_WATCHLIST`。

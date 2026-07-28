@@ -22,10 +22,12 @@ def dispatch_scheduled_tasks() -> dict[str, Any]:
     from ashare_ai.notifications.service import NotificationService
     from ashare_ai.orchestration.exit_advice_jobs import dispatch_exit_advice
     from ashare_ai.portfolio.monitoring import BuyEntryMonitorService, StopLossMonitorService
+    from ashare_ai.portfolio.trade_advice import TradeAdviceService
     from ashare_ai.storage.database import SessionLocal
 
     now = datetime.now(SHANGHAI)
     buy_monitor = BuyEntryMonitorService()
+    trade_advice = TradeAdviceService()
     refresh_created = 0
     # The row uniqueness constraint makes this safe during retries; limiting the
     # refresh to after close avoids treating intraday plans as formal inputs.
@@ -40,6 +42,8 @@ def dispatch_scheduled_tasks() -> dict[str, Any]:
         "exit_advice": dispatch_exit_advice(now=now),
         "stop_loss": StopLossMonitorService().dispatch(now=now),
         "buy_entry_monitor": buy_monitor.dispatch(now=now),
+        "trade_advice_generated": trade_advice.generate_daily(now=now),
+        "trade_advice_alerts": trade_advice.dispatch(now=now),
         "buy_entry_refresh_created": refresh_created,
         "expired_notifications": expired_notifications,
         "daily_research": dispatch_auto_research_once(),

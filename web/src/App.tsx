@@ -22,6 +22,7 @@ import { AIChatPage } from './pages/AIChatPage'
 import { ThemeProvider } from './context/ThemeContext'
 import { RefreshProvider } from './context/RefreshContext'
 import { PersonalDataPage } from './pages/PersonalDataPage'
+import { ToastProvider } from './context/ToastContext'
 
 function ProtectedApp() {
   const { user, loading } = useAuth()
@@ -60,5 +61,5 @@ function AppRoutes() {
 }
 
 export function App() {
-  return <ThemeProvider><AuthProvider><RefreshProvider><AppRoutes /></RefreshProvider></AuthProvider></ThemeProvider>
+  return <ThemeProvider><AuthProvider><ToastProvider><RefreshProvider><AppRoutes /></RefreshProvider></ToastProvider></AuthProvider></ThemeProvider>
 }

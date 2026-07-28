@@ -36,6 +36,13 @@ class StructuredGeneration(FrozenModel):
     metadata: GenerationMetadata
 
 
+class TextGeneration(FrozenModel):
+    """A completed text generation with normalized usage metadata."""
+
+    text: str
+    metadata: GenerationMetadata
+
+
 class StructuredLLMClient(Protocol):
     async def generate_structured(
         self,

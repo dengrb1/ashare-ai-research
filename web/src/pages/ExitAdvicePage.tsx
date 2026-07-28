@@ -1,77 +1,61 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
-import { Empty, ErrorNotice, formatAmount, formatNumber, formatTime, Loading, Panel, StatusPill } from '../components/Ui'
-import type { ExitAdvice } from '../types'
+import { Empty, ErrorNotice, formatNumber, formatTime, Loading, Panel } from '../components/Ui'
+import type { AssetState, TradeAdviceMonitor } from '../types'
 
-function actionLabel(value?: string | null, status?: string) {
-  if (status === 'PENDING' || status === 'QUEUED' || status === 'RUNNING') return '研究中'
-  if (status === 'FAILED') return '生成失败'
-  if (status === 'UNAVAILABLE') return '模型暂不可用'
-  return value === 'SELL' ? '卖出' : value === 'REDUCE' ? '分批减仓' : value === 'HOLD' ? '继续持有' : '等待研究'
-}
-
-function failureMessage(row: ExitAdvice) {
-  if (row.status === 'UNAVAILABLE' || row.error_message === 'MODEL_UNAVAILABLE') return '模型服务当前不可用，未生成退出研究；持仓没有被修改或自动卖出。'
-  return '本次退出研究处理失败，未生成退出建议；持仓没有被修改或自动卖出。'
-}
-
-const BLOCKER_LABELS: Record<string, string> = {
-  T1_NOT_SELLABLE: '当日买入，T+1 禁止卖出',
-  MISSING_ACQUIRED_ON: '缺少买入日期，禁止卖出',
-  TRADING_RULE_CONTEXT_MISSING: '交易规则上下文缺失',
-}
+const numberValue = (value?: number | string | null) => value == null ? '—' : `¥ ${formatNumber(Number(value))}`
 
 export function ExitAdvicePage() {
-  const [rows, setRows] = useState<ExitAdvice[]>([])
-  const [selected, setSelected] = useState<ExitAdvice | null>(null)
+  const [assets, setAssets] = useState<AssetState | null>(null)
+  const [rows, setRows] = useState<TradeAdviceMonitor[]>([])
+  const [drafts, setDrafts] = useState<Record<string, { buy: string; sell: string }>>({})
   const [loading, setLoading] = useState(true)
-  const [retrying, setRetrying] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
     let active = true
-    const load = () => api.exitAdvice().then((items) => {
-      if (!active) return
-      setRows(items); setSelected((current) => items.find((item) => item.advice_id === current?.advice_id) || items[0] || null); setError('')
-    }).catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : '卖出建议加载失败') }).finally(() => { if (active) setLoading(false) })
+    const load = async () => {
+      try {
+        const [nextAssets, monitors] = await Promise.all([api.assets(), api.tradeAdviceMonitors()])
+        if (!active) return
+        setAssets(nextAssets); setRows(monitors)
+        setDrafts(Object.fromEntries(monitors.map(item => [item.symbol, { buy: item.manual_buy_price?.toString() || '', sell: item.manual_sell_price?.toString() || '' }])))
+        setError('')
+      } catch (reason) { if (active) setError(reason instanceof Error ? reason.message : '交易建议加载失败') }
+      finally { if (active) setLoading(false) }
+    }
     void load(); const timer = window.setInterval(load, 15_000)
     return () => { active = false; window.clearInterval(timer) }
   }, [])
 
-  const result = selected?.result || {}
-  const ladder = Array.isArray(result.sell_ladder) ? result.sell_ladder as Array<Record<string, unknown>> : []
-  const blockers = Array.isArray(result.execution_blockers) ? result.execution_blockers as string[] : []
-  const failed = selected?.status === 'FAILED' || selected?.status === 'UNAVAILABLE'
-
-  async function retry() {
-    if (!selected || retrying) return
-    setRetrying(true); setError('')
+  const bySymbol = new Map(rows.map(row => [row.symbol, row]))
+  async function save(symbol: string, enabled: boolean, useAi = false) {
+    const current = bySymbol.get(symbol)
+    const draft = drafts[symbol] || { buy: '', sell: '' }
+    const buy = useAi ? Number(current?.ai_buy_price) : (draft.buy ? Number(draft.buy) : null)
+    const sell = useAi ? Number(current?.ai_sell_price) : (draft.sell ? Number(draft.sell) : null)
     try {
-      const created = await api.submitManualExitAdvice(selected.symbol)
-      setRows((current) => [created, ...current.filter((item) => item.advice_id !== created.advice_id)])
-      setSelected(created)
-    } catch (reason) { setError(reason instanceof Error ? reason.message : '重新发起退出研究失败') }
-    finally { setRetrying(false) }
+      const saved = await api.saveTradeAdviceMonitor({ symbol, enabled, manual_buy_price: Number.isFinite(buy) ? buy : null, manual_sell_price: Number.isFinite(sell) ? sell : null })
+      setRows(currentRows => [...currentRows.filter(item => item.symbol !== symbol), saved].sort((a, b) => a.symbol.localeCompare(b.symbol)))
+      setDrafts(currentDrafts => ({ ...currentDrafts, [symbol]: { buy: saved.manual_buy_price?.toString() || '', sell: saved.manual_sell_price?.toString() || '' } }))
+    } catch (reason) { setError(reason instanceof Error ? reason.message : '保存失败') }
   }
 
   return <div className="page-stack">
     <ErrorNotice message={error} />
-    {loading ? <Loading label="正在读取盘中盈利研究" /> : <div className="exit-advice-layout">
-      <Panel title="触发记录" eyebrow="PROFIT TRIGGERS">
-        {rows.length ? <div className="advice-list">{rows.map((row) => <button key={row.advice_id} className={selected?.advice_id === row.advice_id ? 'active' : ''} onClick={() => setSelected(row)}>
-          <div><strong>{String((row.position_snapshot.name as string) || row.symbol)}</strong><small>{row.symbol} · {formatTime(row.decision_at)}</small></div>
-          <div><StatusPill status={row.status} /><strong>{actionLabel(row.action, row.status)}</strong><small>浮盈 ¥ {formatAmount(Number(row.unrealized_profit))}</small></div>
-        </button>)}</div> : <Empty title="暂无卖出建议" description="在持仓页启用监控并设置盈利触发金额后，交易时段每 5 分钟检查。" />}
-      </Panel>
-      <Panel title="AI 分档卖出方案" eyebrow="EXIT LADDER">
-        {!selected ? <Empty /> : <div className="page-stack">
-          <div className="summary-grid compact"><div><span>当前价</span><strong>¥ {formatNumber(Number(selected.current_price))}</strong></div><div><span>触发线</span><strong>¥ {formatAmount(Number(selected.trigger_amount))}</strong></div><div><span>AI 结论</span><strong>{actionLabel(selected.action, selected.status)}</strong></div><div><span>调用</span><strong>{selected.cache_hit ? '缓存命中' : '新生成'}</strong></div></div>
-          {typeof result.summary === 'string' && <div className="advice-summary"><strong>研究结论</strong><p>{result.summary}</p></div>}
-          {failed ? <div className="failure-box"><strong>{selected.status === 'UNAVAILABLE' ? '模型暂不可用' : '退出研究生成失败'}</strong><p>{failureMessage(selected)}</p><button className="secondary" disabled={retrying} onClick={() => void retry()}>{retrying ? '正在重新发起…' : '重新发起研究'}</button></div> : ladder.length ? <div className="table-wrap"><table><thead><tr><th>目标价</th><th>卖出数量</th><th>预计金额</th><th>状态</th><th>依据</th></tr></thead><tbody>{ladder.map((item, index) => <tr key={index}><td>¥ {item.target_price as string}</td><td>{String(item.quantity)} 股</td><td>¥ {formatAmount(Number(item.estimated_gross_proceeds))}</td><td>{item.status === 'READY_FOR_CONFIRMATION' ? '待用户确认' : '已阻断'}</td><td>{String(item.reason || '')}</td></tr>)}</tbody></table></div> : <Empty title={selected.status === 'PENDING' || selected.status === 'QUEUED' || selected.status === 'RUNNING' ? '研究正在生成' : '暂无可执行分档'} />}
-          {!!blockers.length && <div className={`warning-box ${blockers.includes('T1_NOT_SELLABLE') ? 't1-warning' : ''}`}><strong>{blockers.includes('T1_NOT_SELLABLE') ? '高优先级限制：当日买入，T+1 禁止卖出' : '模拟卖出门禁未通过'}</strong><p>{blockers.map((item) => BLOCKER_LABELS[item] || item).join('、')}。系统不会自动修改持仓。</p></div>}
-          <p className="form-hint">模型：{selected.model_name || '—'} · 思考强度：{selected.reasoning_effort || '—'} · 仅模拟方案，不接入实盘。</p>
-        </div>}
-      </Panel>
-    </div>}
+    {loading ? <Loading label="正在读取交易建议" /> : <Panel title="交易建议" eyebrow="BUY · SELL · STOP LOSS">
+      <p className="form-hint">仅面向自选股的模拟建议。交易日 09:30 后生成，页面实时刷新；命中目标时每 5 分钟持续提醒，不会自动交易。</p>
+      {!assets?.watchlist.length ? <Empty title="暂无自选股" description="请先在行情或资产页面添加自选股。" /> : <div className="page-stack">
+        {assets.watchlist.map(symbol => {
+          const row = bySymbol.get(symbol); const draft = drafts[symbol] || { buy: '', sell: '' }
+          return <div className="panel" key={symbol}><div className="split-row"><div><strong>{symbol}</strong><p className="form-hint">{row?.generated_at ? `当日建议：${formatTime(row.generated_at)}` : '开启后将在下一个交易日 09:30 后生成建议'}</p></div><label><input type="checkbox" checked={row?.enabled || false} onChange={event => void save(symbol, event.target.checked)} /> 开启自动建议</label></div>
+            {row?.enabled && <div className="summary-grid compact"><div><span>AI 买入目标</span><strong>{numberValue(row.ai_buy_price)}</strong></div><div><span>AI 卖出目标</span><strong>{numberValue(row.ai_sell_price)}</strong></div><div><span>止损价</span><strong>{numberValue(row.stop_loss_price)}</strong></div><div><span>提醒状态</span><strong>{row.last_alert_types.join('、') || '监控中'}</strong></div></div>}
+            {Boolean(row?.rationale?.summary) && <p className="form-hint">{String(row?.rationale?.summary)}</p>}
+            <div className="form-grid"><label>自定义买入价<input inputMode="decimal" value={draft.buy} onChange={event => setDrafts(value => ({ ...value, [symbol]: { ...draft, buy: event.target.value } }))} /></label><label>自定义卖出价<input inputMode="decimal" value={draft.sell} onChange={event => setDrafts(value => ({ ...value, [symbol]: { ...draft, sell: event.target.value } }))} /></label></div>
+            <div className="button-row"><button onClick={() => void save(symbol, row?.enabled || false)}>保存自定义价格</button><button className="secondary" disabled={!row?.ai_buy_price || !row?.ai_sell_price} onClick={() => void save(symbol, row?.enabled || false, true)}>采用 AI 价格</button></div>
+          </div>
+        })}
+      </div>}
+    </Panel>}
   </div>
 }

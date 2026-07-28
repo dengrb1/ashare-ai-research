@@ -839,6 +839,39 @@ class BuyEntryMonitorRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class TradeAdviceMonitorRow(Base):
+    """User-controlled daily buy/sell targets for one watched security."""
+
+    __tablename__ = "trade_advice_monitors"
+    __table_args__ = (
+        UniqueConstraint("user_id", "symbol", name="uq_trade_advice_monitor_user_symbol"),
+        Index("ix_trade_advice_monitor_enabled", "enabled", "symbol"),
+    )
+
+    monitor_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.user_id", ondelete="CASCADE"), nullable=False
+    )
+    symbol: Mapped[str] = mapped_column(String(9), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    manual_buy_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    manual_sell_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    ai_buy_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    ai_sell_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    stop_loss_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    rationale: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    generated_for: Mapped[date | None] = mapped_column(Date)
+    generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    model_name: Mapped[str | None] = mapped_column(String(128))
+    model_source: Mapped[str | None] = mapped_column(String(16))
+    model_config_sha256: Mapped[str | None] = mapped_column(String(64))
+    last_alert_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_alert_types: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    error_code: Mapped[str | None] = mapped_column(String(48))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class AIChatThread(Base):
     __tablename__ = "ai_chat_threads"
     __table_args__ = (
