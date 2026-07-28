@@ -101,9 +101,57 @@ docker compose -p ashare-ai-src -f compose.yaml exec -T api \
 
 返回 `200` 即表示应用可访问服务器内的 SearXNG。不要把 SearXNG 改为家中电脑的地址，也不要为它增加公网 `ports`。AI 问答只会向该服务发送搜索词，不会把数据库凭据或任意内网访问权交给模型。
 
-## 5. 配置 HTTPS
+## 5. 可选低内存 HTTPS 边缘网关
 
-Compose 默认只在 `127.0.0.1:80` 暴露 Web，API、PostgreSQL 和 Redis 也只绑定本机。在同机用 Caddy、Nginx 或云负载均衡器终止 TLS。Caddy 最小示例：
+默认 Compose 只在 `127.0.0.1:80` 暴露 Web，API、PostgreSQL 和 Redis 也只绑定本机。若希望由本仓库提供 HTTPS 终止层，可启用独立的 `edge-gateway` profile；不启用时，原有 Caddy、Nginx 或云负载均衡器方案保持不变。
+
+启用前，完成下列前提：
+
+- `EDGE_DOMAIN` 的 DNS A/AAAA 记录已指向此服务器；
+- `.env` 中设置 `EDGE_DOMAIN` 与用于 ACME 账号恢复通知的 `EDGE_ACME_EMAIL`。
+
+```env
+EDGE_DOMAIN=research.example.com
+EDGE_ACME_EMAIL=ops@example.com
+EDGE_FRPC_ENABLED=false
+```
+
+首次启动会以 ACME HTTP-01 自动申请 ECDSA P-256 证书，证书和 ACME 账号保存在 Compose 的 `edge-certificates`、`edge-acme-data` 卷中：
+
+```bash
+docker compose -p ashare-ai-src -f compose.yaml --profile edge up -d --build
+docker compose -p ashare-ai-src -f compose.yaml --profile edge ps edge-gateway
+docker compose -p ashare-ai-src -f compose.yaml --profile edge logs --tail 100 edge-gateway
+```
+
+该服务只代理到 Compose 内的 `web:80`，不映射宿主机端口；FRP 直接连接同一容器的 `127.0.0.1:80/443`。HTTP 除 ACME challenge 外均跳转 HTTPS；TLS 仅允许 1.2/1.3，未知 Host/SNI 会被拒绝。它会覆盖客户端提交的 `X-Forwarded-For`，使应用既有登录限流和审计不会被伪造来源 IP 绕过。网关不增加第二套登录机制，继续使用应用的 Cookie/Bearer 鉴权。
+
+容器运行单个 Nginx worker，限制为 64 MiB 和 32 个 PID；acme.sh 仅在启动与周期续期时运行。请定期备份两个 edge 卷，且不要用 `docker compose down -v` 删除它们。
+
+### 可选 frpc 客户端
+
+网关不部署 frps。若服务器需要通过已有外部 frps 暴露，复制 `docker/edge-gateway/frpc.toml.example` 到未跟踪的私有路径，填入真实 frps 地址、token 和域名；该配置中的两个代理必须分别指向同容器的 `127.0.0.1:80` 与 `127.0.0.1:443`。外部 frps 必须配置 `vhostHTTPPort=80` 与 `vhostHTTPSPort=443`，以便 HTTP-01 和 TLS 透传均能到达网关。
+
+```env
+EDGE_FRPC_ENABLED=true
+EDGE_FRPC_CONFIG_FILE=./.secrets/edge-frpc.toml
+```
+
+`frpc.toml` 包含 token，绝不能提交、打印或放入 `*.example`。启用 `frpc` 前确认它只能声明你授权暴露的代理。关闭隧道只需设回 `EDGE_FRPC_ENABLED=false` 并重建 `edge-gateway`；不会删除证书卷。
+
+### 本机拓扑控制器（Windows）
+
+在 Windows Docker Desktop 部署中，执行以下安装脚本一次。它生成仅保存在 `.env`/`.secrets` 的随机能力令牌，并注册每分钟运行一次的 Windows 计划任务；任务不是常驻容器，不会持续占用 Docker 内存。它只读取 `research_execution_mode` 和 `edge_gateway_enabled` 的期望值，自动同步 `dual-research` 与 `edge` profile。
+
+```powershell
+.\scripts\install-topology-controller.ps1
+```
+
+系统设置中的“公网边缘网关（FRP）”默认关闭。先填写 `EDGE_ACME_EMAIL`、确认 DNS 已生效，再在系统设置解锁后开启它。控制器日志保存在未跟踪的 `.secrets\topology-controller.log`；删除计划任务可运行 `schtasks /Delete /TN AshareAiTopologyController /F`。
+
+## 6. 使用外部 TLS 反向代理
+
+不启用 `edge` profile 时，可继续在同机用 Caddy、Nginx 或云负载均衡器终止 TLS。Caddy 最小示例：
 
 ```caddyfile
 research.example.com {
@@ -113,7 +161,7 @@ research.example.com {
 
 启用 HTTPS 后访问 `https://research.example.com`。不要直接把 `8000`、`5432`、`6379` 或 SearXNG 端口暴露到公网。
 
-## 6. 直接使用 GHCR 镜像
+## 7. 直接使用 GHCR 镜像
 
 不在服务器编译应用时，使用基础 Compose 加 GHCR 覆盖文件：
 
@@ -125,7 +173,7 @@ docker compose -p ashare-ai -f compose.yaml -f compose.ghcr.yaml ps
 
 默认拉取本仓库的 `latest` 镜像。Fork 部署可在 `.env` 中设置 `ASHARE_APP_IMAGE`、`ASHARE_WEB_IMAGE` 和 `ASHARE_POSTGRES_IMAGE`。私有 GHCR Package 需先执行 `docker login ghcr.io`。
 
-## 7. 升级
+## 8. 升级
 
 升级前先备份 PostgreSQL：
 
@@ -154,7 +202,7 @@ docker compose -p ashare-ai -f compose.yaml -f compose.ghcr.yaml ps
 
 不要在升级时执行 `docker compose down -v`；`-v` 会删除 PostgreSQL、Redis、lake 和对象数据卷。数据库迁移为向前演进，如需回退应使用升级前备份，不要只切回旧镜像后继续写入新结构数据库。
 
-## 8. 常用运维命令
+## 9. 常用运维命令
 
 ```bash
 # 服务状态
@@ -180,7 +228,7 @@ docker ps -a
 
 先恢复 PostgreSQL、Redis 和 SearXNG 并等待健康检查通过，再启动 API/Worker。`Exited (0)` 且日志含 `SIGTERM` 通常表示容器被正常停止，不等同于 OOM。
 
-## 9. 默认 Worker 与并行扩展
+## 10. 默认 Worker 与并行扩展
 
 默认 `job-worker` 串行处理研究、交易方案和回测，独立的 `exit-advice-worker` 处理卖出建议，避免被长任务阻塞。重任务、退出建议和周期清理都在短生命周期子进程中执行，父进程不会保留其科学计算堆。此时 `research-worker` 属于未启用的 `dual-research` profile，不会创建容器。通过系统设置保存 `DUAL`，确认没有活动研究或回测后，再执行页面返回的命令（或等效命令）：
 

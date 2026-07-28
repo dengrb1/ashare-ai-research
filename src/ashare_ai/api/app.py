@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hmac
 import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -2157,13 +2158,14 @@ def _system_settings_response(db: Session) -> SystemSettingsResponse:
             "workers": workers,
             "queues": queues,
             "compose_restart_command": _system_settings_restart_command(
-                str(saved_values["research_execution_mode"])
+                str(saved_values["research_execution_mode"]),
+                bool(saved_values["edge_gateway_enabled"]),
             ),
         }
     )
 
 
-def _system_settings_restart_command(execution_mode: str) -> str:
+def _system_settings_restart_command(execution_mode: str, edge_gateway_enabled: bool = False) -> str:
     """Return the operator command required to apply a persisted topology.
 
     Compose profiles are evaluated before a container runs, whereas the
@@ -2172,12 +2174,34 @@ def _system_settings_restart_command(execution_mode: str) -> str:
     """
 
     prefix = "docker compose -p ashare-ai-src -f compose.yaml"
-    if execution_mode == "DUAL":
-        return f"{prefix} --profile dual-research up -d --force-recreate job-worker research-worker"
-    return (
-        f"{prefix} --profile dual-research stop research-worker; "
-        f"{prefix} up -d --force-recreate job-worker"
+    worker_command = (
+        f"{prefix} --profile dual-research up -d --force-recreate job-worker research-worker"
+        if execution_mode == "DUAL"
+        else (
+            f"{prefix} --profile dual-research stop research-worker; "
+            f"{prefix} up -d --force-recreate job-worker"
+        )
     )
+    if edge_gateway_enabled:
+        return f"{worker_command}; {prefix} --profile edge up -d --force-recreate edge-gateway"
+    return worker_command
+
+
+@app.get("/api/internal/topology-desired")
+def topology_desired(request: Request, db: DbSession) -> dict[str, str | bool]:
+    """Return only the desired Compose topology to the local task scheduler."""
+
+    expected = get_settings().topology_controller_token
+    received = request.headers.get("X-Topology-Controller-Token", "")
+    if not expected:
+        raise HTTPException(status_code=503, detail="topology controller is not configured")
+    if not hmac.compare_digest(received, expected):
+        raise HTTPException(status_code=403, detail="topology controller is not authorized")
+    runtime = SystemConfigurationService().resolve(db)
+    return {
+        "research_execution_mode": runtime.settings.research_execution_mode,
+        "edge_gateway_enabled": runtime.settings.edge_gateway_enabled,
+    }
 
 
 def _system_settings_payload(

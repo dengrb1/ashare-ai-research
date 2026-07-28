@@ -1,0 +1,21 @@
+# Copy this file to an untracked location and replace every placeholder.
+# The external frps must set vhostHTTPPort=80 and vhostHTTPSPort=443.
+serverAddr = "frps.example.com"
+serverPort = 7000
+
+auth.method = "token"
+auth.token = "replace-with-a-secret-token"
+
+[[proxies]]
+name = "ashare-edge-http"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 80
+customDomains = ["research.example.com"]
+
+[[proxies]]
+name = "ashare-edge-https"
+type = "https"
+localIP = "127.0.0.1"
+localPort = 443
+customDomains = ["research.example.com"]

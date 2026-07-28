@@ -8,6 +8,7 @@ __pycache__/
 htmlcov/
 .env
 .env.docker
+.secrets/
 .codex/config.toml
 data/
 artifacts/

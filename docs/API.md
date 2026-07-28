@@ -456,7 +456,7 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 
 `PUT /api/v1/admin/system-settings` 接收 `SystemSettingsRequest` 的任意非空子集，支持 `Idempotency-Key`。每次成功保存均创建一个新的不可变 PostgreSQL 版本；同一个键与同一请求体重试不会创建第二个版本，同键不同请求体返回 `409`。可编辑公开字段包括：
 
-- `research_execution_mode=SERIAL|DUAL` 与 `llm_agent_max_concurrency=1..4`；
+- `research_execution_mode=SERIAL|DUAL`、`llm_agent_max_concurrency=1..4` 与 `edge_gateway_enabled`；
 - 对象存储 endpoint/bucket/TLS，SearXNG 地址/超时/结果数；
 - 行情、金融检索缓存与并发/限流；
 - 每日研究启动与重试间隔、旧版重试窗口兼容值、Worker lease、AKShare 参数、数据包模式、演示数据开关、最低上市日和成交额；旧版窗口仅保持读取/写入兼容，自动补数统一在权威交易日历确定的下一交易日 09:25（上海时间）截止；
@@ -472,7 +472,7 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 docker compose -p ashare-ai-src -f compose.yaml --profile dual-research up -d --force-recreate job-worker research-worker
 ```
 
-其他系统设置会在下一次 API 请求、Worker 轮询或任务启动时加载。系统设置 API 不拥有 Docker socket，不能直接重启或扩缩容容器。
+其他系统设置会在下一次 API 请求、Worker 轮询或任务启动时加载。默认不会创建 `edge-gateway`。安装本机拓扑控制器后，保存 `research_execution_mode` 或 `edge_gateway_enabled` 会由该受限的本机计划任务自动同步对应的 Compose profile；API 仍不拥有 Docker socket。
 
 ## 7. 研究结果、报告和 Trade Plan
 

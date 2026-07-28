@@ -154,6 +154,7 @@ class SystemSettingsRequest(BaseModel):
     """Partial admin update; omitted fields retain their active override."""
 
     research_execution_mode: Literal["SERIAL", "DUAL"] | None = None
+    edge_gateway_enabled: bool | None = None
     llm_agent_max_concurrency: int | None = Field(default=None, ge=1, le=4)
     object_store_endpoint: str | None = Field(default=None, max_length=2048)
     object_store_bucket: str | None = Field(default=None, min_length=1, max_length=255)

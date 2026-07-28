@@ -97,6 +97,10 @@ class Settings(BaseSettings):
     # workers, so its aggregate maximum is always two times this value.
     llm_agent_max_concurrency: int = Field(default=4, ge=1, le=4)
     research_execution_mode: Literal["SERIAL", "DUAL"] = "SERIAL"
+    edge_gateway_enabled: bool = False
+    # Deployment-only capability for the local host task which applies
+    # Compose profiles.  It is never stored in system-configuration history.
+    topology_controller_token: str | None = None
     # The model gateway is an infrastructure capacity, not a user-editable
     # model credential.  It remains environment/Compose managed and lets the
     # control plane fail closed before enabling two research consumers.

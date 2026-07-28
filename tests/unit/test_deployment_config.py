@@ -49,6 +49,40 @@ def test_compose_declares_low_memory_control_plane() -> None:
     assert services["redis"]["ports"] == [f"{service_loopback}:6379:6379"]
 
 
+def test_optional_edge_gateway_is_isolated_and_memory_bounded() -> None:
+    compose = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
+    edge = compose["services"]["edge-gateway"]
+    assert edge["profiles"] == ["edge"]
+    assert edge["mem_limit"] == "64m"
+    assert edge["pids_limit"] == 32
+    assert edge["read_only"] is True
+    assert "ports" not in edge
+    assert edge["depends_on"] == {"web": {"condition": "service_healthy"}}
+    assert edge["environment"]["EDGE_FRPC_ENABLED"] == "${EDGE_FRPC_ENABLED:-false}"
+    assert edge["security_opt"] == ["no-new-privileges:true"]
+    assert "NET_BIND_SERVICE" in edge["cap_add"]
+    assert "edge-acme-data:/var/lib/acme" in edge["volumes"]
+    assert "edge-certificates:/etc/edge/certs" in edge["volumes"]
+
+
+def test_edge_gateway_pins_downloads_and_sanitizes_forwarded_headers() -> None:
+    dockerfile = (ROOT / "docker" / "edge-gateway.Dockerfile").read_text(encoding="utf-8")
+    nginx = (ROOT / "docker" / "edge-gateway" / "edge.conf.template").read_text(encoding="utf-8")
+    entrypoint = (ROOT / "docker" / "edge-gateway" / "entrypoint.sh").read_text(encoding="utf-8")
+    assert "FRP_VERSION=0.68.0" in dockerfile
+    assert "FRP_SHA256=" in dockerfile
+    assert "ACME_SH_VERSION=3.1.1" in dockerfile
+    assert "ACME_SH_SHA256=" in dockerfile
+    assert "sha256sum -c -" in dockerfile
+    assert "ssl_protocols TLSv1.2 TLSv1.3" in nginx
+    assert "ssl_reject_handshake on" in nginx
+    assert "proxy_set_header X-Forwarded-For $remote_addr" in nginx
+    assert "$proxy_add_x_forwarded_for" not in nginx
+    assert "proxy_buffering off" in nginx
+    assert "--keylength ec-256" in entrypoint
+    assert "EDGE_FRPC_ENABLED=true requires" in entrypoint
+
+
 def test_local_and_docker_environment_templates_are_separated() -> None:
     local = (ROOT / ".env.local.example").read_text(encoding="utf-8")
     docker = (ROOT / ".env.docker.example").read_text(encoding="utf-8")
