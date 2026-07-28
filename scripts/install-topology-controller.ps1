@@ -29,7 +29,7 @@ foreach ($default in @(
 Set-Content -LiteralPath $EnvFile -Value $lines -Encoding utf8
 
 $script = Join-Path $PSScriptRoot 'topology-controller.ps1'
-$taskCommand = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$script`""
+$taskCommand = "powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$script`""
 & schtasks.exe /Create /TN 'AshareAiTopologyController' /TR $taskCommand /SC MINUTE /MO 1 /F | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'failed to create the AshareAiTopologyController scheduled task' }
 & schtasks.exe /Run /TN 'AshareAiTopologyController' | Out-Null

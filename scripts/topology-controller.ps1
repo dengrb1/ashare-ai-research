@@ -2,9 +2,14 @@
 param()
 
 $ErrorActionPreference = 'Stop'
+# Docker Compose prints normal progress lines to stderr.  Treat only its exit
+# code as failure so a successful status message cannot turn into a PowerShell
+# exception under PowerShell 7.
+$PSNativeCommandUseErrorActionPreference = $false
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $TokenFile = Join-Path $ProjectRoot '.secrets\topology-controller.token'
 $LogFile = Join-Path $ProjectRoot '.secrets\topology-controller.log'
+$StateFile = Join-Path $ProjectRoot '.secrets\topology-controller.state'
 
 function Write-ControllerLog([string] $Message) {
     "$(Get-Date -Format o) $Message" | Add-Content -LiteralPath $LogFile -Encoding utf8
@@ -13,6 +18,12 @@ function Write-ControllerLog([string] $Message) {
 function Invoke-Compose([string[]] $Arguments) {
     & docker @Arguments 2>&1 | ForEach-Object { Write-ControllerLog $_ }
     if ($LASTEXITCODE -ne 0) { throw "docker compose failed with exit code $LASTEXITCODE" }
+}
+
+function Stop-ComposeServiceIfRunning([string[]] $Compose, [string] $Profile, [string] $Service) {
+    $running = & docker @($Compose + @('--profile', $Profile, 'ps', '--status', 'running', '-q', $Service)) 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "cannot inspect $Service (exit code $LASTEXITCODE)" }
+    if ($running) { Invoke-Compose ($Compose + @('--profile', $Profile, 'stop', $Service)) }
 }
 
 function Test-EdgeConfiguration {
@@ -33,25 +44,31 @@ function Test-EdgeConfiguration {
 }
 
 try {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $LogFile) | Out-Null
     if (-not (Test-Path -LiteralPath $TokenFile)) { throw 'topology controller token file is missing' }
     $token = (Get-Content -LiteralPath $TokenFile -Raw).Trim()
     if ($token.Length -lt 32) { throw 'topology controller token is invalid' }
     $desired = Invoke-RestMethod -Method Get -Uri 'http://127.0.0.1:8000/api/internal/topology-desired' -Headers @{ 'X-Topology-Controller-Token' = $token } -TimeoutSec 10
+    $desiredState = "$($desired.research_execution_mode):$($desired.edge_gateway_enabled)"
+    if ((Test-Path -LiteralPath $StateFile) -and ((Get-Content -LiteralPath $StateFile -Raw).Trim() -eq $desiredState)) {
+        exit 0
+    }
     $compose = @('compose', '-p', 'ashare-ai-src', '-f', 'compose.yaml')
     Push-Location $ProjectRoot
     try {
         if ($desired.research_execution_mode -eq 'DUAL') {
             Invoke-Compose ($compose + @('--profile', 'dual-research', 'up', '-d', '--no-build', 'job-worker', 'research-worker'))
         } else {
-            & docker @($compose + @('--profile', 'dual-research', 'stop', 'research-worker')) *> $null
+            Stop-ComposeServiceIfRunning $compose 'dual-research' 'research-worker'
             Invoke-Compose ($compose + @('up', '-d', '--no-build', 'job-worker'))
         }
         if ($desired.edge_gateway_enabled -eq $true) {
             Test-EdgeConfiguration
             Invoke-Compose ($compose + @('--profile', 'edge', 'up', '-d', '--no-build', 'edge-gateway'))
         } else {
-            & docker @($compose + @('--profile', 'edge', 'stop', 'edge-gateway')) *> $null
+            Stop-ComposeServiceIfRunning $compose 'edge' 'edge-gateway'
         }
+        Set-Content -LiteralPath $StateFile -Value $desiredState -NoNewline -Encoding ascii
     } finally {
         Pop-Location
     }
