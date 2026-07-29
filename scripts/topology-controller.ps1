@@ -2,6 +2,12 @@
 param()
 
 $ErrorActionPreference = 'Stop'
+$ProjectRoot = Split-Path -Parent $PSScriptRoot
+$Python = Join-Path $ProjectRoot '.venv\Scripts\python.exe'
+if (-not (Test-Path -LiteralPath $Python)) { $Python = 'python.exe' }
+& $Python (Join-Path $PSScriptRoot 'topology_controller.py')
+exit $LASTEXITCODE
+<#
 # Docker Compose prints normal progress lines to stderr.  Treat only its exit
 # code as failure so a successful status message cannot turn into a PowerShell
 # exception under PowerShell 7.
@@ -77,3 +83,4 @@ try {
     Write-ControllerLog "ERROR $($_.Exception.Message)"
     exit 1
 }
+#>

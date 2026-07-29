@@ -139,15 +139,21 @@ EDGE_FRPC_CONFIG_FILE=./.secrets/edge-frpc.toml
 
 `frpc.toml` 包含 token，绝不能提交、打印或放入 `*.example`。启用 `frpc` 前确认它只能声明你授权暴露的代理。关闭隧道只需设回 `EDGE_FRPC_ENABLED=false` 并重建 `edge-gateway`；不会删除证书卷。
 
-### 本机拓扑控制器（Windows）
+### 本机拓扑控制器（Windows、Linux、macOS）
 
-在 Windows Docker Desktop 部署中，执行以下安装脚本一次。它生成仅保存在 `.env`/`.secrets` 的随机能力令牌，并注册每分钟运行一次的 Windows 计划任务；任务不是常驻容器，不会持续占用 Docker 内存。任务由 `wscript.exe` 无窗口启动，并等待单次同步结束，因此不会抢占全屏应用焦点，也不会叠加多个同步进程。它只读取 `research_execution_mode` 和 `edge_gateway_enabled` 的期望值，自动同步 `dual-research` 与 `edge` profile。
+控制逻辑是跨平台 Python 程序；它只在设置发生变化时调用 Compose。平台适配仅负责每分钟的无界面调度：Windows 使用 `pythonw.exe` 计划任务，Linux 使用 `systemd --user` timer，macOS 使用 LaunchAgent。安装器不会启动容器；系统设置中“公网边缘网关（FRP）”仍默认关闭。
 
 ```powershell
+# Windows
 .\scripts\install-topology-controller.ps1
 ```
 
-系统设置中的“公网边缘网关（FRP）”默认关闭。先填写 `EDGE_ACME_EMAIL`、确认 DNS 已生效，再在系统设置解锁后开启它。控制器日志保存在未跟踪的 `.secrets\topology-controller.log`；删除计划任务可运行 `schtasks /Delete /TN AshareAiTopologyController /F`。
+```bash
+# Linux/macOS（项目虚拟环境已激活）
+python scripts/install_topology_controller.py --install
+```
+
+控制器日志保存在未跟踪的 `.secrets/topology-controller.log`。卸载分别使用 `schtasks /Delete /TN AshareAiTopologyController /F`、`systemctl --user disable --now ashare-ai-topology.timer` 或 `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/ai.ashare.topology.plist`。
 
 ## 6. 使用外部 TLS 反向代理
 

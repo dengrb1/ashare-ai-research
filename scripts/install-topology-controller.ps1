@@ -3,6 +3,12 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+$Python = Join-Path $ProjectRoot '.venv\Scripts\python.exe'
+if (-not (Test-Path -LiteralPath $Python)) { $Python = 'python.exe' }
+& $Python (Join-Path $PSScriptRoot 'install_topology_controller.py') --install
+exit $LASTEXITCODE
+<#
+$ProjectRoot = Split-Path -Parent $PSScriptRoot
 $TokenDirectory = Join-Path $ProjectRoot '.secrets'
 $TokenFile = Join-Path $TokenDirectory 'topology-controller.token'
 $EnvFile = Join-Path $ProjectRoot '.env'
@@ -35,3 +41,4 @@ if ($LASTEXITCODE -ne 0) { throw 'failed to create the AshareAiTopologyControlle
 & schtasks.exe /Run /TN 'AshareAiTopologyController' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'failed to run the AshareAiTopologyController scheduled task' }
 Write-Host 'Installed AshareAiTopologyController. It runs once per minute and has no persistent Docker container.'
+#>
