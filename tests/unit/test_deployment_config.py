@@ -63,6 +63,7 @@ def test_optional_edge_gateway_is_isolated_and_memory_bounded() -> None:
     assert "NET_BIND_SERVICE" in edge["cap_add"]
     assert "edge-acme-data:/var/lib/acme" in edge["volumes"]
     assert "edge-certificates:/etc/edge/certs" in edge["volumes"]
+    assert "/var/lib/acme-webroot:rw,noexec,nosuid,size=4m" in edge["tmpfs"]
 
 
 def test_edge_gateway_pins_downloads_and_sanitizes_forwarded_headers() -> None:
@@ -74,6 +75,8 @@ def test_edge_gateway_pins_downloads_and_sanitizes_forwarded_headers() -> None:
     assert "ACME_SH_VERSION=3.1.1" in dockerfile
     assert "ACME_SH_SHA256=" in dockerfile
     assert "sha256sum -c -" in dockerfile
+    assert "chown -R nginx:nginx /var/lib/acme" not in dockerfile
+    assert "chown -R nginx:nginx /var/cache/nginx" in dockerfile
     assert "ssl_protocols TLSv1.2 TLSv1.3" in nginx
     assert "ssl_reject_handshake on" in nginx
     assert "proxy_set_header X-Forwarded-For $remote_addr" in nginx
@@ -81,6 +84,8 @@ def test_edge_gateway_pins_downloads_and_sanitizes_forwarded_headers() -> None:
     assert "proxy_buffering off" in nginx
     assert "--keylength ec-256" in entrypoint
     assert "EDGE_FRPC_ENABLED=true requires" in entrypoint
+    assert 'chown -R nginx:nginx "$ACME_HOME"' not in entrypoint
+    assert "chown -R nginx:nginx /tmp/client_temp" in entrypoint
 
 
 def test_local_and_docker_environment_templates_are_separated() -> None:

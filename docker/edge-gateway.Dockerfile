@@ -25,9 +25,12 @@ COPY docker/edge-gateway/nginx.conf /etc/nginx/nginx.conf
 COPY docker/edge-gateway/edge.conf.template /etc/nginx/templates/edge.conf.template
 COPY docker/edge-gateway/entrypoint.sh /usr/local/bin/edge-gateway-entrypoint
 
+# ACME and certificate directories are copied into named volumes on first use.
+# They must remain root-owned because the runtime drops CAP_DAC_OVERRIDE while
+# acme.sh still runs as root.
 RUN chmod 0755 /usr/local/bin/edge-gateway-entrypoint \
     && mkdir -p /var/lib/acme /var/lib/acme-webroot /etc/edge/certs /var/cache/nginx \
-    && chown -R nginx:nginx /var/lib/acme /var/lib/acme-webroot /etc/edge/certs /var/cache/nginx
+    && chown -R nginx:nginx /var/cache/nginx
 
 EXPOSE 80 443
 ENTRYPOINT ["/usr/local/bin/edge-gateway-entrypoint"]

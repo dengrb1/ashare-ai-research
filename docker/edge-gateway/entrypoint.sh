@@ -14,8 +14,10 @@ NGINX_PID=""
 
 mkdir -p "$ACME_HOME" "$ACME_WEBROOT" "$CERT_DIR" /tmp/client_temp /tmp/proxy_temp \
   /tmp/fastcgi_temp /tmp/uwsgi_temp /tmp/scgi_temp
-chown -R nginx:nginx "$ACME_HOME" "$ACME_WEBROOT" "$CERT_DIR" /tmp/client_temp /tmp/proxy_temp \
-  /tmp/fastcgi_temp /tmp/uwsgi_temp /tmp/scgi_temp
+# The container intentionally drops DAC_OVERRIDE.  Keep ACME's persistent
+# account and certificate stores root-owned so the root-run acme.sh process can
+# create and renew keys; only Nginx's worker temp paths need nginx ownership.
+chown -R nginx:nginx /tmp/client_temp /tmp/proxy_temp /tmp/fastcgi_temp /tmp/uwsgi_temp /tmp/scgi_temp
 
 export EDGE_DOMAIN
 envsubst '${EDGE_DOMAIN}' < /etc/nginx/templates/edge.conf.template > /tmp/edge.conf
