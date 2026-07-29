@@ -27,6 +27,45 @@ x-app-service: &app-service
       max-file: "3"
 
 services:
+  # Optional public HTTPS edge. It is intentionally profile-gated so the
+  # default local stack stays loopback-only and existing external proxies keep
+  # working unchanged.
+  edge-gateway:
+    profiles: ["edge"]
+    build:
+      context: .
+      dockerfile: docker/edge-gateway.Dockerfile
+    environment:
+      EDGE_DOMAIN: "${EDGE_DOMAIN:-}"
+      EDGE_ACME_EMAIL: "${EDGE_ACME_EMAIL:-}"
+      EDGE_ACME_CA_SERVER: "${EDGE_ACME_CA_SERVER:-letsencrypt}"
+      EDGE_FRPC_ENABLED: "${EDGE_FRPC_ENABLED:-false}"
+    volumes:
+      - edge-acme-data:/var/lib/acme
+      - edge-certificates:/etc/edge/certs
+      - "${EDGE_FRPC_CONFIG_FILE:-./docker/edge-gateway/frpc.disabled.toml}:/etc/edge/frpc.toml:ro"
+    depends_on:
+      web:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=12m
+      # acme.sh and the HTTP challenge location need a writable directory even
+      # though the rest of the gateway filesystem remains read-only.
+      - /var/lib/acme-webroot:rw,noexec,nosuid,size=4m
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    cap_add: ["NET_BIND_SERVICE", "SETUID", "SETGID", "CHOWN"]
+    pids_limit: 32
+    mem_limit: 64m
+    logging: *bounded-logs
+    healthcheck:
+      test: ["CMD-SHELL", "nginx -t && pidof nginx >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
   private-data-init:
     image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
     user: "0:0"
@@ -268,6 +307,8 @@ services:
       retries: 10
 
 volumes:
+  edge-acme-data:
+  edge-certificates:
   postgres-data:
   redis-data:
   lake-data:

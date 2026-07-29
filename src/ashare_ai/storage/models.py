@@ -757,6 +757,57 @@ class NotificationRow(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class PushDeviceRow(Base):
+    """Encrypted native push registration owned by one user."""
+
+    __tablename__ = "push_devices"
+    __table_args__ = (
+        UniqueConstraint("user_id", "installation_id", name="uq_push_device_installation"),
+        Index("ix_push_device_user_active", "user_id", "disabled_at"),
+    )
+
+    device_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.user_id", ondelete="CASCADE"), nullable=False
+    )
+    installation_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider: Mapped[str] = mapped_column(String(16), nullable=False, default="MIPUSH")
+    encrypted_registration_id: Mapped[str] = mapped_column(Text, nullable=False)
+    registration_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    app_version: Mapped[str | None] = mapped_column(String(32))
+    os_version: Mapped[str | None] = mapped_column(String(32))
+    device_model: Mapped[str | None] = mapped_column(String(96))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PushDeliveryRow(Base):
+    """Transactional outbox row for a notification/device pair."""
+
+    __tablename__ = "push_deliveries"
+    __table_args__ = (
+        UniqueConstraint("notification_id", "device_id", name="uq_push_delivery_target"),
+        Index("ix_push_delivery_due", "status", "next_attempt_at"),
+    )
+
+    delivery_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    notification_id: Mapped[str] = mapped_column(
+        ForeignKey("notifications.notification_id", ondelete="CASCADE"), nullable=False
+    )
+    device_id: Mapped[str] = mapped_column(
+        ForeignKey("push_devices.device_id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    provider_message_id: Mapped[str | None] = mapped_column(String(128))
+    error_code: Mapped[str | None] = mapped_column(String(48))
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class BuyEntryMonitorRow(Base):
     """A next-session buy-range monitor derived from a formal research result."""
 
@@ -783,6 +834,39 @@ class BuyEntryMonitorRow(Base):
     trade_plan_id: Mapped[str | None] = mapped_column(ForeignKey("trade_plans.plan_id"))
     rationale: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     triggered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_code: Mapped[str | None] = mapped_column(String(48))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class TradeAdviceMonitorRow(Base):
+    """User-controlled daily buy/sell targets for one watched security."""
+
+    __tablename__ = "trade_advice_monitors"
+    __table_args__ = (
+        UniqueConstraint("user_id", "symbol", name="uq_trade_advice_monitor_user_symbol"),
+        Index("ix_trade_advice_monitor_enabled", "enabled", "symbol"),
+    )
+
+    monitor_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.user_id", ondelete="CASCADE"), nullable=False
+    )
+    symbol: Mapped[str] = mapped_column(String(9), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    manual_buy_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    manual_sell_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    ai_buy_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    ai_sell_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    stop_loss_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    rationale: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    generated_for: Mapped[date | None] = mapped_column(Date)
+    generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    model_name: Mapped[str | None] = mapped_column(String(128))
+    model_source: Mapped[str | None] = mapped_column(String(16))
+    model_config_sha256: Mapped[str | None] = mapped_column(String(64))
+    last_alert_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_alert_types: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     error_code: Mapped[str | None] = mapped_column(String(48))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

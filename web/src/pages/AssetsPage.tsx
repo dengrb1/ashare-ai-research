@@ -3,6 +3,7 @@ import { api } from '../api'
 import { MarketClosedNotice } from '../components/MarketClosedNotice'
 import { Empty, ErrorNotice, formatAmount, formatNumber, Loading, Panel } from '../components/Ui'
 import { useMarket, useQuoteSubscription } from '../context/MarketContext'
+import { useToast } from '../context/ToastContext'
 import type { BuyEntryMonitor, PaperPosition } from '../types'
 
 type PositionDraft = {
@@ -35,6 +36,7 @@ function buyMonitorStatusLabel(status: string) {
 }
 
 export function AssetsPage() {
+  const { notify } = useToast()
   const { watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, stopLossMonitorEnabled, buyMonitorEnabled, quotes, assetsLoading, assetsSaving, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings } = useMarket()
   const [watchSymbol, setWatchSymbol] = useState('')
   const [draft, setDraft] = useState<PositionDraft | null>(null)
@@ -150,7 +152,7 @@ export function AssetsPage() {
     setManualExitSymbol(symbol); setFormError('')
     try {
       await api.submitManualExitAdvice(symbol)
-      setFormError(`${symbol} 的模拟退出研究已提交，可在“卖出建议”查看进度。`)
+      notify(`${symbol} 的模拟退出研究已提交，可在“卖出建议”查看进度。`, 'success')
     } catch (error) { setFormError(error instanceof Error ? error.message : '模拟退出研究提交失败') }
     finally { setManualExitSymbol('') }
   }

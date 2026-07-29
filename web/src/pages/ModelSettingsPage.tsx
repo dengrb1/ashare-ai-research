@@ -65,6 +65,18 @@ export function ModelSettingsPage() {
     setForm((value) => ({ ...value, model_profiles: value.model_profiles.map((profile, current) => current === index ? { ...profile, ...patch } : profile) }))
   }
 
+  function addProfile(source?: ModelProfile) {
+    setForm((value) => {
+      if (value.model_profiles.length >= 32) return value
+      const profile = source ? { ...source, model: '' } : defaultProfile('')
+      return { ...value, model_profiles: [...value.model_profiles, profile] }
+    })
+  }
+
+  function removeProfile(index: number) {
+    setForm((value) => ({ ...value, model_profiles: value.model_profiles.filter((_, currentIndex) => currentIndex !== index) }))
+  }
+
   async function run(action: 'test' | 'models' | 'save', event?: FormEvent) {
     event?.preventDefault()
     setBusy(action); setError(''); setMessage('')
@@ -123,13 +135,15 @@ export function ModelSettingsPage() {
             <label>缓存读取 / 百万<input type="number" min={0} step="0.000001" value={profile.cached_input_price_per_million} onChange={(event) => updateProfile(index, { cached_input_price_per_million: event.target.value })} /></label>
             <label>缓存写入 / 百万<input type="number" min={0} step="0.000001" value={profile.cache_write_price_per_million} onChange={(event) => updateProfile(index, { cache_write_price_per_million: event.target.value })} /></label>
             <label>输出 / 百万<input type="number" min={0} step="0.000001" value={profile.output_price_per_million} onChange={(event) => updateProfile(index, { output_price_per_million: event.target.value })} /></label>
+            <div className="row-actions model-profile-actions"><button type="button" className="secondary" disabled={form.model_profiles.length >= 32} onClick={() => addProfile(profile)}>复制此档案</button><button type="button" className="danger-button" onClick={() => removeProfile(index)}>删除</button></div>
           </fieldset>)}
+          <button type="button" className="secondary" disabled={form.model_profiles.length >= 32} onClick={() => addProfile()}>＋ 添加模型档案</button>
         </div>
         <datalist id="available-models">{models.map((model) => <option key={model} value={model} />)}</datalist>
         <div className="row-actions"><button type="button" className="secondary" disabled={!!busy} onClick={() => void run('models')}>{busy === 'models' ? '读取中…' : '读取模型列表'}</button><button type="button" className="secondary" disabled={!!busy} onClick={() => void run('test')}>{busy === 'test' ? '测试中…' : '测试连接'}</button><button className="primary" disabled={!!busy}>{busy === 'save' ? '验证并保存…' : '验证并启用新版本'}</button></div>
         <ErrorNotice message={error} />
         {message && <div className="snapshot-isolation">{message}</div>}
-        <p className="form-hint">启用配置时会先执行严格 JSON Schema 的 Responses API 探测；失败时旧版本继续生效。</p>
+        <p className="form-hint">启用配置时会优先执行严格 JSON Schema 探测；兼容网关不支持时自动改用 JSON Object，并继续校验返回结构。失败时旧版本继续生效。模型档案最多可配置 32 条。</p>
       </form>
     </Panel>
   </div>

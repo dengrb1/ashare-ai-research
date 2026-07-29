@@ -121,8 +121,12 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 买入监控 | GET/PUT | `/api/v1/buy-entry-monitors` | 登录/写入、幂等 |
 | 通知 | GET | `/api/v1/notifications` | 登录、cursor 分页 |
 | 通知 | GET | `/api/v1/notifications/summary` | 登录 |
+| 通知 | GET | `/api/v1/notifications/{notification_id}` | 登录、资源归属 |
 | 通知 | POST | `/api/v1/notifications/read` | 写入、幂等 |
 | 通知 | POST | `/api/v1/notifications/read-all` | 写入、幂等 |
+| 推送设备 | POST | `/api/v1/devices` | App Bearer、注册或更新设备 |
+| 推送设备 | DELETE | `/api/v1/devices/{device_id}` | App Bearer、资源归属 |
+| 推送回执 | POST | `/api/v1/devices/{device_id}/deliveries` | App Bearer、资源归属 |
 | 证券解析 | GET | `/api/v1/securities/resolve` | 登录 |
 | AI 对话 | GET | `/api/v1/ai/models` | 登录 |
 | AI 对话 | GET | `/api/v1/ai/chat/metrics` | 登录 |
@@ -310,6 +314,8 @@ Web 登录。请求体为 `LoginRequest`：
 
 通知接口全部按用户隔离。`GET /notifications` 使用稳定的 URL-safe `cursor`，`limit` 范围 1-200，支持 `unread_only=true`；响应为 `{items,next_cursor}`。`GET /notifications/summary` 只返回未读计数、高风险未读计数和最多 5 条未读摘要，适合可见页面轮询。两个已读写接口均要求 `Idempotency-Key`。已读通知保留 90 天，未读保留 180 天，由后台分批清理。
 
+原生客户端使用 `POST /devices` 绑定小米推送 `regId`。请求包含稳定的 `installation_id`、`registration_id`、`provider=MIPUSH` 及可选设备版本信息；响应不回传 `registration_id`。服务端使用 `PERSONAL_DATA_ENCRYPTION_KEYS` 加密保存注册 ID，并由维护任务消费事务投递表。注销使用 `DELETE /devices/{device_id}`。客户端收到或打开通知后，可向 `/devices/{device_id}/deliveries` 提交 `{notification_id,status}`，其中 `status` 为 `DELIVERED` 或 `OPENED`。所有设备与回执操作均校验当前用户归属。
+
 ### 5.3 AI 对话、证券解析与指标
 
 AI 对话线程和消息均按当前用户保存。消息正文中的 `@名称`、`@6位代码` 与标准代码由服务端按已提交证券主数据逐项解析；`mention_refs` 仅是客户端提示，不能把名称绑定到不匹配的代码，重名会显式返回 `SECURITY_NAME_AMBIGUOUS`。`GET /securities/resolve?q=顺络电子` 可用于 UI 预校验。发送请求可传 `attachment_ids`、可选带时区 `decision_at` 及 `Idempotency-Key`；不传 `decision_at` 时由服务端在并行数据获取完成后冻结实时决策时点。显式历史时点只读取 PIT 合格评分与日 K，当前持仓、实时行情和新闻会在 `data_status` 中标为不可用，不会混入历史结论。
@@ -450,7 +456,7 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 
 `PUT /api/v1/admin/system-settings` 接收 `SystemSettingsRequest` 的任意非空子集，支持 `Idempotency-Key`。每次成功保存均创建一个新的不可变 PostgreSQL 版本；同一个键与同一请求体重试不会创建第二个版本，同键不同请求体返回 `409`。可编辑公开字段包括：
 
-- `research_execution_mode=SERIAL|DUAL` 与 `llm_agent_max_concurrency=1..4`；
+- `research_execution_mode=SERIAL|DUAL`、`llm_agent_max_concurrency=1..4` 与 `edge_gateway_enabled`；
 - 对象存储 endpoint/bucket/TLS，SearXNG 地址/超时/结果数；
 - 行情、金融检索缓存与并发/限流；
 - 每日研究启动与重试间隔、旧版重试窗口兼容值、Worker lease、AKShare 参数、数据包模式、演示数据开关、最低上市日和成交额；旧版窗口仅保持读取/写入兼容，自动补数统一在权威交易日历确定的下一交易日 09:25（上海时间）截止；
@@ -466,7 +472,7 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 docker compose -p ashare-ai-src -f compose.yaml --profile dual-research up -d --force-recreate job-worker research-worker
 ```
 
-其他系统设置会在下一次 API 请求、Worker 轮询或任务启动时加载。系统设置 API 不拥有 Docker socket，不能直接重启或扩缩容容器。
+其他系统设置会在下一次 API 请求、Worker 轮询或任务启动时加载。默认不会创建 `edge-gateway`。安装本机拓扑控制器后，保存 `research_execution_mode` 或 `edge_gateway_enabled` 会由该受限的本机计划任务自动同步对应的 Compose profile；API 仍不拥有 Docker socket。
 
 ## 7. 研究结果、报告和 Trade Plan
 
@@ -782,3 +788,7 @@ curl -sS "$BASE_URL/api/v1/search/financial?q=%E8%B4%B5%E5%B7%9E%E8%8C%85%E5%8F%
 - OpenAPI JSON：`GET /openapi.json`。
 
 生产环境会关闭这些公共入口；客户端契约应以本文件和版本化代码为准。
+# 交易建议监控
+
+- `GET /api/v1/trade-advice-monitors`：返回当前用户的自选股买入、卖出和止损监控，按启用状态与股票代码稳定排序。
+- `PUT /api/v1/trade-advice-monitors`：创建或更新一只自选股的监控；需要 `Idempotency-Key`。请求为 `symbol`、`enabled`、可选 `manual_buy_price` 与 `manual_sell_price`。启用不属于自选股的代码返回 `422 SYMBOL_NOT_IN_WATCHLIST`。

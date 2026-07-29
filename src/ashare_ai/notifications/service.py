@@ -11,6 +11,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from ashare_ai.core.config import Settings, get_settings
+from ashare_ai.notifications.push import enqueue_notification_deliveries
 from ashare_ai.storage.models import NotificationRow, UserAccount
 
 
@@ -58,9 +59,7 @@ class NotificationService:
                 # without depending on cleanup timing.
                 existing.notification_type = notification_type[:48]
                 existing.severity = (
-                    severity
-                    if severity in {"INFO", "WARNING", "HIGH", "CRITICAL"}
-                    else "INFO"
+                    severity if severity in {"INFO", "WARNING", "HIGH", "CRITICAL"} else "INFO"
                 )
                 existing.title = title.strip()[:160] or "系统通知"
                 existing.body = body.strip()[:4000] or "暂无详情"
@@ -87,6 +86,7 @@ class NotificationService:
         )
         self.session.add(row)
         self.session.flush()
+        enqueue_notification_deliveries(self.session, row, current)
         return row
 
     def create_for_administrators(

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, date, datetime
+from types import SimpleNamespace
 
 import pytest
 from cryptography.fernet import Fernet
@@ -99,6 +101,45 @@ def test_model_configuration_rejects_invalid_comma_hostname() -> None:
             user_id=None,
             probe=None,
         )
+
+
+def test_model_probe_checks_research_model_as_well_as_search_model(monkeypatch) -> None:
+    session, _ = _database()
+    service = ModelConfigurationService(_settings(Fernet.generate_key().decode()))
+    attempted: list[tuple[str, str]] = []
+
+    class Client:
+        def __init__(self, *, model, reasoning_effort, **_kwargs) -> None:
+            self.model = model
+            self.reasoning_effort = reasoning_effort
+
+        async def generate_structured(self, **_kwargs):
+            attempted.append((self.model, self.reasoning_effort))
+            return SimpleNamespace(output={"ok": True})
+
+        async def probe_stream(self) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        "ashare_ai.agents.model_settings.OpenAICompatibleStructuredLLMClient", Client
+    )
+
+    result = asyncio.run(
+        service.probe(
+            ModelSettingsDraft(
+                base_url="https://gateway.example/v1",
+                api_key="database-secret",
+                search_model="search-model",
+                search_reasoning_effort="low",
+                research_model="research-model",
+                research_reasoning_effort="high",
+            ),
+            session,
+        )
+    )
+
+    assert attempted == [("search-model", "low"), ("research-model", "high")]
+    assert result.reachable is True
 
 
 def test_research_manifest_pins_active_model_revision(monkeypatch, tmp_path) -> None:

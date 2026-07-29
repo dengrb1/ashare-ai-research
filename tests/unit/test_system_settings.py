@@ -28,6 +28,11 @@ class _UnlockRedis:
         return self.values.get(key)
 
 
+class _NoopMarketDataService:
+    def start(self) -> bool:
+        return True
+
+
 def _service() -> tuple[Session, SystemConfigurationService]:
     engine = create_engine("sqlite+pysqlite://")
     Base.metadata.create_all(engine)
@@ -103,6 +108,53 @@ def test_system_settings_restart_command_matches_saved_execution_mode() -> None:
         "docker compose -p ashare-ai-src -f compose.yaml --profile dual-research "
         "up -d --force-recreate job-worker research-worker"
     )
+    assert _system_settings_restart_command("SERIAL", True).endswith(
+        "docker compose -p ashare-ai-src -f compose.yaml --profile edge up -d "
+        "--force-recreate edge-gateway"
+    )
+
+
+def test_system_settings_keeps_edge_gateway_disabled_by_default() -> None:
+    session, service = _service()
+    assert service.resolve(session).settings.edge_gateway_enabled is False
+    saved = service.save(
+        session,
+        public_updates={"edge_gateway_enabled": True},
+        secret_updates={},
+        user_id=None,
+    )
+    assert saved.settings.edge_gateway_enabled is True
+    assert service.public_view(session)["sources"]["edge_gateway_enabled"] == "database"
+
+
+def test_topology_controller_endpoint_requires_its_private_capability(monkeypatch) -> None:
+    engine = create_engine(
+        "sqlite+pysqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    settings = Settings(topology_controller_token="x" * 32)
+    monkeypatch.setattr("ashare_ai.api.app.get_settings", lambda: settings)
+    monkeypatch.setattr("ashare_ai.core.system_settings.get_settings", lambda: settings)
+
+    def override_db():
+        with factory() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        client = TestClient(app)
+        assert client.get("/api/internal/topology-desired").status_code == 403
+        response = client.get(
+            "/api/internal/topology-desired", headers={"X-Topology-Controller-Token": "x" * 32}
+        )
+        assert response.status_code == 200
+        assert response.json() == {
+            "research_execution_mode": "SERIAL",
+            "edge_gateway_enabled": False,
+        }
+    finally:
+        app.dependency_overrides.clear()
 
 
 def test_system_settings_api_requires_admin_csrf_and_is_idempotent(monkeypatch) -> None:
@@ -147,6 +199,10 @@ def test_system_settings_api_requires_admin_csrf_and_is_idempotent(monkeypatch) 
     monkeypatch.setattr(
         "ashare_ai.api.app._system_worker_snapshot", lambda _hash: ("SERIAL", False, [], {})
     )
+    monkeypatch.setattr(
+        "ashare_ai.api.app.get_market_data_service", lambda: _NoopMarketDataService()
+    )
+    monkeypatch.setattr("ashare_ai.api.app.reset_market_data_service", lambda: None)
     unlock_redis = _UnlockRedis()
     monkeypatch.setattr(
         "ashare_ai.api.system_settings_unlock._redis_client", lambda: unlock_redis

@@ -862,7 +862,12 @@ class TencentHfqDailyMarketProvider:
                 raise RuntimeError("Tencent returned an invalid K-line payload")
             payload = json.loads(text[first : last + 1])
             data = payload.get("data", {}).get(provider_symbol, {})
-            rows = data.get("hfqday", [])
+            # Tencent exposes post-adjusted rows as ``hfqday`` for equities,
+            # but index symbols (including sh000300) use ``day`` despite the
+            # request's ``hfq`` adjustment parameter.  Both payloads have the
+            # same row layout.  Treating the latter as absent made otherwise
+            # valid index K-line queries fail closed.
+            rows = data.get("hfqday") or data.get("day", [])
             if not isinstance(rows, list):
                 continue
             for item in rows:

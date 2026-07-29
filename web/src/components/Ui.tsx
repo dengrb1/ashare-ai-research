@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { ErrorToast } from '../context/ToastContext'
 
 export function Panel({ title, eyebrow, action, children, className = '' }: { title?: string; eyebrow?: string; action?: ReactNode; children: ReactNode; className?: string }) {
   return <section className={`panel ${className}`}>
@@ -29,8 +30,7 @@ export function Loading({ label = '加载中' }: { label?: string }) {
 }
 
 export function ErrorNotice({ message }: { message?: string }) {
-  if (!message) return null
-  return <div className="notice error">{message}</div>
+  return <ErrorToast message={message} />
 }
 
 export function formatNumber(value?: number, digits = 2) {

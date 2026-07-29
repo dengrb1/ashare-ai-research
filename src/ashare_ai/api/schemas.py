@@ -154,6 +154,7 @@ class SystemSettingsRequest(BaseModel):
     """Partial admin update; omitted fields retain their active override."""
 
     research_execution_mode: Literal["SERIAL", "DUAL"] | None = None
+    edge_gateway_enabled: bool | None = None
     llm_agent_max_concurrency: int | None = Field(default=None, ge=1, le=4)
     object_store_endpoint: str | None = Field(default=None, max_length=2048)
     object_store_bucket: str | None = Field(default=None, min_length=1, max_length=255)
@@ -459,6 +460,39 @@ class NotificationMarkReadRequest(BaseModel):
     notification_ids: list[str] = Field(min_length=1, max_length=100)
 
 
+class PushDeviceRequest(BaseModel):
+    installation_id: str = Field(min_length=8, max_length=64)
+    registration_id: str = Field(min_length=8, max_length=512)
+    provider: Literal["MIPUSH"] = "MIPUSH"
+    app_version: str | None = Field(default=None, max_length=32)
+    os_version: str | None = Field(default=None, max_length=32)
+    device_model: str | None = Field(default=None, max_length=96)
+
+
+class PushDeviceResponse(OrmResponse):
+    device_id: str
+    installation_id: str
+    provider: str
+    app_version: str | None = None
+    os_version: str | None = None
+    device_model: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class PushDeliveryReceiptRequest(BaseModel):
+    notification_id: str = Field(min_length=1, max_length=36)
+    status: Literal["DELIVERED", "OPENED"] = "DELIVERED"
+
+
+class PushDeliveryResponse(OrmResponse):
+    delivery_id: str
+    notification_id: str
+    device_id: str
+    status: str
+    delivered_at: datetime | None = None
+
+
 class BuyEntryMonitorResponse(OrmResponse):
     monitor_id: str
     symbol: str
@@ -484,6 +518,39 @@ class BuyEntryMonitorRequest(BaseModel):
     @classmethod
     def normalize_symbol(cls, value: object) -> object:
         return value.strip().upper() if isinstance(value, str) else value
+
+
+class TradeAdviceMonitorRequest(BaseModel):
+    symbol: str = Field(pattern=r"^\d{6}\.(SH|SZ|BJ)$")
+    enabled: bool = True
+    manual_buy_price: Decimal | None = Field(default=None, gt=0, le=Decimal("10000000"))
+    manual_sell_price: Decimal | None = Field(default=None, gt=0, le=Decimal("10000000"))
+
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def normalize_symbol(cls, value: object) -> object:
+        return value.strip().upper() if isinstance(value, str) else value
+
+
+class TradeAdviceMonitorResponse(OrmResponse):
+    monitor_id: str
+    symbol: str
+    enabled: bool
+    manual_buy_price: Decimal | None = None
+    manual_sell_price: Decimal | None = None
+    ai_buy_price: Decimal | None = None
+    ai_sell_price: Decimal | None = None
+    stop_loss_price: Decimal | None = None
+    rationale: dict[str, Any] = Field(default_factory=dict)
+    generated_for: date | None = None
+    generated_at: datetime | None = None
+    model_name: str | None = None
+    model_source: str | None = None
+    last_alert_at: datetime | None = None
+    last_alert_types: list[str] = Field(default_factory=list)
+    error_code: str | None = None
+    created_at: datetime
+    updated_at: datetime
 
 
 class AIChatThreadRequest(BaseModel):

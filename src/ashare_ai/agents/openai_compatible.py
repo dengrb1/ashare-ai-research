@@ -13,7 +13,7 @@ from typing import Any, Literal
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from ashare_ai.agents.protocols import GenerationMetadata, StructuredGeneration
+from ashare_ai.agents.protocols import GenerationMetadata, StructuredGeneration, TextGeneration
 
 _CODE_FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", flags=re.DOTALL | re.IGNORECASE)
 _RETRYABLE_STATUS_CODES = frozenset({408, 409, 429, 500, 502, 503, 504})
@@ -143,6 +143,7 @@ class OpenAICompatibleStructuredLLMClient:
         }
         started = perf_counter()
         attempts = 0
+        schema_fallback_used = False
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(timeout=self._timeout)
         try:
@@ -160,11 +161,24 @@ class OpenAICompatibleStructuredLLMClient:
                     if response.status_code in _RETRYABLE_STATUS_CODES:
                         raise _RetryableResponseError(response)
                     if response.is_error:
-                        raise OpenAICompatibleError(
+                        error = OpenAICompatibleError(
                             _http_error_message(response),
                             code=_status_error_code(response.status_code),
                             status_code=response.status_code,
                         )
+                        if (
+                            not schema_fallback_used
+                            and response.status_code in {400, 404, 422}
+                        ):
+                            # A number of OpenAI-compatible gateways implement the
+                            # Responses API but only accept JSON Object mode.  The
+                            # response is still parsed and validated against the
+                            # Pydantic schema below, so this relaxes only the wire
+                            # contract and not the application's output contract.
+                            request_body["text"] = {"format": {"type": "json_object"}}
+                            schema_fallback_used = True
+                            continue
+                        raise error
                     response_data = _decode_response(response)
                     parsed_output = _parse_output(_extract_output_text(response_data))
                     try:
@@ -193,6 +207,11 @@ class OpenAICompatibleStructuredLLMClient:
                 except _RetryableResponseError as exc:
                     if attempts >= self._max_retries:
                         raise OpenAICompatibleError(_http_error_message(exc.response)) from exc
+                except httpx.TimeoutException as exc:
+                    if attempts >= self._max_retries:
+                        raise OpenAICompatibleError(
+                            "Responses API request timed out", code="MODEL_TIMEOUT", retryable=True
+                        ) from exc
                 except httpx.TransportError as exc:
                     if attempts >= self._max_retries:
                         raise OpenAICompatibleError(
@@ -205,6 +224,93 @@ class OpenAICompatibleStructuredLLMClient:
             if owns_client:
                 await client.aclose()
 
+    async def generate_structured_from_stream(
+        self,
+        *,
+        schema: type[BaseModel],
+        messages: tuple[Mapping[str, Any], ...],
+        idempotency_key: str,
+    ) -> StructuredGeneration:
+        """Collect a Responses text stream and validate its JSON output locally.
+
+        This is for compatible gateways whose streaming Responses endpoint is
+        reliable but whose synchronous strict JSON-schema endpoint is not.  The
+        wire contract is text-only; the application contract remains the given
+        Pydantic schema.
+        """
+        generation = await self.generate_json_object_from_stream(
+            messages=messages, idempotency_key=idempotency_key
+        )
+        try:
+            parsed_output = _parse_output(generation.text)
+        except OpenAICompatibleError as exc:
+            raise OpenAICompatibleError(
+                "Responses API stream output is not valid JSON",
+                code="MODEL_OUTPUT_INVALID_JSON",
+            ) from exc
+        try:
+            validated = schema.model_validate(parsed_output)
+        except ValidationError as exc:
+            raise OpenAICompatibleError(
+                f"Responses API stream output does not satisfy {schema.__name__}",
+                code="MODEL_OUTPUT_SCHEMA_INVALID",
+            ) from exc
+        return StructuredGeneration(
+            output=validated.model_dump(mode="json"),
+            metadata=generation.metadata,
+        )
+
+    async def generate_json_object_from_stream(
+        self,
+        *,
+        messages: tuple[Mapping[str, Any], ...],
+        idempotency_key: str,
+    ) -> TextGeneration:
+        """Collect a JSON-object-mode Responses stream without imposing a schema.
+
+        Some compatible gateways reliably support streaming JSON Object mode but
+        reject strict JSON Schema.  Callers must still parse and validate the
+        returned text in their own domain contract.
+        """
+        started = perf_counter()
+        chunks: list[str] = []
+        completed: Mapping[str, Any] | None = None
+        async for event in self.stream_text(
+            messages=messages,
+            idempotency_key=idempotency_key,
+            allow_degraded=True,
+            json_object=True,
+        ):
+            if event.get("type") == "delta":
+                delta = event.get("delta")
+                if isinstance(delta, str):
+                    chunks.append(delta)
+            elif event.get("type") == "completed":
+                completed = event
+        if completed is None:
+            raise OpenAICompatibleError(
+                "Responses API stream did not complete", code="MODEL_STREAM_INCOMPLETE"
+            )
+        text = "".join(chunks).strip()
+        if not text:
+            raise OpenAICompatibleError("Responses API stream contains no text")
+        return TextGeneration(
+            text=text,
+            metadata=GenerationMetadata(
+                provider=self.provider,
+                model_name=str(completed.get("model") or self._model),
+                reasoning_effort=self._reasoning_effort,
+                input_tokens=_non_negative_int(completed.get("input_tokens")),
+                cached_input_tokens=_non_negative_int(completed.get("cached_input_tokens")),
+                cache_write_tokens=_non_negative_int(completed.get("cache_write_tokens")),
+                output_tokens=_non_negative_int(completed.get("output_tokens")),
+                reasoning_tokens=_non_negative_int(completed.get("reasoning_tokens")),
+                cache_policy=self._cache_policy,
+                duration_ms=int((perf_counter() - started) * 1000),
+                retry_count=0,
+            ),
+        )
+
     async def stream_text(
         self,
         *,
@@ -213,6 +319,7 @@ class OpenAICompatibleStructuredLLMClient:
         previous_response_id: str | None = None,
         prompt_cache_key: str | None = None,
         allow_degraded: bool = True,
+        json_object: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
         """Yield normalized Responses API text deltas and a final usage event."""
         if not messages or not idempotency_key:
@@ -223,6 +330,8 @@ class OpenAICompatibleStructuredLLMClient:
             "reasoning": {"effort": self._reasoning_effort},
             "stream": True,
         }
+        if json_object:
+            request_body["text"] = {"format": {"type": "json_object"}}
         advanced_controls = self._cache_policy == "OPENAI"
         if advanced_controls and previous_response_id:
             request_body["previous_response_id"] = previous_response_id
@@ -317,6 +426,13 @@ class OpenAICompatibleStructuredLLMClient:
                             _http_error_message(exc.response),
                             code=_status_error_code(exc.response.status_code),
                             status_code=exc.response.status_code,
+                            retryable=not emitted_text,
+                        ) from exc
+                except httpx.TimeoutException as exc:
+                    if emitted_text or attempts >= self._max_retries:
+                        raise OpenAICompatibleError(
+                            "Responses API streaming request timed out",
+                            code="MODEL_TIMEOUT",
                             retryable=not emitted_text,
                         ) from exc
                 except httpx.TransportError as exc:

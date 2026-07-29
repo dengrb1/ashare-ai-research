@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hmac
 import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -115,6 +116,10 @@ from ashare_ai.api.schemas import (
     PersonalArchiveExportRequest,
     PersonalArchiveJobResponse,
     PortfolioResponse,
+    PushDeliveryReceiptRequest,
+    PushDeliveryResponse,
+    PushDeviceRequest,
+    PushDeviceResponse,
     QuoteResponse,
     RefreshTokenRequest,
     ReportBodyResponse,
@@ -140,6 +145,8 @@ from ashare_ai.api.schemas import (
     SystemSettingsUnlockRequest,
     SystemSettingsUnlockResponse,
     TokenResponse,
+    TradeAdviceMonitorRequest,
+    TradeAdviceMonitorResponse,
     TradePlanRequest,
     TradePlanResponse,
     UserCreateRequest,
@@ -158,6 +165,7 @@ from ashare_ai.core.system_settings import (
 )
 from ashare_ai.core.time import SHANGHAI, market_session
 from ashare_ai.market.service import get_market_data_service, reset_market_data_service
+from ashare_ai.notifications.push import PushConfigurationError, PushDeviceService
 from ashare_ai.notifications.service import InvalidNotificationCursor, NotificationService
 from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.observability.runtime_resources import sample_runtime_resources
@@ -211,6 +219,7 @@ from ashare_ai.storage.models import (
     ScoreRow,
     SecurityMaster,
     SnapshotManifestRow,
+    TradeAdviceMonitorRow,
     TradePlanRow,
     UserAccount,
     UserAssetState,
@@ -267,9 +276,7 @@ Writer = Annotated[AuthContext, Depends(get_write_context)]
 IdempotencyKey = Annotated[
     str | None, Header(alias="Idempotency-Key", min_length=1, max_length=128)
 ]
-SystemSettingsUnlockToken = Annotated[
-    str | None, Header(alias="X-System-Settings-Unlock")
-]
+SystemSettingsUnlockToken = Annotated[str | None, Header(alias="X-System-Settings-Unlock")]
 
 _market_session_calendar_cache: dict[date, tuple[date, ...]] = {}
 _market_session_calendar_cache_lock = Lock()
@@ -463,9 +470,7 @@ def _research_readiness_wait(trading_date: date, now: datetime) -> dict[str, str
         ready = False
     if ready:
         return None
-    sessions = FreeExchangeCalendar().sessions(
-        trading_date, trading_date + timedelta(days=14)
-    )
+    sessions = FreeExchangeCalendar().sessions(trading_date, trading_date + timedelta(days=14))
     return data_readiness_wait(
         trading_date=trading_date,
         now=current,
@@ -829,6 +834,17 @@ def update_asset_state(
             else None
         ),
     )
+    removed = set(previous["watchlist"]) - set(payload.watchlist)
+    if removed:
+        for monitor in db.scalars(
+            select(TradeAdviceMonitorRow).where(
+                TradeAdviceMonitorRow.user_id == context.user.user_id,
+                TradeAdviceMonitorRow.symbol.in_(removed),
+                TradeAdviceMonitorRow.enabled.is_(True),
+            )
+        ):
+            monitor.enabled = False
+        db.commit()
     return AssetStateResponse.model_validate(state)
 
 
@@ -1099,6 +1115,51 @@ def buy_entry_monitor_list(
     return [BuyEntryMonitorResponse.model_validate(row) for row in rows]
 
 
+@app.get("/api/v1/trade-advice-monitors", response_model=list[TradeAdviceMonitorResponse])
+def trade_advice_monitor_list(db: DbSession, context: Current) -> list[TradeAdviceMonitorResponse]:
+    rows = db.scalars(
+        select(TradeAdviceMonitorRow)
+        .where(TradeAdviceMonitorRow.user_id == context.user.user_id)
+        .order_by(TradeAdviceMonitorRow.enabled.desc(), TradeAdviceMonitorRow.symbol.asc())
+    ).all()
+    return [TradeAdviceMonitorResponse.model_validate(row) for row in rows]
+
+
+@app.put("/api/v1/trade-advice-monitors", response_model=TradeAdviceMonitorResponse)
+def save_trade_advice_monitor(
+    payload: TradeAdviceMonitorRequest,
+    db: DbSession,
+    context: Writer,
+    idempotency_key: IdempotencyKey = None,
+) -> TradeAdviceMonitorResponse:
+    if idempotency_key is None:
+        raise HTTPException(status_code=400, detail="Idempotency-Key is required")
+    assets = UserAssetService(db).get(context.user.user_id)
+    if payload.enabled and payload.symbol not in set(assets["watchlist"]):
+        raise HTTPException(status_code=422, detail="SYMBOL_NOT_IN_WATCHLIST")
+    row = db.scalar(
+        select(TradeAdviceMonitorRow).where(
+            TradeAdviceMonitorRow.user_id == context.user.user_id,
+            TradeAdviceMonitorRow.symbol == payload.symbol,
+        )
+    )
+    now = datetime.now(UTC)
+    if row is None:
+        row = TradeAdviceMonitorRow(
+            user_id=context.user.user_id, symbol=payload.symbol, created_at=now, updated_at=now
+        )
+        db.add(row)
+    row.enabled, row.manual_buy_price, row.manual_sell_price, row.updated_at = (
+        payload.enabled,
+        payload.manual_buy_price,
+        payload.manual_sell_price,
+        now,
+    )
+    db.commit()
+    db.refresh(row)
+    return TradeAdviceMonitorResponse.model_validate(row)
+
+
 @app.put("/api/v1/buy-entry-monitors", response_model=list[BuyEntryMonitorResponse])
 def update_buy_entry_monitor(
     payload: BuyEntryMonitorRequest,
@@ -1188,6 +1249,76 @@ def notification_summary(db: DbSession, context: Current) -> NotificationSummary
         high_risk_unread_count=summary["high_risk_unread_count"],
         latest=[NotificationResponse.model_validate(item) for item in summary["latest"]],
     )
+
+
+@app.get("/api/v1/notifications/{notification_id}", response_model=NotificationResponse)
+def notification_detail(
+    notification_id: str,
+    db: DbSession,
+    context: Current,
+) -> NotificationResponse:
+    from ashare_ai.storage.models import NotificationRow
+
+    row = db.scalar(
+        select(NotificationRow).where(
+            NotificationRow.notification_id == notification_id,
+            NotificationRow.user_id == context.user.user_id,
+        )
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="notification not found")
+    return NotificationResponse.model_validate(row)
+
+
+@app.post("/api/v1/devices", response_model=PushDeviceResponse)
+def register_push_device(
+    payload: PushDeviceRequest,
+    db: DbSession,
+    context: Writer,
+) -> PushDeviceResponse:
+    try:
+        row = PushDeviceService(db).register(
+            user_id=context.user.user_id,
+            installation_id=payload.installation_id,
+            registration_id=payload.registration_id,
+            app_version=payload.app_version,
+            os_version=payload.os_version,
+            device_model=payload.device_model,
+        )
+    except PushConfigurationError as exc:
+        raise HTTPException(status_code=503, detail="push registration is unavailable") from exc
+    db.commit()
+    return PushDeviceResponse.model_validate(row)
+
+
+@app.delete("/api/v1/devices/{device_id}", status_code=204)
+def unregister_push_device(device_id: str, db: DbSession, context: Writer) -> Response:
+    if not PushDeviceService(db).disable(user_id=context.user.user_id, device_id=device_id):
+        raise HTTPException(status_code=404, detail="device not found")
+    db.commit()
+    return Response(status_code=204)
+
+
+@app.post(
+    "/api/v1/devices/{device_id}/deliveries",
+    response_model=PushDeliveryResponse,
+)
+def acknowledge_push_delivery(
+    device_id: str,
+    payload: PushDeliveryReceiptRequest,
+    db: DbSession,
+    context: Writer,
+) -> PushDeliveryResponse:
+    row = PushDeviceService(db).acknowledge(
+        user_id=context.user.user_id,
+        device_id=device_id,
+        notification_id=payload.notification_id,
+        status=payload.status,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="delivery not found")
+    db.commit()
+    return PushDeliveryResponse.model_validate(row)
 
 
 @app.post("/api/v1/notifications/read", response_model=NotificationSummaryResponse)
@@ -2059,9 +2190,10 @@ def _system_worker_snapshot(
             for name, (pending, processing) in _SYSTEM_QUEUE_KEYS.items()
         }
     except Exception:
-        heartbeats, queues = [], {
-            name: {"pending": 0, "processing": 0} for name in _SYSTEM_QUEUE_KEYS
-        }
+        heartbeats, queues = (
+            [],
+            {name: {"pending": 0, "processing": 0} for name in _SYSTEM_QUEUE_KEYS},
+        )
     job_workers = [item for item in heartbeats if item.get("role") == "job-worker"]
     modes = {str(item.get("loaded_mode")) for item in job_workers}
     actual_mode = (
@@ -2085,13 +2217,16 @@ def _system_settings_response(db: Session) -> SystemSettingsResponse:
             "workers": workers,
             "queues": queues,
             "compose_restart_command": _system_settings_restart_command(
-                str(saved_values["research_execution_mode"])
+                str(saved_values["research_execution_mode"]),
+                bool(saved_values["edge_gateway_enabled"]),
             ),
         }
     )
 
 
-def _system_settings_restart_command(execution_mode: str) -> str:
+def _system_settings_restart_command(
+    execution_mode: str, edge_gateway_enabled: bool = False
+) -> str:
     """Return the operator command required to apply a persisted topology.
 
     Compose profiles are evaluated before a container runs, whereas the
@@ -2100,15 +2235,34 @@ def _system_settings_restart_command(execution_mode: str) -> str:
     """
 
     prefix = "docker compose -p ashare-ai-src -f compose.yaml"
-    if execution_mode == "DUAL":
-        return (
-            f"{prefix} --profile dual-research up -d --force-recreate "
-            "job-worker research-worker"
+    worker_command = (
+        f"{prefix} --profile dual-research up -d --force-recreate job-worker research-worker"
+        if execution_mode == "DUAL"
+        else (
+            f"{prefix} --profile dual-research stop research-worker; "
+            f"{prefix} up -d --force-recreate job-worker"
         )
-    return (
-        f"{prefix} --profile dual-research stop research-worker; "
-        f"{prefix} up -d --force-recreate job-worker"
     )
+    if edge_gateway_enabled:
+        return f"{worker_command}; {prefix} --profile edge up -d --force-recreate edge-gateway"
+    return worker_command
+
+
+@app.get("/api/internal/topology-desired")
+def topology_desired(request: Request, db: DbSession) -> dict[str, str | bool]:
+    """Return only the desired Compose topology to the local task scheduler."""
+
+    expected = get_settings().topology_controller_token
+    received = request.headers.get("X-Topology-Controller-Token", "")
+    if not expected:
+        raise HTTPException(status_code=503, detail="topology controller is not configured")
+    if not hmac.compare_digest(received, expected):
+        raise HTTPException(status_code=403, detail="topology controller is not authorized")
+    runtime = SystemConfigurationService().resolve(db)
+    return {
+        "research_execution_mode": runtime.settings.research_execution_mode,
+        "edge_gateway_enabled": runtime.settings.edge_gateway_enabled,
+    }
 
 
 def _system_settings_payload(
@@ -3368,11 +3522,11 @@ def run_activity(
         resource_type = cast(
             Literal["RESEARCH", "BACKTEST", "TRADE_PLAN", "EXIT_ADVICE"],
             {
-            "DAILY": "RESEARCH",
-            "RESEARCH": "RESEARCH",
-            "BACKTEST": "BACKTEST",
-            "TRADE_PLAN": "TRADE_PLAN",
-            "EXIT_ADVICE": "EXIT_ADVICE",
+                "DAILY": "RESEARCH",
+                "RESEARCH": "RESEARCH",
+                "BACKTEST": "BACKTEST",
+                "TRADE_PLAN": "TRADE_PLAN",
+                "EXIT_ADVICE": "EXIT_ADVICE",
             }.get(row.run_type, "RESEARCH"),
         )
         resource_id = str((row.manifest or {}).get("resource_id") or "") or None

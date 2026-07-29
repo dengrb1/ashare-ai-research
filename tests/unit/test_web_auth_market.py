@@ -7,6 +7,7 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
+from httpx import Request, Response
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
@@ -747,6 +748,32 @@ def test_default_free_fallback_recovers_quotes_and_klines(monkeypatch) -> None:
     assert daily["adjustment"] == "hfq"
     assert daily["status"]["source"] == "tencent"
     assert daily["bars"][0]["close"] == 1210.0
+
+
+def test_tencent_daily_kline_accepts_index_day_payload(monkeypatch) -> None:
+    def fake_get(*_args, **_kwargs):
+        return Response(
+            200,
+            content=(
+                b'kline_dayhfq2026={"code":0,"data":{"sh000300":{"day":'
+                b'[["2026-07-16","3500","3510","3520","3490","500",{},'
+                b'"0.1","1755000"]]}}};'
+            ),
+            request=Request("GET", "https://proxy.finance.qq.com/"),
+        )
+
+    monkeypatch.setattr("ashare_ai.market.service.httpx.get", fake_get)
+
+    rows = TencentHfqDailyMarketProvider().klines(
+        "000300.SH",
+        "daily",
+        datetime(2026, 7, 1),
+        datetime(2026, 7, 16, 23, 59),
+        120,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["close"] == 3510.0
 
 
 def test_kline_refresh_is_single_flight_across_service_instances() -> None:

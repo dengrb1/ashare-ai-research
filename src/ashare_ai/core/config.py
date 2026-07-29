@@ -97,12 +97,19 @@ class Settings(BaseSettings):
     # workers, so its aggregate maximum is always two times this value.
     llm_agent_max_concurrency: int = Field(default=4, ge=1, le=4)
     research_execution_mode: Literal["SERIAL", "DUAL"] = "SERIAL"
+    edge_gateway_enabled: bool = False
+    # Deployment-only capability for the local host task which applies
+    # Compose profiles.  It is never stored in system-configuration history.
+    topology_controller_token: str | None = None
     # The model gateway is an infrastructure capacity, not a user-editable
     # model credential.  It remains environment/Compose managed and lets the
     # control plane fail closed before enabling two research consumers.
     model_gateway_max_concurrency: int = Field(default=8, ge=1, le=128)
     model_settings_encryption_keys: str | None = None
     personal_data_encryption_keys: str | None = None
+    mipush_app_secret: str | None = None
+    mipush_package_name: str | None = None
+    mipush_api_url: str = "https://api.xmpush.xiaomi.com/v3/message/regid"
     model_allowed_hosts: str | None = None
     enable_prefect_flows: bool = False
 
@@ -184,6 +191,10 @@ class Settings(BaseSettings):
             problems.append(
                 "PERSONAL_DATA_ENCRYPTION_KEYS is required for images and personal archives"
             )
+        if bool(self.mipush_app_secret) != bool(self.mipush_package_name):
+            problems.append("MIPUSH_APP_SECRET and MIPUSH_PACKAGE_NAME must be configured together")
+        if self.mipush_app_secret and not self.mipush_api_url.startswith("https://"):
+            problems.append("MIPUSH_API_URL must use HTTPS")
         if self.allow_demo_data or self.canonical_bundle_mode == "demo":
             problems.append("demo market data is forbidden in production")
         if problems:

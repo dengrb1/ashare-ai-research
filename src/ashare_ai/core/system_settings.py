@@ -35,6 +35,7 @@ ExecutionMode = Literal["SERIAL", "DUAL"]
 PUBLIC_SETTING_FIELDS = frozenset(
     {
         "research_execution_mode",
+        "edge_gateway_enabled",
         "llm_agent_max_concurrency",
         "object_store_endpoint",
         "object_store_bucket",
@@ -76,7 +77,9 @@ SECRET_SETTING_FIELDS = frozenset(
         "object_store_secret_key",
     }
 )
-TOPOLOGY_FIELDS = frozenset({"research_execution_mode", "llm_agent_max_concurrency"})
+TOPOLOGY_FIELDS = frozenset(
+    {"research_execution_mode", "llm_agent_max_concurrency", "edge_gateway_enabled"}
+)
 _ACTIVE_RESEARCH_STATUSES = frozenset(
     {"PENDING", "QUEUED", "RUNNING", "PROCESSING", "DATA_READINESS_WAITING", "CANCEL_REQUESTED"}
 )
@@ -109,6 +112,7 @@ class SystemRuntimeSettings:
             {
                 "research_execution_mode": self.settings.research_execution_mode,
                 "llm_agent_max_concurrency": self.settings.llm_agent_max_concurrency,
+                "edge_gateway_enabled": self.settings.edge_gateway_enabled,
             }
         )
 
@@ -316,6 +320,7 @@ class SystemConfigurationService:
                     "topology": {
                         "research_execution_mode": self.settings.research_execution_mode,
                         "llm_agent_max_concurrency": self.settings.llm_agent_max_concurrency,
+                        "edge_gateway_enabled": self.settings.edge_gateway_enabled,
                     },
                 }
             ),

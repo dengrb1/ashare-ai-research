@@ -26,7 +26,7 @@ vi.mock('../api', async (importOriginal) => {
 
 import { api, streamAIChat } from '../api'
 import { NotificationBell } from '../components/NotificationBell'
-import { AIChatPage, SafeMarkdown } from '../pages/AIChatPage'
+import { AIChatPage, SafeMarkdown, appendQuickQuestion } from '../pages/AIChatPage'
 
 const thread = {
   thread_id: 'thread-1',
@@ -141,13 +141,29 @@ describe('chat safety and observability', () => {
     expect(screen.getByText(/候选优先来自持仓和自选/)).toBeInTheDocument()
   })
 
-  it('prefills a quick question without sending it', async () => {
+  it('appends a quick question without sending it', async () => {
     render(<AIChatPage />)
     const composer = await screen.findByPlaceholderText(/输入 @ 后继续输入股票名称/)
     await userEvent.click(screen.getByRole('button', { name: '生成个股省流版' }))
 
-    expect(composer).toHaveValue('请生成 @股票名称或代码 的省流版，并说明是否适合继续查看模拟方案。')
+    expect(composer).toHaveValue('请生成个股省流版，并说明是否适合继续查看模拟方案。')
     expect(streamAIChat).not.toHaveBeenCalled()
+  })
+
+  it('preserves a selected stock mention when appending a quick question', async () => {
+    render(<AIChatPage />)
+    const composer = await screen.findByPlaceholderText(/输入 @ 后继续输入股票名称/)
+    await userEvent.type(composer, '@茅')
+    await userEvent.click(await screen.findByRole('option', { name: /贵州茅台/ }))
+    await userEvent.click(screen.getByRole('button', { name: '生成个股省流版' }))
+
+    expect(composer).toHaveValue('@贵州茅台 请生成个股省流版，并说明是否适合继续查看模拟方案。')
+    expect(streamAIChat).not.toHaveBeenCalled()
+  })
+
+  it('normalizes trailing whitespace when appending quick questions', () => {
+    expect(appendQuickQuestion('分析 @贵州茅台   ', '请生成个股省流版。')).toBe('分析 @贵州茅台 请生成个股省流版。')
+    expect(appendQuickQuestion('', '请生成个股省流版。')).toBe('请生成个股省流版。')
   })
 
   it('shows a high-risk unread badge and marks all notifications read', async () => {

@@ -14,10 +14,15 @@ type MentionMatch = { query: string; start: number; end: number }
 
 const QUICK_QUESTIONS = [
   ['解读最新系统研究报告', '请解读最新系统研究报告，概括市场状态、候选概览和风险结论。'],
-  ['生成个股省流版', '请生成 @股票名称或代码 的省流版，并说明是否适合继续查看模拟方案。'],
+  ['生成个股省流版', '请生成个股省流版，并说明是否适合继续查看模拟方案。'],
   ['分析持仓风险', '请结合我的持仓、最新系统研究和风险结论，分析当前持仓风险。'],
   ['比较候选股票', '请比较 @股票A 和 @股票B 的最新系统研究结论、门禁和主要风险。'],
 ] as const
+
+export function appendQuickQuestion(draft: string, question: string) {
+  const existing = draft.trimEnd()
+  return existing ? `${existing} ${question}` : question
+}
 
 function splitGraphemes(value: string) {
   if (typeof Intl.Segmenter === 'function') {
@@ -187,10 +192,11 @@ export function AIChatPage() {
   }
 
   function useQuickQuestion(value: string) {
-    setDraft(value); setMentionCaret(value.length); setMentionMenuOpen(false)
+    const next = appendQuickQuestion(draft, value)
+    setDraft(next); setMentionCaret(next.length); setMentionMenuOpen(false)
     window.requestAnimationFrame(() => {
       composer.current?.focus()
-      composer.current?.setSelectionRange(value.length, value.length)
+      composer.current?.setSelectionRange(next.length, next.length)
     })
   }
 
