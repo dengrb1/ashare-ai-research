@@ -141,7 +141,7 @@ EDGE_FRPC_CONFIG_FILE=./.secrets/edge-frpc.toml
 
 ### 本机拓扑控制器（Windows）
 
-在 Windows Docker Desktop 部署中，执行以下安装脚本一次。它生成仅保存在 `.env`/`.secrets` 的随机能力令牌，并注册每分钟运行一次的 Windows 计划任务；任务不是常驻容器，不会持续占用 Docker 内存。它只读取 `research_execution_mode` 和 `edge_gateway_enabled` 的期望值，自动同步 `dual-research` 与 `edge` profile。
+在 Windows Docker Desktop 部署中，执行以下安装脚本一次。它生成仅保存在 `.env`/`.secrets` 的随机能力令牌，并注册每分钟运行一次的 Windows 计划任务；任务不是常驻容器，不会持续占用 Docker 内存。任务由 `wscript.exe` 无窗口启动，并等待单次同步结束，因此不会抢占全屏应用焦点，也不会叠加多个同步进程。它只读取 `research_execution_mode` 和 `edge_gateway_enabled` 的期望值，自动同步 `dual-research` 与 `edge` profile。
 
 ```powershell
 .\scripts\install-topology-controller.ps1
