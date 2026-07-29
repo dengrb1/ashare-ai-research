@@ -2224,7 +2224,9 @@ def _system_settings_response(db: Session) -> SystemSettingsResponse:
     )
 
 
-def _system_settings_restart_command(execution_mode: str, edge_gateway_enabled: bool = False) -> str:
+def _system_settings_restart_command(
+    execution_mode: str, edge_gateway_enabled: bool = False
+) -> str:
     """Return the operator command required to apply a persisted topology.
 
     Compose profiles are evaluated before a container runs, whereas the

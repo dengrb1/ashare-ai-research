@@ -31,7 +31,7 @@ def test_cli_migrate_bootstraps_empty_database_at_alembic_head(tmp_path, monkeyp
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar()
-            assert revision == "0023_mobile_push_devices"
+                assert revision == "0024_trade_advice_monitors"
             assert {
                 "exit_advice",
                 "ai_response_cache",

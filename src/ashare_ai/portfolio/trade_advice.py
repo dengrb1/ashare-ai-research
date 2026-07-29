@@ -140,25 +140,24 @@ class TradeAdviceService:
                 if quote is None or quote.get("price") is None or row.error_code:
                     continue
                 price = Decimal(str(quote["price"]))
+                buy_target = row.manual_buy_price or row.ai_buy_price
+                sell_target = row.manual_sell_price or row.ai_sell_price
+                stop_loss_target = row.stop_loss_price
                 targets = [
                     (
                         "BUY_TARGET_HIT",
-                        row.manual_buy_price or row.ai_buy_price,
-                        price <= (row.manual_buy_price or row.ai_buy_price)
-                        if (row.manual_buy_price or row.ai_buy_price)
-                        else False,
+                        buy_target,
+                        buy_target is not None and price <= buy_target,
                     ),
                     (
                         "SELL_TARGET_HIT",
-                        row.manual_sell_price or row.ai_sell_price,
-                        price >= (row.manual_sell_price or row.ai_sell_price)
-                        if (row.manual_sell_price or row.ai_sell_price)
-                        else False,
+                        sell_target,
+                        sell_target is not None and price >= sell_target,
                     ),
                     (
                         "STOP_LOSS_TRIGGERED",
-                        row.stop_loss_price,
-                        price <= row.stop_loss_price if row.stop_loss_price else False,
+                        stop_loss_target,
+                        stop_loss_target is not None and price <= stop_loss_target,
                     ),
                 ]
                 hits = [

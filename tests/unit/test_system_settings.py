@@ -28,6 +28,11 @@ class _UnlockRedis:
         return self.values.get(key)
 
 
+class _NoopMarketDataService:
+    def start(self) -> bool:
+        return True
+
+
 def _service() -> tuple[Session, SystemConfigurationService]:
     engine = create_engine("sqlite+pysqlite://")
     Base.metadata.create_all(engine)
@@ -194,6 +199,10 @@ def test_system_settings_api_requires_admin_csrf_and_is_idempotent(monkeypatch) 
     monkeypatch.setattr(
         "ashare_ai.api.app._system_worker_snapshot", lambda _hash: ("SERIAL", False, [], {})
     )
+    monkeypatch.setattr(
+        "ashare_ai.api.app.get_market_data_service", lambda: _NoopMarketDataService()
+    )
+    monkeypatch.setattr("ashare_ai.api.app.reset_market_data_service", lambda: None)
     unlock_redis = _UnlockRedis()
     monkeypatch.setattr(
         "ashare_ai.api.system_settings_unlock._redis_client", lambda: unlock_redis

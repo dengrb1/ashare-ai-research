@@ -12,34 +12,61 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe('exit advice failures', () => {
-  it('shows failure status before an empty action and creates a fresh retry request', async () => {
-    const failed = {
-      advice_id: 'failed-advice', symbol: '600519.SH', status: 'FAILED', action: null,
-      decision_at: '2026-07-20T10:00:00+08:00', available_at: '2026-07-20T10:00:00+08:00',
-      current_price: 1400, unrealized_profit: 1000, trigger_amount: 500, trigger_type: 'MANUAL',
-      position_snapshot: { symbol: '600519.SH', name: '贵州茅台' }, research_context: {}, result: { failure_code: 'PROCESSING_FAILED' },
-      cache_hit: false, created_at: '2026-07-20T10:00:00+08:00', error_message: 'PROCESSING_FAILED',
+describe('trade advice page', () => {
+  it('loads watchlist advice and saves manual prices with an idempotency key', async () => {
+    const initialMonitor = {
+      monitor_id: 'monitor-1', symbol: '600519.SH', enabled: true,
+      manual_buy_price: null, manual_sell_price: null, ai_buy_price: 1450, ai_sell_price: 1550,
+      stop_loss_price: 1350, rationale: { summary: '基于最新研究生成的模拟交易建议。' },
+      generated_for: '2026-07-29', generated_at: '2026-07-29T09:30:00+08:00',
+      model_name: 'test-model', model_source: 'fixture', last_alert_at: null, last_alert_types: [],
+      error_code: null, created_at: '2026-07-29T09:30:00+08:00', updated_at: '2026-07-29T09:30:00+08:00',
     }
+    const savedBodies: unknown[] = []
     const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
-      if (url.includes('/exit-advice/manual') && init?.method === 'POST') return jsonResponse({ ...failed, advice_id: 'retry-advice', status: 'PENDING', error_message: null }, 202)
-      if (url.includes('/exit-advice')) return jsonResponse([failed])
+      if (url.endsWith('/assets')) return jsonResponse({ watchlist: ['600519.SH'], positions: [] })
+      if (url.endsWith('/trade-advice-monitors') && init?.method === 'PUT') {
+        const body = JSON.parse(String(init.body))
+        savedBodies.push(body)
+        expect(new Headers(init.headers).get('Idempotency-Key')).toBe('manual-price-key')
+        return jsonResponse({ ...initialMonitor, ...body, updated_at: '2026-07-29T09:31:00+08:00' })
+      }
+      if (url.endsWith('/trade-advice-monitors')) return jsonResponse([initialMonitor])
       throw new Error(`unexpected request ${url} ${init?.method}`)
     })
     vi.stubGlobal('fetch', mockFetch)
-    vi.stubGlobal('crypto', { randomUUID: () => 'retry-key' })
+    vi.stubGlobal('crypto', { randomUUID: () => 'manual-price-key' })
+
     render(<ExitAdvicePage />)
 
-    expect(await screen.findByText('退出研究生成失败')).toBeInTheDocument()
-    expect(screen.getAllByText('生成失败').length).toBeGreaterThan(0)
-    expect(screen.queryByText('等待研究')).not.toBeInTheDocument()
-    expect(screen.queryByText('暂无可执行分档')).not.toBeInTheDocument()
-    await userEvent.click(screen.getByRole('button', { name: '重新发起研究' }))
-    await waitFor(() => expect(mockFetch.mock.calls.some(([url, init]) => String(url).includes('/exit-advice/manual') && init?.method === 'POST')).toBe(true))
-    const call = mockFetch.mock.calls.find(([url, init]) => String(url).includes('/exit-advice/manual') && init?.method === 'POST')
-    expect(JSON.parse(String(call?.[1]?.body))).toEqual({ symbol: '600519.SH' })
-    expect(new Headers(call?.[1]?.headers).get('Idempotency-Key')).toBe('retry-key')
-    expect((await screen.findAllByText('研究中')).length).toBeGreaterThan(0)
+    expect(await screen.findByText('600519.SH')).toBeInTheDocument()
+    expect(screen.getByText('AI 买入目标')).toBeInTheDocument()
+    expect(screen.getByText('基于最新研究生成的模拟交易建议。')).toBeInTheDocument()
+
+    await userEvent.clear(screen.getByLabelText('自定义买入价'))
+    await userEvent.type(screen.getByLabelText('自定义买入价'), '1400')
+    await userEvent.clear(screen.getByLabelText('自定义卖出价'))
+    await userEvent.type(screen.getByLabelText('自定义卖出价'), '1600')
+    await userEvent.click(screen.getByRole('button', { name: '保存自定义价格' }))
+
+    await waitFor(() => expect(savedBodies).toContainEqual({
+      symbol: '600519.SH', enabled: true, manual_buy_price: 1400, manual_sell_price: 1600,
+    }))
+  })
+
+  it('shows the empty state when no watchlist symbols are available', async () => {
+    const mockFetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/assets')) return jsonResponse({ watchlist: [], positions: [] })
+      if (url.endsWith('/trade-advice-monitors')) return jsonResponse([])
+      throw new Error(`unexpected request ${url}`)
+    })
+    vi.stubGlobal('fetch', mockFetch)
+
+    render(<ExitAdvicePage />)
+
+    expect(await screen.findByText('暂无自选股')).toBeInTheDocument()
+    expect(screen.getByText('请先在行情或资产页面添加自选股。')).toBeInTheDocument()
   })
 })
