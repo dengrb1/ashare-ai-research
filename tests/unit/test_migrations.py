@@ -31,12 +31,13 @@ def test_cli_migrate_bootstraps_empty_database_at_alembic_head(tmp_path, monkeyp
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar()
-                assert revision == "0024_trade_advice_monitors"
+                assert revision == "0025_ai_chat_compaction"
             assert {
                 "exit_advice",
                 "ai_response_cache",
                 "ai_chat_threads",
                 "ai_chat_messages",
+                "ai_chat_compactions",
                 "ai_chat_attachments",
                 "personal_archive_jobs",
                 "ai_chat_metrics",
@@ -45,6 +46,9 @@ def test_cli_migrate_bootstraps_empty_database_at_alembic_head(tmp_path, monkeyp
                 "system_configuration_versions",
                 "active_system_configuration",
             } <= tables
+            assert "compacted_history_sha256" in {
+                column["name"] for column in inspect(engine).get_columns("ai_chat_messages")
+            }
         finally:
             engine.dispose()
     finally:

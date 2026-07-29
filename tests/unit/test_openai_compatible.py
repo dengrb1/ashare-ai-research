@@ -63,6 +63,7 @@ async def test_generate_structured_posts_strict_schema_and_normalizes_code_fence
         base_url="http://llm.local",
         api_key="secret",
         model="configured-model",
+        cache_policy="OPENAI",
     )
 
     generation = await client.generate_structured(
@@ -81,11 +82,50 @@ async def test_generate_structured_posts_strict_schema_and_normalizes_code_fence
     request_json = request.content.decode()
     assert '"strict":true' in request_json
     assert '"type":"json_schema"' in request_json
+    assert json.loads(request_json)["prompt_cache_key"]
     assert generation.output == {"recommendation": "hold", "confidence": 0.7}
     assert generation.metadata.model_name == "gpt-5.6-sol"
     assert generation.metadata.input_tokens == 12
     assert generation.metadata.output_tokens == 7
     assert generation.metadata.retry_count == 0
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_structured_openai_cache_control_falls_back_for_compatible_gateway() -> None:
+    route = respx.post("http://llm.local/v1/responses").mock(
+        side_effect=[
+            httpx.Response(400, json={"error": "unknown cache field"}),
+            httpx.Response(200, json={"output_text": '{"recommendation":"hold","confidence":0.5}'}),
+        ]
+    )
+    client = OpenAICompatibleStructuredLLMClient(
+        base_url="http://llm.local",
+        api_key="secret",
+        model="gpt-test",
+        cache_policy="OPENAI",
+        max_retries=0,
+    )
+
+    generation = await client.generate_structured(
+        schema=_Result,
+        messages=(
+            {"role": "system", "content": "Return JSON."},
+            {"role": "user", "content": "Assess."},
+        ),
+        idempotency_key="structured-cache-fallback",
+    )
+
+    assert generation.output == {"recommendation": "hold", "confidence": 0.5}
+    assert route.call_count == 2
+    first = json.loads(route.calls[0].request.content)
+    second = json.loads(route.calls[1].request.content)
+    assert first["prompt_cache_key"]
+    assert "prompt_cache_key" not in second
+    assert [call.request.headers["Idempotency-Key"] for call in route.calls] == [
+        "structured-cache-fallback",
+        "structured-cache-fallback",
+    ]
 
 
 @pytest.mark.asyncio

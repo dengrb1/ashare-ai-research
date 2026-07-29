@@ -37,12 +37,29 @@ from ashare_ai.search.web import get_web_search_service
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import (
     AIChatAttachment,
+    AIChatCompaction,
     AIChatMessage,
     AIChatThread,
     AIResponseCacheRow,
 )
 
-CHAT_PROMPT_VERSION = "stock-chat-v4"
+CHAT_PROMPT_VERSION = "stock-chat-v5"
+CHAT_COMPACTION_PROMPT_VERSION = "stock-chat-compact-v1"
+MAX_CHAT_HISTORY_MESSAGES = 160
+MAX_COMPACTION_CHARS = 180_000
+CHAT_STABLE_PROMPT = (
+    "你是A股研究对话助手。只能使用系统上下文、已保存对话和联网摘要回答；"
+    "明确区分实时行情、历史研究和外部网页。不得声称执行真实交易，不得泄漏"
+    "内部路径、凭据或审计载荷。涉及买卖时给出条件、风险和数据时点，不承诺收益。"
+    "引用网页时用[来源标题](URL)。"
+)
+
+_COMPACTION_INSTRUCTIONS = """你负责压缩 A 股研究对话的早期历史。保留：
+1. 用户目标、已确认的持仓/股票与约束；
+2. 已给出的结论、数据时点、风险、待办与未解决问题；
+3. 任何图片、网页、研究报告或动态上下文中仍会影响后续回答的事实。
+不要编造数据，不要把历史行情写成实时行情，不要输出寒暄或 markdown 标题。
+输出中文、紧凑、可直接作为后续对话上下文的摘要，最多 1800 个中文字符。"""
 
 
 class ChatStreamError(RuntimeError):
@@ -524,29 +541,38 @@ async def stream_chat_response(
             "cache_hit": context_result.news_cache_hit,
         }
         context_sha = stable_hash(context)
+        profile = runtime.profile_for(model)
         # Re-read history against the final frozen live timestamp.  A browser
         # request never gets to make a newer message visible in an older turn.
         with SessionLocal() as session:
+            compaction = session.scalar(
+                select(AIChatCompaction)
+                .where(AIChatCompaction.thread_id == thread_id)
+                .order_by(AIChatCompaction.covered_through_at.desc())
+                .limit(1)
+            )
+            history_filters = [
+                AIChatMessage.thread_id == thread_id,
+                AIChatMessage.status.in_(("COMPLETED", "FAILED", "CANCELLED")),
+                AIChatMessage.available_at <= decision_at,
+                AIChatMessage.message_id.not_in(excluded_ids),
+            ]
+            if compaction is not None:
+                history_filters.append(
+                    AIChatMessage.created_at > compaction.covered_through_at
+                )
             history = list(
                 session.scalars(
                     select(AIChatMessage)
-                    .where(
-                        AIChatMessage.thread_id == thread_id,
-                        AIChatMessage.status.in_(("COMPLETED", "FAILED", "CANCELLED")),
-                        AIChatMessage.available_at <= decision_at,
-                        AIChatMessage.message_id.not_in(excluded_ids),
-                    )
+                    .where(*history_filters)
                     .order_by(AIChatMessage.created_at.desc())
-                    .limit(20)
+                    .limit(MAX_CHAT_HISTORY_MESSAGES)
                 ).all()
             )[::-1]
-        profile = runtime.profile_for(model)
-        stable_prompt = (
-            "你是A股研究对话助手。只能使用系统上下文、已保存对话和联网摘要回答；"
-            "明确区分实时行情、历史研究和外部网页。不得声称执行真实交易，不得泄漏"
-            "内部路径、凭据或审计载荷。涉及买卖时给出条件、风险和数据时点，不承诺收益。"
-            "引用网页时用[来源标题](URL)。"
-        )
+        stable_prompt = CHAT_STABLE_PROMPT
+        compacted_history_sha = _compacted_history_sha(compaction)
+        if compaction is not None:
+            stable_prompt = _with_compaction_summary(stable_prompt, compaction.summary)
         history_messages: list[dict[str, Any]] = []
         snapshots_by_user = {
             item.parent_message_id: item.private_context_snapshot
@@ -650,6 +676,110 @@ async def stream_chat_response(
                 code="CHAT_CONTEXT_TOO_LARGE",
                 request_id=request_id,
             )
+        if (
+            profile.cache_policy == "OPENAI"
+            and context_budget_status == "HISTORY_TRIMMED"
+            and len(selected_history) < len(history_messages)
+        ):
+            # Codex keeps a compacted checkpoint rather than silently discarding
+            # the oldest turns.  Do the same here: summarize the prefix once,
+            # persist it, then start a fresh Responses chain from that checkpoint.
+            omitted_count = len(history_messages) - len(selected_history)
+            compacted_prefix = history_messages[:omitted_count]
+            covered_through = history[omitted_count - 1].created_at
+            compact_source_sha = stable_hash(
+                {
+                    "previous_summary_sha256": (
+                        compaction.summary_sha256 if compaction is not None else None
+                    ),
+                    "messages": compacted_prefix,
+                    "prompt_version": CHAT_COMPACTION_PROMPT_VERSION,
+                    "model_configuration_sha256": runtime.config_sha256,
+                }
+            )
+            with SessionLocal() as session:
+                existing_compaction = session.scalar(
+                    select(AIChatCompaction).where(
+                        AIChatCompaction.thread_id == thread_id,
+                        AIChatCompaction.source_sha256 == compact_source_sha,
+                    )
+                )
+            if existing_compaction is None:
+                yield {"type": "stage", "stage": "compaction", "status": "STARTED"}
+                compaction_client = OpenAICompatibleStructuredLLMClient(
+                    base_url=runtime.base_url,
+                    api_key=runtime.api_key,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    timeout_seconds=runtime.timeout_seconds,
+                    max_retries=2,
+                    cache_policy=profile.cache_policy,
+                )
+                summary_result = await _compact_history(
+                    client=compaction_client,
+                    previous_summary=compaction.summary if compaction is not None else None,
+                    history_messages=compacted_prefix,
+                    input_budget_tokens=profile.input_budget_tokens,
+                    idempotency_key=compact_source_sha,
+                )
+                candidate = AIChatCompaction(
+                    thread_id=thread_id,
+                    source_sha256=compact_source_sha,
+                    summary_sha256=stable_hash({"summary": summary_result["summary"]}),
+                    summary=summary_result["summary"],
+                    covered_through_at=covered_through,
+                    model_name=model,
+                    reasoning_effort=reasoning_effort,
+                    model_configuration_sha256=runtime.config_sha256,
+                    prompt_version=CHAT_COMPACTION_PROMPT_VERSION,
+                    input_tokens=summary_result["input_tokens"],
+                    cached_input_tokens=summary_result["cached_input_tokens"],
+                    output_tokens=summary_result["output_tokens"],
+                    created_at=datetime.now(UTC),
+                )
+                with SessionLocal() as session:
+                    session.add(candidate)
+                    try:
+                        session.commit()
+                        compaction = candidate
+                    except IntegrityError:
+                        session.rollback()
+                        compaction = session.scalar(
+                            select(AIChatCompaction).where(
+                                AIChatCompaction.thread_id == thread_id,
+                                AIChatCompaction.source_sha256 == compact_source_sha,
+                            )
+                        )
+                yield {"type": "stage", "stage": "compaction", "status": "COMPLETED"}
+            else:
+                compaction = existing_compaction
+            if compaction is None:
+                raise ChatStreamError(
+                    "对话压缩检查点未持久化",
+                    code="CHAT_COMPACTION_FAILED",
+                    request_id=request_id,
+                    retryable=True,
+                )
+            compacted_history_sha = _compacted_history_sha(compaction)
+            stable_prompt = _with_compaction_summary(
+                CHAT_STABLE_PROMPT,
+                compaction.summary,
+            )
+            history_messages = history_messages[omitted_count:]
+            selected_history, context_budget_status = _select_history_within_budget(
+                stable_prompt=stable_prompt,
+                history_messages=history_messages,
+                dynamic_message=dynamic_message,
+                current_message=current_message,
+                input_budget_tokens=profile.input_budget_tokens,
+            )
+            if selected_history is None:
+                raise ChatStreamError(
+                    "当前上下文超过所选模型的安全输入预算，请减少引用、图片或问题范围后重试",
+                    code="CHAT_CONTEXT_TOO_LARGE",
+                    request_id=request_id,
+                )
+            context_budget_status = "COMPACTED"
         messages: list[dict[str, Any]] = [{"role": "system", "content": stable_prompt}]
         messages.extend(selected_history)
         messages.append(dynamic_message)
@@ -664,6 +794,7 @@ async def stream_chat_response(
                 "question": content,
                 "attachment_hashes": [row.content_sha256 for row in attachments],
                 "context_sha256": context_sha,
+                "compacted_history_sha256": compacted_history_sha,
                 "messages": messages,
             }
         )
@@ -706,6 +837,7 @@ async def stream_chat_response(
                     data_status=data_status,
                     model_configuration_sha256=runtime.config_sha256,
                     attachment_context_sha256=attachment_context_sha,
+                    compacted_history_sha256=compacted_history_sha,
                 )
                 session.commit()
                 record_chat_metric(
@@ -756,9 +888,9 @@ async def stream_chat_response(
             history,
             model=model,
             configuration_sha256=runtime.config_sha256,
-            attachment_context_sha=attachment_context_sha,
+            compacted_history_sha256=compacted_history_sha,
             allow_reuse=(
-                profile.cache_policy == "OPENAI" and context_budget_status == "WITHIN_BUDGET"
+                profile.cache_policy == "OPENAI"
             ),
         )
         request_messages = (
@@ -773,6 +905,7 @@ async def stream_chat_response(
                     "prompt_version": CHAT_PROMPT_VERSION,
                     "stable_prompt": stable_prompt,
                     "model": model,
+                    "compacted_history_sha256": compacted_history_sha,
                 }
             ),
         ):
@@ -829,6 +962,7 @@ async def stream_chat_response(
                 response_id=response_id,
                 model_configuration_sha256=runtime.config_sha256,
                 attachment_context_sha256=attachment_context_sha,
+                compacted_history_sha256=compacted_history_sha,
             )
             session.add(
                 AIResponseCacheRow(
@@ -968,6 +1102,7 @@ def _complete_assistant(
     response_id: str | None = None,
     model_configuration_sha256: str | None = None,
     attachment_context_sha256: str | None = None,
+    compacted_history_sha256: str | None = None,
 ) -> None:
     row = session.get(AIChatMessage, message_id)
     if row is None:
@@ -996,6 +1131,7 @@ def _complete_assistant(
     row.response_id = response_id
     row.model_configuration_sha256 = model_configuration_sha256
     row.attachment_context_sha256 = attachment_context_sha256
+    row.compacted_history_sha256 = compacted_history_sha256
     completed_at = datetime.now(UTC)
     row.available_at = completed_at
 
@@ -1052,7 +1188,7 @@ def _reusable_response_id(
     *,
     model: str,
     configuration_sha256: str,
-    attachment_context_sha: str,
+    compacted_history_sha256: str,
     allow_reuse: bool,
 ) -> str | None:
     """Reuse only an intact OpenAI conversation; never trust a cropped remote chain."""
@@ -1066,11 +1202,106 @@ def _reusable_response_id(
             row.response_id
             and row.model_name == model
             and row.model_configuration_sha256 == configuration_sha256
-            and row.attachment_context_sha256 == attachment_context_sha
+            and row.compacted_history_sha256 == compacted_history_sha256
         ):
             return row.response_id
         return None
     return None
+
+
+def _compacted_history_sha(compaction: AIChatCompaction | None) -> str:
+    """Stable lineage used to decide whether a Responses continuation is reusable."""
+
+    return stable_hash(
+        {
+            "chat_prompt_version": CHAT_PROMPT_VERSION,
+            "compaction_prompt_version": CHAT_COMPACTION_PROMPT_VERSION,
+            "summary_sha256": compaction.summary_sha256 if compaction is not None else None,
+        }
+    )
+
+
+def _with_compaction_summary(stable_prompt: str, summary: str) -> str:
+    """Make a durable checkpoint part of the cacheable prompt prefix."""
+
+    clean_summary = summary.strip()
+    if not clean_summary:
+        return stable_prompt
+    return f"{stable_prompt}\n\n已压缩的早期对话（不是实时行情）：\n{clean_summary}"
+
+
+def _render_compaction_source(
+    *,
+    previous_summary: str | None,
+    history_messages: list[dict[str, Any]],
+    input_budget_tokens: int,
+) -> str:
+    """Bound the compaction input while retaining both temporal ends of a long prefix."""
+
+    source = canonical_json(
+        {
+            "previous_summary": previous_summary,
+            "messages": history_messages,
+        }
+    ).decode("utf-8")
+    max_chars = min(MAX_COMPACTION_CHARS, max(12_000, input_budget_tokens * 2))
+    if len(source) <= max_chars:
+        return source
+    prefix_chars = max_chars // 3
+    suffix_chars = max_chars - prefix_chars
+    return (
+        f"{source[:prefix_chars]}\n"
+        "[中间历史因压缩输入上限而省略；保留已压缩摘要、开头和最近消息]\n"
+        f"{source[-suffix_chars:]}"
+    )
+
+
+async def _compact_history(
+    *,
+    client: OpenAICompatibleStructuredLLMClient,
+    previous_summary: str | None,
+    history_messages: list[dict[str, Any]],
+    input_budget_tokens: int,
+    idempotency_key: str,
+) -> dict[str, Any]:
+    """Create one auditable checkpoint before an oversized prefix is discarded."""
+
+    source = _render_compaction_source(
+        previous_summary=previous_summary,
+        history_messages=history_messages,
+        input_budget_tokens=input_budget_tokens,
+    )
+    chunks: list[str] = []
+    completed: dict[str, Any] = {}
+    async for event in client.stream_text(
+        messages=(
+            {"role": "system", "content": _COMPACTION_INSTRUCTIONS},
+            {"role": "user", "content": f"请压缩以下历史 JSON：\n{source}"},
+        ),
+        idempotency_key=idempotency_key,
+        prompt_cache_key=stable_hash(
+            {
+                "prompt_version": CHAT_COMPACTION_PROMPT_VERSION,
+                "instructions": _COMPACTION_INSTRUCTIONS,
+            }
+        ),
+    ):
+        if event["type"] == "delta":
+            chunks.append(str(event["delta"]))
+        elif event["type"] == "completed":
+            completed = event
+    summary = "".join(chunks).strip()
+    if not summary:
+        raise OpenAICompatibleError(
+            "Responses API returned an empty chat-compaction summary",
+            code="CHAT_COMPACTION_EMPTY",
+        )
+    return {
+        "summary": summary[:3600],
+        "input_tokens": int(completed.get("input_tokens", 0)),
+        "cached_input_tokens": int(completed.get("cached_input_tokens", 0)),
+        "output_tokens": int(completed.get("output_tokens", 0)),
+    }
 
 
 def _estimate_message_tokens(message: Mapping[str, Any]) -> int:

@@ -961,6 +961,39 @@ class AIChatMessage(Base):
     response_id: Mapped[str | None] = mapped_column(String(128))
     model_configuration_sha256: Mapped[str | None] = mapped_column(String(64))
     attachment_context_sha256: Mapped[str | None] = mapped_column(String(64))
+    compacted_history_sha256: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AIChatCompaction(Base):
+    """Durable summary checkpoint for one user-owned chat thread.
+
+    The checkpoint contains no provider conversation identifier.  It can therefore
+    be replayed with a new model configuration while the original messages remain
+    available for audit and export.
+    """
+
+    __tablename__ = "ai_chat_compactions"
+    __table_args__ = (
+        UniqueConstraint("thread_id", "source_sha256", name="uq_ai_chat_compaction_source"),
+        Index("ix_ai_chat_compaction_thread_created", "thread_id", "created_at"),
+    )
+
+    compaction_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    thread_id: Mapped[str] = mapped_column(
+        ForeignKey("ai_chat_threads.thread_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    summary_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    covered_through_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    reasoning_effort: Mapped[str] = mapped_column(String(16), nullable=False)
+    model_configuration_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cached_input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 

@@ -612,7 +612,9 @@ class AIChatMessageResponse(OrmResponse):
     output_tokens: int
     reasoning_tokens: int = 0
     cache_policy: Literal["GROK", "OPENAI", "COMPATIBLE"] = "COMPATIBLE"
-    context_budget_status: Literal["WITHIN_BUDGET", "HISTORY_TRIMMED", "CONTEXT_TOO_LARGE"] = (
+    context_budget_status: Literal[
+        "WITHIN_BUDGET", "HISTORY_TRIMMED", "COMPACTED", "CONTEXT_TOO_LARGE"
+    ] = (
         "WITHIN_BUDGET"
     )
     error_code: str | None = None
