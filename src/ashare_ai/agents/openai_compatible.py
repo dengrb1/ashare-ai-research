@@ -171,6 +171,16 @@ class OpenAICompatibleStructuredLLMClient:
                             status_code=response.status_code,
                         )
                         if (
+                            advanced_controls
+                            and not advanced_fallback_used
+                            and response.status_code in {400, 404, 422}
+                        ):
+                            # Drop provider-specific prompt-cache routing before
+                            # attempting the more permissive schema fallback.
+                            request_body.pop("prompt_cache_key", None)
+                            advanced_fallback_used = True
+                            continue
+                        if (
                             not schema_fallback_used
                             and response.status_code in {400, 404, 422}
                         ):
