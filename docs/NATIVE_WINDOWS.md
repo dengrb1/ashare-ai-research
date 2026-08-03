@@ -53,7 +53,9 @@ Windows 安装包包含编译后的 WinForms 本机运行管理器。当前为�
 .\windows\native-control-center\dist\AshareAI-Setup.exe
 ```
 
-管理器会请求管理员权限，因为安装依赖、服务账户管理和 SYSTEM 看门狗任务需要该权限。
+管理器会请求管理员权限，因为安装依赖、服务账户管理和看门狗任务注册需要该权限。看门狗以
+受限的 `AshareAIService` 本地账户运行，不使用 `SYSTEM`，并且运行目录会收紧为当前管理员、
+该服务账户、SYSTEM 和本机 Administrators 可访问。
 GUI 显示运行健康状态、服务 PID、内存、端口、看门狗状态和最近日志。简化后的窗口支持
 安装/更新、启动、停止、重启、修复、诊断、打开 Web UI 和刷新状态，也可以配置研究模式、
 Worker 数、看门狗间隔、自动刷新和外部运行目录。

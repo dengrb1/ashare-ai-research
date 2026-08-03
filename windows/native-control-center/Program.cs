@@ -117,9 +117,9 @@ namespace AshareAI.NativeControlCenter
 
     internal static class EmbeddedAssets
     {
-        public static string ExtractController()
+        public static string ExtractController(string runtimeRoot)
         {
-            var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AshareAI", "manager", "controller");
+            var directory = Path.Combine(Path.GetFullPath(runtimeRoot), "controller");
             Directory.CreateDirectory(directory);
             WriteResource("AshareAI.Controller", Path.Combine(directory, "ashare-native.ps1"));
             WriteResource("AshareAI.DependencyLock", Path.Combine(directory, "dependencies.lock.json"));
@@ -180,7 +180,7 @@ namespace AshareAI.NativeControlCenter
         public MainForm(Options options)
         {
             this.options = options;
-            controller = EmbeddedAssets.ExtractController();
+            controller = EmbeddedAssets.ExtractController(options.RuntimeRoot);
             Text = "AshareAI 本机运行管理器";
             StartPosition = FormStartPosition.CenterScreen;
             MinimumSize = new Size(980, 680);

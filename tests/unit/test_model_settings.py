@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import httpx
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
+import httpx
 import pytest
 import respx
 from cryptography.fernet import Fernet

@@ -74,7 +74,7 @@ namespace AshareAI.Setup
             using (var key = Registry.LocalMachine.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\AshareAI"))
             {
                 key.SetValue("DisplayName", "AshareAI 本机运行管理器");
-                key.SetValue("DisplayVersion", "2026.08.03");
+                key.SetValue("DisplayVersion", "2026.08.03.2");
                 key.SetValue("Publisher", "AshareAI");
                 key.SetValue("DisplayIcon", manager);
                 key.SetValue("InstallLocation", options.InstallRoot);

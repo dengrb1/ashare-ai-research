@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "runtime_version": "2026.07.31",
+  "runtime_version": "2026.08.03.2",
   "platform": "windows-amd64",
   "artifacts": [
     {
