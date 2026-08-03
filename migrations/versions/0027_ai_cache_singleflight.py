@@ -16,7 +16,10 @@ depends_on = None
 
 
 def upgrade() -> None:
-    columns = {column["name"] for column in sa.inspect(op.get_bind()).get_columns("ai_response_cache")}
+    columns = {
+        column["name"]
+        for column in sa.inspect(op.get_bind()).get_columns("ai_response_cache")
+    }
     if "last_singleflight_wait_ms" not in columns:
         with op.batch_alter_table("ai_response_cache") as batch:
             batch.add_column(
