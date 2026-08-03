@@ -188,6 +188,7 @@ export const api = {
   createUser: (payload: { username: string; password: string; role: string }) => request<User>('/admin/users', { method: 'POST', body: JSON.stringify({ ...payload, role: payload.role.toUpperCase() }) }),
   setUserDisabled: (id: string, disabled: boolean) => request<User>(`/admin/users/${id}`, { method: 'PATCH', body: JSON.stringify({ enabled: !disabled }) }),
   resetPassword: (id: string, password: string) => request<User>(`/admin/users/${id}`, { method: 'PATCH', body: JSON.stringify({ password }) }),
+  deleteUser: (id: string) => request<void>(`/admin/users/${id}`, { method: 'DELETE' }),
   modelSettings: () => request<ModelSettings>('/admin/model-settings'),
   testModelSettings: (payload: ModelSettingsDraft) => request<{ reachable: boolean; message: string; model: string; checked_at: string }>('/admin/model-settings/test', { method: 'POST', body: JSON.stringify(payload) }),
   saveModelSettings: (payload: ModelSettingsDraft) => request<ModelSettings>('/admin/model-settings', { method: 'PUT', body: JSON.stringify(payload) }),

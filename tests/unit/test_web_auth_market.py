@@ -13,6 +13,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from ashare_ai.api import app as app_module
 from ashare_ai.api.app import (
     _historical_bundle_source_run,
     _market_session_calendar_cache,
@@ -32,9 +33,11 @@ from ashare_ai.market.service import (
     _intraday_series_is_stale,
 )
 from ashare_ai.storage.models import (
+    ActiveModelConfiguration,
     BacktestRun,
     Base,
     JobRun,
+    ModelConfigurationVersion,
     SnapshotManifestRow,
     UserAccount,
 )
@@ -386,6 +389,231 @@ def test_login_csrf_admin_and_disabled_session_invalidation() -> None:
         assert changed.status_code == 200
         assert client.get("/api/v1/auth/me").status_code == 401
         assert admin.user_id != user.user_id
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+
+def _login(client: TestClient, username: str, password: str) -> int:
+    response = client.post("/api/v1/auth/login", json={"username": username, "password": password})
+    return response.status_code
+
+
+def _admin_settings(tmp_path) -> Settings:
+    return Settings(admin_username="admin", private_object_root=tmp_path)
+
+
+def test_admin_delete_user_anonymizes_history_and_purges_private_objects(
+    monkeypatch, tmp_path
+) -> None:
+    session, admin, user = _database()
+    now = datetime.now(UTC)
+    job = JobRun(
+        user_id=user.user_id,
+        run_type="RESEARCH",
+        trading_date=date(2026, 7, 14),
+        decision_at=now,
+        status="SUCCEEDED",
+        idempotency_key="alice-job-key",
+        manifest={"code_git_sha": "abc"},
+        input_hash="i" * 64,
+        started_at=now,
+    )
+    backtest = BacktestRun(
+        user_id=user.user_id,
+        name="alice-backtest",
+        status="SUCCEEDED",
+        start_date=date(2026, 7, 14),
+        end_date=date(2026, 7, 17),
+        config={},
+        snapshot_ids=[],
+        input_hash="i" * 64,
+        created_at=now,
+    )
+    config = ModelConfigurationVersion(
+        version=1,
+        provider="openai",
+        base_url="https://example.test",
+        encrypted_api_key="encrypted",
+        encryption_key_id="key-id",
+        search_model="model-a",
+        search_reasoning_effort="low",
+        research_model="model-b",
+        research_reasoning_effort="high",
+        model_profiles=[],
+        timeout_seconds=90,
+        enabled=True,
+        config_sha256="c" * 64,
+        created_by=user.user_id,
+        created_at=now,
+    )
+    session.add_all([job, backtest, config])
+    session.flush()
+    active = ActiveModelConfiguration(
+        configuration_id=config.configuration_id,
+        activated_by=user.user_id,
+        activated_at=now,
+    )
+    session.add(active)
+    session.commit()
+    private_dir = tmp_path / user.user_id / "attachments" / "a1"
+    private_dir.mkdir(parents=True)
+    (private_dir / "photo.jpg").write_text("x")
+
+    def override_db():
+        yield session
+
+    app.dependency_overrides[get_db] = override_db
+    monkeypatch.setattr(app_module, "get_settings", lambda: _admin_settings(tmp_path))
+    try:
+        client = TestClient(app)
+        assert _login(client, "admin", "admin-password") == 200
+        csrf = client.cookies.get("ashare_csrf")
+        listing = client.get("/api/v1/admin/users")
+        assert listing.status_code == 200
+        by_username = {row["username"]: row for row in listing.json()}
+        assert by_username["admin"]["is_admin_account"] is True
+        assert by_username["alice"]["is_admin_account"] is False
+
+        deleted = client.delete(
+            f"/api/v1/admin/users/{user.user_id}", headers={"x-csrf-token": csrf}
+        )
+        assert deleted.status_code == 204
+        assert session.get(UserAccount, user.user_id) is None
+        assert session.get(JobRun, job.run_id).user_id is None
+        assert session.get(BacktestRun, backtest.backtest_id).user_id is None
+        assert session.get(ModelConfigurationVersion, config.configuration_id).created_by is None
+        assert session.get(ActiveModelConfiguration, active.scope).activated_by is None
+        assert not (tmp_path / user.user_id).exists()
+        assert session.get(UserAccount, admin.user_id) is not None
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+
+def test_admin_account_is_protected_from_other_admins(monkeypatch, tmp_path) -> None:
+    session, admin, user = _database()
+    now = datetime.now(UTC)
+    bob = UserAccount(
+        username="bob",
+        password_hash=hash_password("bob-password"),
+        role="ADMIN",
+        enabled=True,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(bob)
+    session.commit()
+
+    def override_db():
+        yield session
+
+    app.dependency_overrides[get_db] = override_db
+    monkeypatch.setattr(app_module, "get_settings", lambda: _admin_settings(tmp_path))
+    try:
+        bob_client = TestClient(app)
+        assert _login(bob_client, "bob", "bob-password") == 200
+        csrf = bob_client.cookies.get("ashare_csrf")
+        admin_url = f"/api/v1/admin/users/{admin.user_id}"
+        assert bob_client.delete(admin_url, headers={"x-csrf-token": csrf}).status_code == 409
+        disabled = bob_client.patch(
+            admin_url, json={"enabled": False}, headers={"x-csrf-token": csrf}
+        )
+        assert disabled.status_code == 409
+        demoted = bob_client.patch(
+            admin_url, json={"role": "USER"}, headers={"x-csrf-token": csrf}
+        )
+        assert demoted.status_code == 409
+        reset = bob_client.post(
+            f"{admin_url}/password",
+            json={"password": "attacker-chosen-password"},
+            headers={"x-csrf-token": csrf},
+        )
+        assert reset.status_code == 409
+        # The protected admin keeps working and its password was not changed.
+        assert session.get(UserAccount, admin.user_id).enabled is True
+        assert session.get(UserAccount, admin.user_id).role == "ADMIN"
+        assert _login(TestClient(app), "admin", "admin-password") == 200
+
+        # bob can still manage ordinary accounts.
+        user_url = f"/api/v1/admin/users/{user.user_id}"
+        assert bob_client.delete(user_url, headers={"x-csrf-token": csrf}).status_code == 204
+        assert session.get(UserAccount, user.user_id) is None
+
+        # The protected admin can disable and delete other admins.
+        admin_client = TestClient(app)
+        assert _login(admin_client, "admin", "admin-password") == 200
+        admin_csrf = admin_client.cookies.get("ashare_csrf")
+        bob_url = f"/api/v1/admin/users/{bob.user_id}"
+        disabled_bob = admin_client.patch(
+            bob_url, json={"enabled": False}, headers={"x-csrf-token": admin_csrf}
+        )
+        assert disabled_bob.status_code == 200
+        assert admin_client.delete(bob_url, headers={"x-csrf-token": admin_csrf}).status_code == 204
+        assert session.get(UserAccount, bob.user_id) is None
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+
+def test_non_admin_cannot_manage_users(monkeypatch, tmp_path) -> None:
+    session, _, user = _database()
+
+    def override_db():
+        yield session
+
+    app.dependency_overrides[get_db] = override_db
+    monkeypatch.setattr(app_module, "get_settings", lambda: _admin_settings(tmp_path))
+    try:
+        client = TestClient(app)
+        assert _login(client, "alice", "alice-password") == 200
+        csrf = client.cookies.get("ashare_csrf")
+        assert client.get("/api/v1/admin/users").status_code == 403
+        created = client.post(
+            "/api/v1/admin/users",
+            json={"username": "mallory", "password": "mallory-strong-pw", "role": "USER"},
+        )
+        assert created.status_code == 403
+        user_url = f"/api/v1/admin/users/{user.user_id}"
+        patched = client.patch(
+            user_url, json={"enabled": False}, headers={"x-csrf-token": csrf}
+        )
+        assert patched.status_code == 403
+        assert client.delete(user_url, headers={"x-csrf-token": csrf}).status_code == 403
+        reset = client.post(
+            f"{user_url}/password",
+            json={"password": "mallory-strong-pw"},
+            headers={"x-csrf-token": csrf},
+        )
+        assert reset.status_code == 403
+        assert session.get(UserAccount, user.user_id) is not None
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+
+def test_admin_can_change_own_password_only(monkeypatch, tmp_path) -> None:
+    session, admin, _ = _database()
+
+    def override_db():
+        yield session
+
+    app.dependency_overrides[get_db] = override_db
+    monkeypatch.setattr(app_module, "get_settings", lambda: _admin_settings(tmp_path))
+    try:
+        client = TestClient(app)
+        assert _login(client, "admin", "admin-password") == 200
+        csrf = client.cookies.get("ashare_csrf")
+        changed = client.post(
+            f"/api/v1/admin/users/{admin.user_id}/password",
+            json={"password": "new-admin-password"},
+            headers={"x-csrf-token": csrf},
+        )
+        assert changed.status_code == 200
+        # Existing sessions are invalidated by the password change.
+        assert client.get("/api/v1/auth/me").status_code == 401
+        assert _login(TestClient(app), "admin", "admin-password") == 401
+        assert _login(TestClient(app), "admin", "new-admin-password") == 200
     finally:
         app.dependency_overrides.clear()
         session.close()
