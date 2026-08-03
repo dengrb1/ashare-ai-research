@@ -5,11 +5,26 @@ from unittest.mock import Mock
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import Column, Integer, MetaData, Table, create_engine, inspect, text
 
 from ashare_ai.cli import migrate_database
 from ashare_ai.core.config import get_settings, runtime_resource_path
 from ashare_ai.storage.models import Base
+
+
+def test_migration_graph_accepts_legacy_cache_head() -> None:
+    config = Config(str(runtime_resource_path("alembic.ini")))
+    config.set_main_option("script_location", str(runtime_resource_path("migrations")))
+    script = ScriptDirectory.from_config(config)
+    current = script.get_revision("0027_ai_cache_singleflight")
+    legacy = script.get_revision("0026_ai_cache_singleflight")
+    assert current is not None
+    assert legacy is not None
+    assert set(current._normalized_down_revisions) == {
+        "0026_market_refresh_default",
+        "0026_ai_cache_singleflight",
+    }
 
 
 def test_cli_migrate_bootstraps_empty_database_at_alembic_head(tmp_path, monkeypatch) -> None:
