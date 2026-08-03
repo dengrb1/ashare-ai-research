@@ -476,8 +476,8 @@ Backtest Worker 校验 Manifest 状态、文件哈希、RAW 价格和时点约�
 本项目采用 [Apache License 2.0](LICENSE) 开源。使用、修改或分发本项目时，请遵守许可证条款，
 并保留所要求的版权及许可证声明。第三方数据、模型、服务和依赖仍适用各自的许可与使用条款。
 
-当前重大版本的安全修正版为 v2.0.2，完整变化与升级步骤见
-[中文发布说明](docs/releases/v2.0.2.zh-CN.md)。v2.0.0 的重大版本说明保留在
+当前重大版本的安全修正版为 v2.0.3，完整变化与升级步骤见
+[中文发布说明](docs/releases/v2.0.3.zh-CN.md)。v2.0.0 的重大版本说明保留在
 [初始发布记录](docs/releases/v2.0.0.zh-CN.md)。历史首个稳定版见
 [v1.0.0 中文发布说明](docs/releases/v1.0.0.zh-CN.md)和
 [English Release Notes](docs/releases/v1.0.0.en.md)。
