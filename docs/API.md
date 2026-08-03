@@ -320,13 +320,13 @@ Web 登录。请求体为 `LoginRequest`：
 
 AI 对话线程和消息均按当前用户保存。消息正文中的 `@名称`、`@6位代码` 与标准代码由服务端按已提交证券主数据逐项解析；`mention_refs` 仅是客户端提示，不能把名称绑定到不匹配的代码，重名会显式返回 `SECURITY_NAME_AMBIGUOUS`。`GET /securities/resolve?q=顺络电子` 可用于 UI 预校验。发送请求可传 `attachment_ids`、可选带时区 `decision_at` 及 `Idempotency-Key`；不传 `decision_at` 时由服务端在并行数据获取完成后冻结实时决策时点。显式历史时点只读取 PIT 合格评分与日 K，当前持仓、实时行情和新闻会在 `data_status` 中标为不可用，不会混入历史结论。
 
-助手历史在 Responses API 中编码为 `output_text`，用户/系统文本为 `input_text`，未到期的近期用户图片为 `input_image`；每张已销毁图片分别加入不可用标记。SSE 依次包含 `meta`、`stage`（`retrieval|market|news|generation`）、心跳、`delta`、`done` 或安全 `error`；错误含 `code`、`request_id` 和 `retryable`。消息与 `done` 会附加 `streaming_mode=STREAMING|DEGRADED|CACHED`、`data_status`、`response_id`、`cached_input_tokens`、`cache_write_tokens`、`reasoning_tokens`、`cache_policy` 和 `context_budget_status` 等只增字段。服务端按“窗口减输出/推理预留”保留完整最近轮次；固定 PIT 上下文或当前问题自身超预算时返回 `CHAT_CONTEXT_TOO_LARGE`，不会截断或使用未来数据。Grok 档案保存且仅内部重放规范化动态快照，快照不在消息、导出或公开 API 中出现；OpenAI 档案可使用稳定 `prompt_cache_key` 与安全的增量 Responses 续接。兼容网关不发送专属缓存字段，并在远端参数不支持时以同一幂等键安全回退。只有收到上游 `response.completed` 后才写入完成状态和缓存。浏览器与模型网关均仅在首个正文片段之前，对网络错误、408、429、5xx 或明确可重试错误使用同一幂等键进行有限重试；正文出现后断线会保留部分内容并标记未完成。
+助手历史在 Responses API 中编码为 `output_text`，用户/系统文本为 `input_text`，未到期的近期用户图片为 `input_image`；每张已销毁图片分别加入不可用标记。SSE 依次包含 `meta`、`stage`（`retrieval|market|news|compaction|generation`）、心跳、`delta`、`done` 或安全 `error`；错误含 `code`、`request_id` 和 `retryable`。消息与 `done` 会附加 `streaming_mode=STREAMING|DEGRADED|CACHED`、`data_status`、`response_id`、`cached_input_tokens`、`cache_write_tokens`、`reasoning_tokens`、`cache_policy` 和 `context_budget_status` 等只增字段；`context_budget_status=COMPACTED` 表示早期完整轮次已生成可审计的持久摘要，而非被静默丢弃。服务端按“窗口减输出/推理预留”保留完整最近轮次；固定 PIT 上下文或当前问题自身超预算时返回 `CHAT_CONTEXT_TOO_LARGE`，不会截断或使用未来数据。Grok 档案保存且仅内部重放规范化动态快照，快照不在消息、导出或公开 API 中出现；OpenAI 档案可使用稳定 `prompt_cache_key` 与同一摘要谱系内安全的增量 Responses 续接。兼容网关不发送专属缓存字段，并在远端参数不支持时以同一幂等键安全回退。只有收到上游 `response.completed` 后才写入完成状态和缓存。浏览器与模型网关均仅在首个正文片段之前，对网络错误、408、429、5xx 或明确可重试错误使用同一幂等键进行有限重试；正文出现后断线会保留部分内容并标记未完成。
 
 `GET /ai/chat/metrics` 返回当前用户的 `answer|context|market|news|model` 聚合指标，每项包含请求数、命中数、命中率、平均延迟、平均单飞等待和降级次数；其中没有提示词、持仓、凭据或上游原始错误。最终答案缓存仅在动态上下文哈希完全相同、同用户、同模型配置和同附件上下文时命中。
 
 `GET /ai/costs?days=30&limit=30&before=YYYY-MM-DD&thread_id=...` 只返回当前用户的日聚合用量和金额估算。`days` 与 `limit` 均为 1-90，按 `bucket_date desc` 稳定排序，`next_cursor` 可作为下一页的 `before`；可选 `thread_id` 仅额外返回该线程最近完成回复的 `current_turn`，不会缩小近 30 天总计。字段包括输入、缓存读取/写入、未缓存输入、输出、缓存命中、估算支出与估算节省。金额按当前管理员维护的每百万 token 单价估算，不替代供应商账单，响应不含提示词、仓位、密钥或上游错误。
 
-管理员的 `/admin/model-settings` 请求和响应新增 `model_profiles[]`。每项包含 `model`、`cache_policy=GROK|OPENAI|COMPATIBLE`、上下文窗口、输出/推理预留及输入、缓存读取、缓存写入、输出的每百万 token 单价。历史配置缺少该字段时默认 `COMPATIBLE` 和零价格；这些档案已纳入不可变配置哈希与研究 Manifest。
+管理员的 `/admin/model-settings` 请求和响应新增 `model_profiles[]`。每项包含 `model`、`cache_policy=GROK|OPENAI|COMPATIBLE`、上下文窗口、输出/推理预留及输入、缓存读取、缓存写入、输出的每百万 token 单价。历史配置缺少对应档案时，`gpt-*`、`chatgpt-*`、`o1`、`o3` 和 `o4` 自动使用 `OPENAI`，`grok-*` 自动使用 `GROK`，其余使用 `COMPATIBLE`；显式档案始终优先。这些档案已纳入不可变配置哈希与研究 Manifest。
 
 `POST /ai/chat/attachments` 支持 PNG、JPEG、WebP 和非动画 GIF；每条最多 4 张、单张 10 MB、合计 25 MB。服务端校验真实签名、MIME、尺寸和动画状态，不接受远程 URL。`expires_at=uploaded_at+7天` 固定不延长；到期瞬间读取返回 `410`，后台五分钟内物理清理。
 

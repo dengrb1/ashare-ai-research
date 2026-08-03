@@ -513,9 +513,22 @@ def _config_hash(**values: object) -> str:
 
 
 def _default_profile(model: str) -> ModelRuntimeProfile:
-    """Unknown and legacy models stay on the conservative compatible contract."""
+    """Choose a safe protocol profile for an implicit model configuration.
 
-    return ModelRuntimeProfile(model=model, cache_policy="COMPATIBLE")
+    Older configuration rows intentionally leave ``model_profiles`` empty.  Treating
+    every such model as generic meant the application's default GPT configuration
+    silently omitted Responses continuation and prompt-cache controls.  Explicit
+    profiles still take precedence; this only supplies the missing default.
+    """
+
+    normalized = model.strip().casefold()
+    if normalized.startswith(("gpt-", "chatgpt-", "o1", "o3", "o4")):
+        policy: CachePolicy = "OPENAI"
+    elif normalized.startswith("grok-"):
+        policy = "GROK"
+    else:
+        policy = "COMPATIBLE"
+    return ModelRuntimeProfile(model=model, cache_policy=policy)
 
 
 def _profile_storage_dict(profile: ModelRuntimeProfile) -> dict[str, Any]:

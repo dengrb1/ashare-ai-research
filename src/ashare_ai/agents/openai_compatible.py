@@ -141,9 +141,13 @@ class OpenAICompatibleStructuredLLMClient:
                 }
             },
         }
+        advanced_controls = self._cache_policy == "OPENAI"
+        if advanced_controls:
+            request_body["prompt_cache_key"] = _structured_prompt_cache_key(messages, schema)
         started = perf_counter()
         attempts = 0
         schema_fallback_used = False
+        advanced_fallback_used = False
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(timeout=self._timeout)
         try:
@@ -166,6 +170,16 @@ class OpenAICompatibleStructuredLLMClient:
                             code=_status_error_code(response.status_code),
                             status_code=response.status_code,
                         )
+                        if (
+                            advanced_controls
+                            and not advanced_fallback_used
+                            and response.status_code in {400, 404, 422}
+                        ):
+                            # Drop provider-specific prompt-cache routing before
+                            # attempting the more permissive schema fallback.
+                            request_body.pop("prompt_cache_key", None)
+                            advanced_fallback_used = True
+                            continue
                         if (
                             not schema_fallback_used
                             and response.status_code in {400, 404, 422}
@@ -217,6 +231,16 @@ class OpenAICompatibleStructuredLLMClient:
                         raise OpenAICompatibleError(
                             f"Responses API transport failure: {exc}"
                         ) from exc
+                except OpenAICompatibleError as exc:
+                    if (
+                        advanced_controls
+                        and not advanced_fallback_used
+                        and exc.status_code in {400, 404, 422}
+                    ):
+                        request_body.pop("prompt_cache_key", None)
+                        advanced_fallback_used = True
+                        continue
+                    raise
                 attempts += 1
                 if self._retry_backoff:
                     await asyncio.sleep(self._retry_backoff * (2 ** (attempts - 1)))
@@ -737,6 +761,31 @@ def _first_usage_value(
             if value:
                 return value
     return 0
+
+
+def _structured_prompt_cache_key(
+    messages: Sequence[Mapping[str, Any]], schema: type[BaseModel]
+) -> str:
+    """Route schema calls by their invariant instruction prefix, not the request body."""
+
+    prefix: list[Mapping[str, Any]] = []
+    for message in messages:
+        if message.get("role") not in {"system", "developer"}:
+            break
+        prefix.append(message)
+    if not prefix and messages:
+        prefix.append(messages[0])
+    canonical = json.dumps(
+        {
+            "model": schema.__name__,
+            "schema": _strict_json_schema(schema.model_json_schema()),
+            "instructions": _messages_to_input(prefix),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _prompt_cache_key(supplied_key: str | None, messages: Sequence[Mapping[str, Any]]) -> str:

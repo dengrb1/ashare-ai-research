@@ -12,14 +12,26 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from ashare_ai.agents.chat import _estimate_message_tokens, _select_history_within_budget
+from ashare_ai.agents.chat import (
+    _compact_history,
+    _compacted_history_sha,
+    _estimate_message_tokens,
+    _select_history_within_budget,
+    _with_compaction_summary,
+)
 from ashare_ai.agents.chat_observability import _cost_estimate
-from ashare_ai.agents.model_settings import ModelRuntimeProfile
+from ashare_ai.agents.model_settings import ModelRuntimeProfile, _default_profile
 from ashare_ai.agents.openai_compatible import OpenAICompatibleStructuredLLMClient, _usage
 from ashare_ai.api.app import app
 from ashare_ai.api.auth import hash_password
 from ashare_ai.api.dependencies import get_db
-from ashare_ai.storage.models import AIChatMessage, AIChatThread, Base, UserAccount
+from ashare_ai.storage.models import (
+    AIChatCompaction,
+    AIChatMessage,
+    AIChatThread,
+    Base,
+    UserAccount,
+)
 
 
 def test_usage_parser_normalizes_openai_and_grok_cache_fields() -> None:
@@ -54,6 +66,68 @@ def test_usage_parser_normalizes_openai_and_grok_cache_fields() -> None:
         grok.cache_write_tokens,
         grok.output_tokens,
     ) == (90, 40, 30, 11)
+
+
+def test_implicit_gpt_profile_enables_openai_cache_and_response_chains() -> None:
+    assert _default_profile("gpt-5.6-sol").cache_policy == "OPENAI"
+    assert _default_profile("o4-mini").cache_policy == "OPENAI"
+    assert _default_profile("grok-4").cache_policy == "GROK"
+    assert _default_profile("gateway-proxy-model").cache_policy == "COMPATIBLE"
+
+
+def test_compaction_summary_changes_the_cache_lineage() -> None:
+    checkpoint = AIChatCompaction(
+        thread_id="thread",
+        source_sha256="a" * 64,
+        summary_sha256="b" * 64,
+        summary="用户关注 000001.SZ，等待下次财报后的风险复核。",
+        covered_through_at=datetime.now(UTC),
+        model_name="gpt-test",
+        reasoning_effort="low",
+        model_configuration_sha256="c" * 64,
+        prompt_version="compact-v1",
+        created_at=datetime.now(UTC),
+    )
+
+    assert _compacted_history_sha(None) != _compacted_history_sha(checkpoint)
+    assert "已压缩的早期对话" in _with_compaction_summary("base", checkpoint.summary)
+
+
+@pytest.mark.asyncio
+async def test_compaction_uses_a_stable_prefix_cache_key_and_returns_usage() -> None:
+    class FakeClient:
+        def __init__(self) -> None:
+            self.messages: tuple[object, ...] | None = None
+            self.prompt_cache_key: str | None = None
+
+        async def stream_text(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.messages = kwargs["messages"]
+            self.prompt_cache_key = kwargs["prompt_cache_key"]
+            yield {"type": "delta", "delta": "已确认目标；后续关注风险。"}
+            yield {
+                "type": "completed",
+                "input_tokens": 33,
+                "cached_input_tokens": 21,
+                "output_tokens": 9,
+            }
+
+    client = FakeClient()
+    result = await _compact_history(
+        client=client,  # type: ignore[arg-type]
+        previous_summary="此前摘要",
+        history_messages=[{"role": "user", "content": "分析 000001.SZ"}],
+        input_budget_tokens=4096,
+        idempotency_key="d" * 64,
+    )
+
+    assert result == {
+        "summary": "已确认目标；后续关注风险。",
+        "input_tokens": 33,
+        "cached_input_tokens": 21,
+        "output_tokens": 9,
+    }
+    assert client.prompt_cache_key
+    assert client.messages is not None
 
 
 @pytest.mark.asyncio

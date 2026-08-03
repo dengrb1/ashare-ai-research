@@ -228,7 +228,7 @@ export interface AIChatMessage {
   output_tokens: number
   reasoning_tokens?: number
   cache_policy?: 'GROK' | 'OPENAI' | 'COMPATIBLE'
-  context_budget_status?: 'WITHIN_BUDGET' | 'HISTORY_TRIMMED' | 'CONTEXT_TOO_LARGE'
+  context_budget_status?: 'WITHIN_BUDGET' | 'HISTORY_TRIMMED' | 'COMPACTED' | 'CONTEXT_TOO_LARGE'
   error_code?: string | null
   request_id?: string | null
   streaming_mode?: 'STREAMING' | 'DEGRADED' | 'CACHED'
