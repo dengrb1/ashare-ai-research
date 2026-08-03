@@ -137,9 +137,21 @@ class UserAssetState(Base):
     stop_loss_monitor_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     buy_monitor_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     market_refresh_interval_seconds: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=15
+        Integer, nullable=False, default=5, server_default="5"
     )
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class MarketRefreshMigration(Base):
+    """Audit rows for the reversible 15-second to 5-second default migration."""
+
+    __tablename__ = "market_refresh_migrations"
+
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("user_accounts.user_id", ondelete="CASCADE"), primary_key=True
+    )
+    original_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    migrated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class UserResearchPreference(Base):
@@ -698,6 +710,7 @@ class AIResponseCacheRow(Base):
     reasoning_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cache_policy: Mapped[str] = mapped_column(String(16), nullable=False, default="COMPATIBLE")
     hit_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_singleflight_wait_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_hit_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

@@ -52,7 +52,7 @@ class UserAssetService:
                 "default_profit_trigger": None,
                 "stop_loss_monitor_enabled": True,
                 "buy_monitor_enabled": True,
-                "market_refresh_interval_seconds": 15,
+                "market_refresh_interval_seconds": 5,
                 "updated_at": None,
             }
         return {

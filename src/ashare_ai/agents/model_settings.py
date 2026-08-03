@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -26,7 +27,9 @@ CachePolicy = Literal["GROK", "OPENAI", "COMPATIBLE"]
 
 
 class ModelSettingsError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, code: str = "MODEL_SETTINGS_ERROR") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class ModelConnectionProbe(BaseModel):
@@ -134,6 +137,7 @@ class ModelProbeResult:
     checked_at: datetime
     structured_output_supported: bool = True
     streaming_supported: bool = False
+    streaming_checked: bool = False
 
 
 class ModelConfigurationService:
@@ -285,11 +289,20 @@ class ModelConfigurationService:
             pointer.last_check_status = "REACHABLE" if probe.reachable else "FAILED"
             pointer.last_check_message = probe.message
             pointer.structured_output_supported = probe.structured_output_supported
-            pointer.streaming_supported = probe.streaming_supported
+            if probe.streaming_checked:
+                pointer.streaming_supported = probe.streaming_supported
         session.flush()
         return row
 
-    async def probe(self, draft: ModelSettingsDraft, session: Session) -> ModelProbeResult:
+    async def probe(
+        self,
+        draft: ModelSettingsDraft,
+        session: Session,
+        *,
+        include_streaming: bool = False,
+    ) -> ModelProbeResult:
+        """Probe every configured model; stream probing is an explicit opt-in."""
+
         base_url = normalize_base_url(draft.base_url, self.settings)
         current = self.resolve(session, require_enabled=False)
         api_key = draft.api_key or (current.api_key if current else None)
@@ -312,36 +325,51 @@ class ModelConfigurationService:
                 api_key=api_key,
                 model=model,
                 reasoning_effort=effort,
-                timeout_seconds=draft.timeout_seconds,
+                timeout_seconds=min(draft.timeout_seconds, 8.0),
                 max_retries=0,
                 cache_policy=profile_by_model[model].cache_policy,
             )
             try:
-                result = await client.generate_structured(
-                    schema=ModelConnectionProbe,
-                    messages=(
-                        {
-                            "role": "system",
-                            "content": "Return only the requested schema. Set ok to true.",
-                        },
-                        {"role": "user", "content": "Connectivity probe."},
+                result = await asyncio.wait_for(
+                    client.generate_structured(
+                        schema=ModelConnectionProbe,
+                        messages=(
+                            {
+                                "role": "system",
+                                "content": "Return only the requested schema. Set ok to true.",
+                            },
+                            {"role": "user", "content": "Connectivity probe."},
+                        ),
+                        idempotency_key=stable_hash(
+                            {"kind": "model-settings-probe", "model": model, "at": checked_at}
+                        ),
                     ),
-                    idempotency_key=stable_hash(
-                        {"kind": "model-settings-probe", "model": model, "at": checked_at}
-                    ),
+                    timeout=8.0,
                 )
                 if result.output.get("ok") is not True:
-                    raise ModelSettingsError("model probe returned an unexpected result")
+                    raise ModelSettingsError(
+                        "model probe returned an unexpected result",
+                        code="MODEL_INVALID_STRUCTURED_OUTPUT",
+                    )
+            except TimeoutError as exc:
+                raise ModelSettingsError(
+                    f"模型 {model} 探测超时", code="MODEL_PROBE_TIMEOUT"
+                ) from exc
             except (OpenAICompatibleError, httpx.HTTPError) as exc:
-                raise ModelSettingsError(f"模型 {model} 探测失败：{_safe_error(exc)}") from exc
+                raise ModelSettingsError(_safe_error(exc), code=_safe_error_code(exc)) from exc
             clients.append(client)
         streaming_supported = False
-        try:
-            streaming_supported = await clients[0].probe_stream()
-        except (OpenAICompatibleError, httpx.HTTPError):
-            # A compatible one-shot Responses gateway remains usable for chat;
-            # the persisted capability makes the eventual degradation visible.
-            streaming_supported = False
+        if include_streaming:
+            try:
+                streaming_supported = await asyncio.wait_for(
+                    clients[0].probe_stream(), timeout=8.0
+                )
+            except TimeoutError:
+                streaming_supported = False
+            except (OpenAICompatibleError, httpx.HTTPError):
+                # A compatible one-shot Responses gateway remains usable for chat;
+                # the persisted capability makes the eventual degradation visible.
+                streaming_supported = False
         return ModelProbeResult(
             reachable=True,
             message=(
@@ -353,6 +381,7 @@ class ModelConfigurationService:
             checked_at=checked_at,
             structured_output_supported=True,
             streaming_supported=streaming_supported,
+            streaming_checked=include_streaming,
         )
 
     async def list_models(self, draft: ModelSettingsDraft, session: Session) -> list[str]:
@@ -369,7 +398,7 @@ class ModelConfigurationService:
                 response.raise_for_status()
                 payload = response.json()
         except (httpx.HTTPError, ValueError) as exc:
-            raise ModelSettingsError(_safe_error(exc)) from exc
+            raise ModelSettingsError(_safe_error(exc), code=_safe_error_code(exc)) from exc
         data = payload.get("data", []) if isinstance(payload, dict) else []
         return sorted(
             {
@@ -616,7 +645,24 @@ def _safe_error(exc: Exception) -> str:
     if isinstance(exc, httpx.RequestError):
         return "model endpoint connection failed"
     if isinstance(exc, OpenAICompatibleError):
-        if exc.status_code is not None:
-            return f"模型端点拒绝了结构化输出探测（HTTP {exc.status_code}）"
-        return "模型端点返回的内容未通过结构化输出校验"
+        return "model endpoint rejected the structured-output probe"
     return "model endpoint validation failed"
+
+
+def _safe_error_code(exc: Exception) -> str:
+    if isinstance(exc, OpenAICompatibleError):
+        return exc.code
+    if isinstance(exc, httpx.TimeoutException):
+        return "MODEL_TIMEOUT"
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code
+        if status_code == 429:
+            return "MODEL_RATE_LIMITED"
+        if status_code in {408, 504}:
+            return "MODEL_TIMEOUT"
+        if status_code >= 500:
+            return "MODEL_GATEWAY_UNAVAILABLE"
+        return "MODEL_GATEWAY_ERROR"
+    if isinstance(exc, httpx.RequestError):
+        return "MODEL_GATEWAY_UNAVAILABLE"
+    return "MODEL_SETTINGS_ERROR"

@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     lake_root: Path = Path("data/lake")
     private_object_root: Path = Path("data/private")
+    native_web_root: Path | None = None
     policy_config_path: Path = runtime_resource_path("configs/first_release.v3.json")
     object_store_endpoint: str | None = None
     object_store_bucket: str = "ashare-research"
@@ -45,7 +46,7 @@ class Settings(BaseSettings):
     auth_login_rate_limit_per_minute: int = Field(default=10, ge=1, le=120)
     cookie_secure: bool = False
     trusted_hosts: str = "*"
-    market_cache_seconds: int = Field(default=15, ge=1, le=300)
+    market_cache_seconds: int = Field(default=5, ge=1, le=300)
     market_kline_cache_seconds: int = Field(default=300, ge=15, le=3600)
     market_prefetch_max_workers: int = Field(default=4, ge=1, le=16)
     market_provider_max_workers: int = Field(default=4, ge=1, le=16)

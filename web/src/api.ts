@@ -85,7 +85,7 @@ export const api = {
   assets: () => request<AssetState>('/assets'),
   saveAssets: (payload: AssetState) => request<AssetState>('/assets', { method: 'PUT', body: JSON.stringify(payload) }),
   saveExitMonitorSettings: (payload: Pick<AssetState, 'exit_monitor_enabled' | 'default_profit_trigger' | 'stop_loss_monitor_enabled' | 'buy_monitor_enabled'>, idempotencyKey = crypto.randomUUID()) => request<AssetState>('/assets/exit-monitor', { method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify(payload) }),
-  saveMarketRefreshSettings: (marketRefreshIntervalSeconds: 15 | 30 | 60 | 120, idempotencyKey = crypto.randomUUID()) => request<AssetState>('/assets/market-refresh', { method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ market_refresh_interval_seconds: marketRefreshIntervalSeconds }) }),
+  saveMarketRefreshSettings: (marketRefreshIntervalSeconds: 5 | 10 | 15 | 30 | 60 | 120, idempotencyKey = crypto.randomUUID()) => request<AssetState>('/assets/market-refresh', { method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ market_refresh_interval_seconds: marketRefreshIntervalSeconds }) }),
   exitAdvice: (limit = 30) => request<ExitAdvice[]>(`/exit-advice${params({ limit })}`),
   submitManualExitAdvice: (symbol: string, idempotencyKey = crypto.randomUUID()) => request<ExitAdvice>('/exit-advice/manual', { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ symbol }) }),
   buyEntryMonitors: (limit = 50) => request<BuyEntryMonitor[]>(`/buy-entry-monitors${params({ limit })}`),
@@ -121,12 +121,12 @@ export const api = {
   personalImport: (archiveId: string) => request<PersonalArchiveJob>(`/me/data-imports/${encodeURIComponent(archiveId)}`),
   applyPersonalImport: (archiveId: string, mergeOptions: Record<string, unknown>, idempotencyKey: string) => request<PersonalArchiveJob>(`/me/data-imports/${encodeURIComponent(archiveId)}/apply`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ merge_options: mergeOptions }) }),
 
-  quote: async (symbol: string, refresh = false) => normalizeQuote(await request<RawQuote>(`/market/quotes/${encodeURIComponent(symbol)}${params({ refresh: refresh ? 'true' : undefined })}`)),
-  quotes: async (symbols: string[], refresh = false) => {
-    const rows = await request<RawQuote[]>(`/market/quotes${params({ symbols: symbols.join(','), refresh: refresh ? 'true' : undefined })}`)
+  quote: async (symbol: string, refresh = false, signal?: AbortSignal) => normalizeQuote(await request<RawQuote>(`/market/quotes/${encodeURIComponent(symbol)}${params({ refresh: refresh ? 'true' : undefined })}`, { signal })),
+  quotes: async (symbols: string[], refresh = false, signal?: AbortSignal) => {
+    const rows = await request<RawQuote[]>(`/market/quotes${params({ symbols: symbols.join(','), refresh: refresh ? 'true' : undefined })}`, { signal })
     return rows.map(normalizeQuote)
   },
-  kline: async (symbol: string, period: string, limit = 160, options: KlineQueryOptions | boolean = {}) => {
+  kline: async (symbol: string, period: string, limit = 160, options: KlineQueryOptions | boolean = {}, signal?: AbortSignal) => {
     const query = typeof options === 'boolean' ? { refresh: options } : options
     const payload = await request<DataEnvelope<KlineBar[]> & { bars: KlineBar[] }>(`/market/klines/${encodeURIComponent(symbol)}${params({
       period,
@@ -135,13 +135,14 @@ export const api = {
       start: query.start,
       end: query.end,
       refresh: query.refresh ? 'true' : undefined,
-    })}`)
+    })}`, { signal })
     return { ...payload, bars: (payload.bars || []).map((bar) => ({ ...bar, time: bar.time || bar.timestamp })) }
   },
-  prefetchMarket: async (symbols: string[], periods = ['day'], limit = 160, includeQuotes = true) => {
+  prefetchMarket: async (symbols: string[], periods = ['day'], limit = 160, includeQuotes = true, signal?: AbortSignal) => {
     const payload = await request<MarketPrefetchResponse>('/market/prefetch', {
       method: 'POST',
       body: JSON.stringify({ symbols, periods, limit, include_quotes: includeQuotes }),
+      signal,
     })
     if (!payload || Array.isArray(payload)) return { quotes: [], klines: {}, errors: {} } as MarketPrefetchResponse
     return {

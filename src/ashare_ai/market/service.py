@@ -37,7 +37,9 @@ PERIODS = {
     "daily": "daily",
 }
 MAX_PREFETCH_SYMBOLS = 50
-_PROVIDER_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="market-provider")
+# Provider calls can outlive a timed-out request. Keep the process-wide pool
+# bounded so those residual calls cannot multiply across request-local pools.
+_PROVIDER_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="market-provider")
 
 
 def _market_subprocess_env() -> dict[str, str]:

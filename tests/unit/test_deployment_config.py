@@ -159,6 +159,33 @@ def test_web_container_builds_vite_assets_and_nginx_proxies_api() -> None:
     assert "proxy_hide_header X-Content-Type-Options" in nginx
 
 
+def test_native_windows_entry_is_external_and_checksum_verified() -> None:
+    native = ROOT / "scripts" / "native"
+    lock = json.loads((native / "dependencies.lock.json").read_text(encoding="utf-8"))
+    assert lock["platform"] == "windows-amd64"
+    assert {item["id"] for item in lock["artifacts"]} == {
+        "postgres",
+        "redis-compatible",
+        "searxng",
+    }
+    searxng = next(item for item in lock["artifacts"] if item["id"] == "searxng")
+    assert len(searxng["commit"]) == 40
+    installer = (native / "ashare-native.ps1").read_text(encoding="utf-8")
+    assert "must be outside the source checkout" in installer
+    assert "Get-FileHash -Algorithm SHA256" in installer
+    assert "NATIVE_PROCESS_GROUP" in installer
+    assert "WorkingSet64" in installer
+    assert "Start-Process" in installer
+    assert "AshareAIService" in installer
+    assert "native-ports.json" in installer
+    assert "pwd.py" in installer
+    assert "postgres.exe" in installer
+    assert "Wait-PostgresReady" in installer
+    assert "pg_ctl.exe" in installer
+    assert (native / "ashare-native.cmd").is_file()
+    assert (ROOT / "docs" / "NATIVE_WINDOWS.md").is_file()
+
+
 def test_first_release_policy_fixes_required_constraints() -> None:
     policy = json.loads((ROOT / "configs" / "first_release.v1.json").read_text(encoding="utf-8"))
     assert policy["scoring"] == {

@@ -10,7 +10,7 @@
 
 ### 1.1 地址、格式和时间
 
-- 本地完整 Docker 栈：`http://127.0.0.1`，Web 通过 Nginx 代理 `/api`。
+- 本地完整 Docker 栈：`http://127.0.0.1`，Web 通过 Nginx 代理 `/api`；Windows 原生包：`http://127.0.0.1:58000/`，构建后的 SPA 由 API 同源提供。
 - 本地直接访问 API：`http://127.0.0.1:8000`。
 - 所有请求和响应使用 `application/json`，报告内容接口除外。
 - 日期使用 `YYYY-MM-DD`，例如 `2026-07-17`。
@@ -270,7 +270,7 @@ Web 登录。请求体为 `LoginRequest`：
 | `default_profit_trigger` | decimal/null | 全局人民币浮盈触发金额；启用监控时应提供 |
 | `stop_loss_monitor_enabled` | boolean | 默认 `true`；交易日每分钟检查持仓止损预警 |
 | `buy_monitor_enabled` | boolean | 默认 `true`；正式 BUY Trade Plan 的有效入场区间监控 |
-| `market_refresh_interval_seconds` | integer | 账户级行情自动刷新间隔，只允许 `15`、`30`、`60` 或 `120`，默认 `15` |
+| `market_refresh_interval_seconds` | integer | 账户级行情自动刷新间隔，只允许 `5`、`10`、`15`、`30`、`60` 或 `120`，默认 `5` |
 
 `AssetStateResponse` 在此基础上增加 `updated_at`；`GET /assets` 返回当前用户数据，`PUT /assets` 整体替换当前用户自选股、模拟持仓和可选总资产。
 
@@ -285,7 +285,7 @@ Web 登录。请求体为 `LoginRequest`：
 {
   "server_time": "2026-07-19T12:00:00Z",
   "user": {"user_id":"<USER_ID>","username":"admin","role":"ADMIN","enabled":true,"created_at":"<DATETIME>","updated_at":"<DATETIME>"},
-  "assets": {"watchlist":[],"positions":[],"total_assets":null,"market_refresh_interval_seconds":15,"updated_at":null},
+  "assets": {"watchlist":[],"positions":[],"total_assets":null,"market_refresh_interval_seconds":5,"updated_at":null},
   "capabilities": {
     "api_version":"v1",
     "authentication":"BEARER_REFRESH",
@@ -444,9 +444,9 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 | `timeout_seconds` | number | 1–600，默认 90 |
 | `enabled` | boolean | 默认 `true` |
 
-生产环境的 `base_url` 必须为 HTTPS，主机必须在 `MODEL_ALLOWED_HOSTS` 白名单中，不能携带账号、密码、查询字符串或片段。启用配置前服务端会执行结构化输出探测，失败返回 `422` 且旧配置继续生效。
+生产环境的 `base_url` 必须为 HTTPS，主机必须在 `MODEL_ALLOWED_HOSTS` 白名单中，不能携带账号、密码、查询字符串或片段。启用配置前服务端只执行一次有硬上限 8 秒的结构化输出探测，失败返回 `422` 且旧配置继续生效；保存不会串行执行流式探测。结构化探测失败时 `detail.code` 可为 `MODEL_PROBE_TIMEOUT`、`MODEL_RATE_LIMITED`、`MODEL_GATEWAY_ERROR` 或 `MODEL_INVALID_STRUCTURED_OUTPUT`。
 
-`POST /api/v1/admin/model-settings/test` 返回 `ModelProbeResponse`：`reachable`、`message`、`model`、`checked_at`。`POST /api/v1/admin/model-settings/models` 返回 `{"models":["..."]}`。
+`POST /api/v1/admin/model-settings/test` 返回 `ModelProbeResponse`：`reachable`、`message`、`model`、`checked_at`、`structured_output_supported`、`streaming_supported`。该显式操作才会在结构化探测后追加一次 8 秒上限的流式能力检测并更新 `streaming_supported`。`POST /api/v1/admin/model-settings/models` 返回 `{"models":["..."]}`。
 
 ### 系统设置中心
 
@@ -656,7 +656,7 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 
 ## 10. 行情接口
 
-实时行情是交互数据，不写入研究或回测快照。Web 在恢复可见或重新聚焦时会强制刷新已订阅报价；日线和分钟线在页面可见时分别至少每 5 分钟和 30 秒重验。行情响应中的 `status` 包含：
+实时行情是交互数据，不写入研究或回测快照。Web 在恢复可见或重新聚焦时会强制刷新已订阅报价，并对短时间内重复的可见性事件节流；日线和分钟线在页面可见时分别至少每 5 分钟和 30 秒重验。行情响应中的 `status` 包含：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|

@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ashare_ai.agents.ai_cache import AICacheGeneration, AIResultCacheService
 from ashare_ai.agents.model_settings import ModelConfigurationService
 from ashare_ai.agents.openai_compatible import (
     OpenAICompatibleError,
@@ -37,7 +38,6 @@ from ashare_ai.orchestration.operation_runs import (
 from ashare_ai.orchestration.research_schedule import FreeExchangeCalendar
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import (
-    AIResponseCacheRow,
     ExitAdviceRow,
     JobRun,
     ScoreRow,
@@ -776,80 +776,70 @@ def execute_exit_advice(advice_id: str) -> dict[str, Any]:
                 "messages": messages,
             }
         )
-        cached = session.scalar(
-            select(AIResponseCacheRow).where(
-                AIResponseCacheRow.user_id == row.user_id,
-                AIResponseCacheRow.purpose == "EXIT_ADVICE",
-                AIResponseCacheRow.request_sha256 == request_sha,
-                AIResponseCacheRow.expires_at > now,
-            )
+        client = OpenAICompatibleStructuredLLMClient(
+            base_url=runtime.base_url,
+            api_key=runtime.api_key,
+            model=runtime.research_model,
+            reasoning_effort=runtime.research_reasoning_effort,
+            timeout_seconds=runtime.timeout_seconds,
+            max_retries=1,
+            cache_policy=runtime.profile_for(runtime.research_model).cache_policy,
         )
         format_repair_used = False
-        if cached is not None:
-            analysis = ExitAdviceAnalysis.model_validate(cached.response)
-            cached.hit_count += 1
-            cached.last_hit_at = now
-            cache_hit = True
-            input_tokens = cached.input_tokens
-            cached_input_tokens = cached.input_tokens
-            cache_write_tokens = reasoning_tokens = 0
-            output_tokens = cached.output_tokens
-        else:
-            client = OpenAICompatibleStructuredLLMClient(
-                base_url=runtime.base_url,
-                api_key=runtime.api_key,
-                model=runtime.research_model,
-                reasoning_effort=runtime.research_reasoning_effort,
-                timeout_seconds=runtime.timeout_seconds,
-                max_retries=1,
-                cache_policy=runtime.profile_for(runtime.research_model).cache_policy,
+
+        def record_format_repair(raw_output: str) -> None:
+            transition_operation_run(
+                session,
+                row.operation_run_id,
+                status="RUNNING",
+                event_type="EXIT_ADVICE_FORMAT_REPAIR_STARTED",
+                message="Exit advice output format repair started",
+                details={
+                    "advice_id": row.advice_id,
+                    "output_sha256": sha256_bytes(raw_output.encode("utf-8")),
+                    "output_length": len(raw_output),
+                },
             )
-            def record_format_repair(raw_output: str) -> None:
-                transition_operation_run(
-                    session,
-                    row.operation_run_id,
-                    status="RUNNING",
-                    event_type="EXIT_ADVICE_FORMAT_REPAIR_STARTED",
-                    message="Exit advice output format repair started",
-                    details={
-                        "advice_id": row.advice_id,
-                        "output_sha256": sha256_bytes(raw_output.encode("utf-8")),
-                        "output_length": len(raw_output),
-                    },
-                )
+
+        def generate() -> AICacheGeneration:
+            nonlocal format_repair_used
             analysis, generation, format_repair_used = _generate_exit_advice_with_repair(
                 client,
                 messages=messages,
                 request_sha=request_sha,
                 on_repair=record_format_repair,
             )
-            input_tokens = generation.metadata.input_tokens
-            cached_input_tokens = generation.metadata.cached_input_tokens
-            cache_write_tokens = generation.metadata.cache_write_tokens
-            output_tokens = generation.metadata.output_tokens
-            reasoning_tokens = generation.metadata.reasoning_tokens
-            cache_hit = False
-            cached_response = analysis.model_dump(mode="json")
-            session.add(
-                AIResponseCacheRow(
-                    user_id=row.user_id,
-                    purpose="EXIT_ADVICE",
-                    request_sha256=request_sha,
-                    response_sha256=stable_hash(cached_response),
-                    model_name=generation.metadata.model_name,
-                    reasoning_effort=generation.metadata.reasoning_effort,
-                    prompt_version=PROMPT_VERSION,
-                    response=cached_response,
-                    input_tokens=input_tokens,
-                    cached_input_tokens=cached_input_tokens,
-                    cache_write_tokens=cache_write_tokens,
-                    output_tokens=output_tokens,
-                    reasoning_tokens=reasoning_tokens,
-                    cache_policy=generation.metadata.cache_policy,
-                    created_at=now,
-                    expires_at=now.replace(hour=23, minute=59, second=59, microsecond=0),
-                )
+            metadata = generation.metadata
+            return AICacheGeneration(
+                response=analysis.model_dump(mode="json"),
+                model_name=metadata.model_name,
+                reasoning_effort=metadata.reasoning_effort,
+                input_tokens=metadata.input_tokens,
+                cached_input_tokens=metadata.cached_input_tokens,
+                cache_write_tokens=metadata.cache_write_tokens,
+                output_tokens=metadata.output_tokens,
+                reasoning_tokens=metadata.reasoning_tokens,
+                cache_policy=metadata.cache_policy,
             )
+
+        expires_at = now.replace(hour=23, minute=59, second=59, microsecond=0)
+        cache_result = AIResultCacheService(session_factory=SessionLocal).get_or_generate(
+            user_id=row.user_id,
+            purpose="EXIT_ADVICE",
+            request_sha256=request_sha,
+            prompt_version=PROMPT_VERSION,
+            ttl_seconds=max(60, int((expires_at - now).total_seconds())),
+            validate=lambda value: ExitAdviceAnalysis.model_validate(value),
+            generate=generate,
+        )
+        analysis = ExitAdviceAnalysis.model_validate(cache_result.response)
+        cached = cache_result.row
+        cache_hit = cache_result.cache_hit
+        input_tokens = cached.input_tokens
+        cached_input_tokens = cached.input_tokens if cache_hit else cached.cached_input_tokens
+        cache_write_tokens = 0 if cache_hit else cached.cache_write_tokens
+        output_tokens = cached.output_tokens
+        reasoning_tokens = 0 if cache_hit else cached.reasoning_tokens
         validated = _validate_sell_ladder(session, row, analysis)
         result = {
             **analysis.model_dump(mode="json", exclude={"ladder"}),
@@ -859,6 +849,9 @@ def execute_exit_advice(advice_id: str) -> dict[str, Any]:
             "cache_write_tokens": cache_write_tokens,
             "output_tokens": output_tokens,
             "reasoning_tokens": reasoning_tokens,
+            "cache_hit": cache_hit,
+            "cache_hits": cached.hit_count,
+            "singleflight_wait_ms": cache_result.singleflight_wait_ms,
         }
         row.status = "SUCCEEDED"
         row.action = analysis.action
@@ -877,7 +870,7 @@ def execute_exit_advice(advice_id: str) -> dict[str, Any]:
             details={
                 "advice_id": row.advice_id,
                 "symbol": row.symbol,
-                "format_repair_used": cached is None and format_repair_used,
+                "format_repair_used": not cache_hit and format_repair_used,
             },
             output_hash=row.response_sha256,
         )

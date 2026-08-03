@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import httpx
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
 import pytest
+import respx
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -140,6 +142,34 @@ def test_model_probe_checks_research_model_as_well_as_search_model(monkeypatch) 
 
     assert attempted == [("search-model", "low"), ("research-model", "high")]
     assert result.reachable is True
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_model_settings_probe_can_skip_stream_probe() -> None:
+    route = respx.post("https://gateway.example/v1/responses").mock(
+        return_value=httpx.Response(200, json={"model": "gpt-test", "output_text": '{"ok": true}'})
+    )
+    session, _ = _database()
+    service = ModelConfigurationService(_settings(Fernet.generate_key().decode()))
+
+    result = await service.probe(
+        ModelSettingsDraft(
+            base_url="https://gateway.example",
+            api_key="probe-secret",
+            enabled=True,
+            search_model="gpt-test",
+            search_reasoning_effort="high",
+            research_model="gpt-test",
+            research_reasoning_effort="high",
+        ),
+        session,
+        include_streaming=False,
+    )
+
+    assert route.call_count == 1
+    assert result.structured_output_supported is True
+    assert result.streaming_checked is False
 
 
 def test_research_manifest_pins_active_model_revision(monkeypatch, tmp_path) -> None:

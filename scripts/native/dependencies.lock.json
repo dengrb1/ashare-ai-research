@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "runtime_version": "2026.07.31",
+  "platform": "windows-amd64",
+  "artifacts": [
+    {
+      "id": "postgres",
+      "version": "16.14-1",
+      "kind": "zip",
+      "url": "https://get.enterprisedb.com/postgresql/postgresql-16.14-1-windows-x64-binaries.zip",
+      "checksum_url": "https://get.enterprisedb.com/postgresql/postgresql-16.14-1-windows-x64-binaries.zip.sha256",
+      "sha256": "98af1417ba6a8dc30543e560e5407833a3b9e7cc7ed20e73b2006f3aa2f04663"
+    },
+    {
+      "id": "redis-compatible",
+      "version": "5.0.14.1",
+      "kind": "zip",
+      "url": "https://github.com/tporadowski/redis/releases/download/v5.0.14.1/Redis-x64-5.0.14.1.zip",
+      "github_release_api": "https://api.github.com/repos/tporadowski/redis/releases/tags/v5.0.14.1",
+      "asset_name": "Redis-x64-5.0.14.1.zip",
+      "sha256": "018ea18a35876383cbb5f4cd0258adfc87747cf9d619bce1cf73a2e36f720ccf"
+    },
+    {
+      "id": "searxng",
+      "version": "2026.7.31-057a77168",
+      "kind": "git",
+      "url": "https://github.com/searxng/searxng.git",
+      "tag": "master",
+      "commit": "057a77168d3175ce2e42e5b10f46a8df073886d5",
+      "commit_prefix": "057a77168"
+    }
+  ]
+}
