@@ -92,6 +92,75 @@ async def test_generate_structured_posts_strict_schema_and_normalizes_code_fence
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_generate_structured_accepts_compatible_nested_text_shapes() -> None:
+    respx.post("http://llm.local/v1/responses").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "output": [
+                    {"type": "reasoning", "summary": []},
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": {"value": '{"recommendation":"hold","confidence":0.6}'},
+                            }
+                        ],
+                    },
+                ]
+            },
+        )
+    )
+    client = OpenAICompatibleStructuredLLMClient(
+        base_url="http://llm.local", api_key="secret", model="configured-model"
+    )
+
+    generation = await client.generate_structured(
+        schema=_Result,
+        messages=({"role": "user", "content": "Assess."},),
+        idempotency_key="nested-output",
+    )
+
+    assert generation.output == {"recommendation": "hold", "confidence": 0.6}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_generate_structured_accepts_chat_shaped_compatible_response() -> None:
+    respx.post("http://llm.local/v1/responses").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": {
+                                "text": {
+                                    "value": '{"recommendation":"buy","confidence":0.8}'
+                                }
+                            },
+                        }
+                    }
+                ]
+            },
+        )
+    )
+    client = OpenAICompatibleStructuredLLMClient(
+        base_url="http://llm.local", api_key="secret", model="configured-model"
+    )
+
+    generation = await client.generate_structured(
+        schema=_Result,
+        messages=({"role": "user", "content": "Assess."},),
+        idempotency_key="chat-shaped-output",
+    )
+
+    assert generation.output == {"recommendation": "buy", "confidence": 0.8}
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_structured_openai_cache_control_falls_back_for_compatible_gateway() -> None:
     route = respx.post("http://llm.local/v1/responses").mock(
         side_effect=[

@@ -459,6 +459,65 @@ def _manual_research_date(requested_date: date, now: datetime) -> date:
         ) from exc
 
 
+def _historical_bundle_source_run(
+    db: Session,
+    *,
+    user_id: str,
+    trading_date: date,
+    now: datetime,
+) -> str | None:
+    """Find the user's immutable bundle for a same-day historical rerun.
+
+    AKShare's live spot directory cannot reconstruct yesterday once today's
+    session has opened.  Reusing the already acquired bundle keeps the rerun
+    point-in-time safe, including when the original run failed after ingestion.
+    """
+
+    if get_effective_settings().canonical_bundle_mode != "akshare":
+        return None
+    current = now.astimezone(SHANGHAI) if now.tzinfo else now.replace(tzinfo=SHANGHAI)
+    if trading_date >= current.date() or (current.hour, current.minute) < (9, 0):
+        return None
+    # The normal resolver already rejects dates older than the latest completed
+    # session.  Keep this lookup bounded for compatibility with older clients
+    # that bypass that resolver in tests/imported workflows.
+    if (current.date() - trading_date).days > 14:
+        return None
+    try:
+        sessions = FreeExchangeCalendar().sessions(
+            current.date() - timedelta(days=20), current.date()
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="authoritative trading calendar unavailable for historical research",
+        ) from exc
+    if current.date() not in sessions:
+        return None
+    latest_completed = max((value for value in sessions if value < current.date()), default=None)
+    if latest_completed != trading_date:
+        return None
+    candidates = db.scalars(
+        select(JobRun)
+        .where(
+            JobRun.user_id == user_id,
+            JobRun.run_type == "DAILY",
+            JobRun.trading_date == trading_date,
+        )
+        .order_by(JobRun.started_at.desc())
+        .limit(20)
+    ).all()
+    for candidate in candidates:
+        manifest = candidate.manifest if isinstance(candidate.manifest, dict) else {}
+        digest = manifest.get("acquired_bundle_sha256")
+        if isinstance(digest, str) and len(digest) == 64:
+            return candidate.run_id
+    raise HTTPException(
+        status_code=409,
+        detail="盘中重跑昨日研究需要该交易日已有不可变数据快照；请在收盘后先完成一次数据采集",
+    )
+
+
 def _research_readiness_wait(trading_date: date, now: datetime) -> dict[str, str | int] | None:
     """Return durable wait metadata without changing the selected session."""
     if get_effective_settings().canonical_bundle_mode in {"file", "demo"}:
@@ -3117,6 +3176,12 @@ def submit_research(
     requested_date = payload.trading_date
     submitted_at = datetime.now(SHANGHAI)
     actual_research_date = _manual_research_date(requested_date, submitted_at)
+    historical_source_run_id = _historical_bundle_source_run(
+        db,
+        user_id=context.user.user_id,
+        trading_date=actual_research_date,
+        now=submitted_at,
+    )
     try:
         readiness_wait = _research_readiness_wait(actual_research_date, submitted_at)
     except Exception as exc:
@@ -3238,6 +3303,8 @@ def submit_research(
         ),
         "data_readiness_wait": readiness_wait,
     }
+    if historical_source_run_id is not None:
+        frozen_manifest["source_bundle_run_id"] = historical_source_run_id
     run.manifest = frozen_manifest
     run.input_hash = stable_hash(frozen_manifest)
     if readiness_wait is not None:

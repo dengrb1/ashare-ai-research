@@ -13,6 +13,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from ashare_ai.agents.openai_compatible import OpenAICompatibleError
 from ashare_ai.agents.protocols import GenerationMetadata, StructuredGeneration
 from ashare_ai.agents.validation import ComponentAnalysis
 from ashare_ai.core.config import get_settings
@@ -104,6 +105,16 @@ class ConcurrentFakeStructuredLLMClient(FakeStructuredLLMClient):
             return await super().generate_structured(**kwargs)
         finally:
             self.active -= 1
+
+
+class UnavailableStructuredLLMClient:
+    async def generate_structured(self, **kwargs: Any) -> StructuredGeneration:
+        del kwargs
+        raise OpenAICompatibleError(
+            "Responses API request failed with status 403",
+            code="MODEL_RESPONSE_ERROR",
+            status_code=403,
+        )
 
 
 def test_run_context_normalizes_postgres_utc_timestamp_to_shanghai(tmp_path) -> None:
@@ -591,6 +602,66 @@ def test_builtin_production_requires_canonical_bundle_and_accepts_json(
     assert len(manifest["canonical_file_sha256"]) == 64
 
 
+def test_historical_research_reuses_bundle_from_failed_source_run(tmp_path) -> None:
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    backend = BuiltinDailyBackend(
+        session_factory=factory,
+        object_root=tmp_path / "objects",
+        state_root=tmp_path / "state",
+        policy_path="configs/first_release.v1.json",
+        app_env="development",
+    )
+    pipeline = ApplicationPipeline(backend, session_factory=factory)
+    trading_date = date(2026, 7, 14)
+    source_run_id = pipeline.start_run(trading_date)
+    with factory() as session:
+        source = session.get(JobRun, source_run_id)
+        assert source is not None
+        source.user_id = "research-owner"
+        session.commit()
+
+    pipeline.sync_reference_data(source_run_id)
+    with factory() as session:
+        source = session.get(JobRun, source_run_id)
+        assert source is not None
+        source.status = "FAILED"
+        source.completed_at = datetime.now(UTC)
+        session.commit()
+
+    rerun_id = pipeline.start_run(trading_date)
+    with factory() as session:
+        rerun = session.get(JobRun, rerun_id)
+        assert rerun is not None
+        rerun.user_id = "research-owner"
+        rerun.manifest = {**rerun.manifest, "source_bundle_run_id": source_run_id}
+        session.commit()
+
+    pipeline.sync_reference_data(rerun_id)
+
+    with factory() as session:
+        source = session.get(JobRun, source_run_id)
+        rerun = session.get(JobRun, rerun_id)
+        assert source is not None and rerun is not None
+        assert rerun.manifest["acquired_bundle_sha256"] == source.manifest[
+            "acquired_bundle_sha256"
+        ]
+        assert session.scalar(
+            select(AuditEvent.event_type).where(
+                AuditEvent.run_id == rerun_id,
+                AuditEvent.event_type == "HISTORICAL_BUNDLE_REUSED",
+            )
+        ) == "HISTORICAL_BUNDLE_REUSED"
+    assert backend._stage_digest(rerun_id, "bundle") == backend._stage_digest(
+        source_run_id, "bundle"
+    )
+
+
 def test_llm_component_results_are_audited_with_transport_metadata(tmp_path) -> None:
     client = FakeStructuredLLMClient()
     _, factory, pipeline, run_id, feature_snapshot_id = _prepared_llm_backend(tmp_path, client)
@@ -612,6 +683,28 @@ def test_llm_component_results_are_audited_with_transport_metadata(tmp_path) -> 
         assert {call.model_name for call in calls} == {"fake-model"}
         assert {call.result["score"] for call in calls if call.component == "fundamental"} == {71.0}
         assert all(call.result["prompt_version"] == "builtin-llm-v2" for call in calls)
+
+
+def test_llm_unavailability_falls_back_to_deterministic_agents(tmp_path) -> None:
+    client = UnavailableStructuredLLMClient()
+    _, factory, pipeline, run_id, feature_snapshot_id = _prepared_llm_backend(tmp_path, client)  # type: ignore[arg-type]
+
+    pipeline.run_research_agents(run_id, feature_snapshot_id)
+
+    with factory() as session:
+        run = session.get(JobRun, run_id)
+        assert run is not None
+        assert run.manifest["agent_backend_effective"] == "builtin-deterministic-fallback"
+        assert run.manifest["agent_backend_degradation"]["status_code"] == 403
+        assert session.scalar(
+            select(AuditEvent.event_type).where(
+                AuditEvent.run_id == run_id,
+                AuditEvent.event_type == "LLM_AGENT_DEGRADED",
+            )
+        ) == "LLM_AGENT_DEGRADED"
+        calls = session.scalars(select(AgentCall).where(AgentCall.run_id == run_id)).all()
+        assert len(calls) == 60
+        assert {call.model_provider for call in calls} == {"builtin"}
 
 
 def test_llm_component_requests_use_configured_bounded_concurrency(tmp_path) -> None:

@@ -47,7 +47,16 @@ class NotReady:
         return False
 
 
-def test_manual_resolver_rejects_previous_session_after_market_open() -> None:
+def test_manual_resolver_allows_latest_completed_session_during_market_open() -> None:
+    assert resolve_manual_research_date(
+        requested_date=date(2026, 7, 14),
+        now=datetime(2026, 7, 15, 10, tzinfo=SHANGHAI),
+        sessions=(date(2026, 7, 14), date(2026, 7, 15)),
+        data_ready=lambda value: value == date(2026, 7, 14),
+    ) == date(2026, 7, 14)
+
+
+def test_manual_resolver_rejects_current_session_during_market_open() -> None:
     with pytest.raises(RuntimeError, match="unsafe during the trading session"):
         resolve_manual_research_date(
             requested_date=date(2026, 7, 15),

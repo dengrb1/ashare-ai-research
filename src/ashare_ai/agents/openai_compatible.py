@@ -676,30 +676,66 @@ def _decode_response(response: httpx.Response) -> dict[str, Any]:
 
 
 def _extract_output_text(response: Mapping[str, Any]) -> str:
-    output_text = response.get("output_text")
-    if isinstance(output_text, str) and output_text.strip():
-        return output_text
-
-    output = response.get("output")
-    if isinstance(output, Sequence) and not isinstance(output, (str, bytes, bytearray)):
-        texts: list[str] = []
-        for item in output:
-            if not isinstance(item, Mapping):
-                continue
-            content = item.get("content")
-            if not isinstance(content, Sequence) or isinstance(content, (str, bytes, bytearray)):
-                continue
-            for part in content:
-                if not isinstance(part, Mapping) or part.get("type") != "output_text":
-                    continue
-                text = part.get("text")
-                if isinstance(text, str):
-                    texts.append(text)
-                elif isinstance(text, Mapping) and isinstance(text.get("value"), str):
-                    texts.append(text["value"])
+    # Gateways vary between native Responses, nested text objects, and a
+    # Chat Completions-shaped ``choices`` wrapper.  Inspect only known answer
+    # fields so reasoning/refusal metadata is never treated as model output.
+    for key in ("output_text", "output", "choices", "content"):
+        value = response.get(key)
+        direct = _text_value(value)
+        if direct:
+            return direct
+        texts = _collect_output_text(value)
         if texts:
             return "".join(texts)
     raise OpenAICompatibleError("Responses API response contains no output text")
+
+
+def _text_value(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value
+    if isinstance(value, Mapping):
+        for key in ("value", "text", "content"):
+            nested = value.get(key)
+            if isinstance(nested, str) and nested.strip():
+                return nested
+            if isinstance(nested, Mapping):
+                text = _text_value(nested)
+                if text:
+                    return text
+    return None
+
+
+def _collect_output_text(value: Any) -> list[str]:
+    if isinstance(value, Mapping):
+        result: list[str] = []
+        part_type = value.get("type")
+        if part_type in {"output_text", "text"}:
+            text = _text_value(value.get("text"))
+            if text:
+                result.append(text)
+        elif (
+            part_type in {"message", "output"}
+            or value.get("role") == "assistant"
+            or (part_type is None and set(value).issubset({"content", "role", "name"}))
+        ):
+            # Some compatible gateways collapse message.content to a string.
+            text = _text_value(value.get("content"))
+            if text:
+                result.append(text)
+            text = _text_value(value.get("text"))
+            if text:
+                result.append(text)
+        for key in ("content", "message"):
+            nested = value.get(key)
+            if nested is not None and not isinstance(nested, str):
+                result.extend(_collect_output_text(nested))
+        return result
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        collected: list[str] = []
+        for item in value:
+            collected.extend(_collect_output_text(item))
+        return collected
+    return []
 
 
 def _parse_output(text: str) -> dict[str, Any]:

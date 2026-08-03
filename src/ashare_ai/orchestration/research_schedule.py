@@ -117,18 +117,31 @@ def resolve_manual_research_date(
         raise RuntimeError("future research dates are unavailable")
     ordered = tuple(sorted(set(sessions)))
     current_is_session = current.date() in ordered
+    completed = [value for value in ordered if value < current.date()]
 
     if current_is_session and MARKET_OPEN <= current.time() < AUTO_START:
-        raise RuntimeError("live canonical data is unsafe during the trading session")
+        # The current session is not a valid PIT decision point yet, but the
+        # latest completed session is safe when the caller can reuse its
+        # immutable bundle.  Rebuilding that session from live spot data is
+        # deliberately rejected by the canonical builder.
+        if requested_date >= current.date():
+            raise RuntimeError("live canonical data is unsafe during the trading session")
+        if not completed:
+            raise RuntimeError("no completed trading session is available")
+        candidate = completed[-1]
+        if requested_date < candidate:
+            raise RuntimeError("only the latest uncontaminated session can use live data")
+    elif current_is_session and current.time() >= AUTO_START:
+        if requested_date == current.date():
+            candidate = current.date()
+        else:
+            if not completed:
+                raise RuntimeError("no completed trading session is available")
+            candidate = completed[-1]
+            if requested_date < candidate:
+                raise RuntimeError("only the latest uncontaminated session can use live data")
 
-    if current_is_session and current.time() >= AUTO_START:
-        # Once today's market has opened, the live spot snapshot can no longer be
-        # used to reconstruct a prior session without look-ahead contamination.
-        if requested_date != current.date():
-            raise RuntimeError("historical live reconstruction is unavailable after market open")
-        candidate = current.date()
     else:
-        completed = [value for value in ordered if value < current.date()]
         if not completed:
             raise RuntimeError("no completed trading session is available")
         candidate = completed[-1]

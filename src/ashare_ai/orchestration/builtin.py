@@ -434,6 +434,17 @@ class BuiltinDailyBackend:
                     data_quality=bundle.data_quality,
                 )
                 run.manifest = updated
+                source_run_id = manifest.get("source_bundle_run_id")
+                if isinstance(source_run_id, str) and source_run_id:
+                    AuditLogger(session).record(
+                        run_id,
+                        "HISTORICAL_BUNDLE_REUSED",
+                        "Research reused an immutable bundle from the latest completed session",
+                        details={
+                            "source_run_id": source_run_id,
+                            "bundle_sha256": digest,
+                        },
+                    )
                 session.commit()
         self._write_stage(
             run_id,
@@ -732,11 +743,21 @@ class BuiltinDailyBackend:
         bundle = self._read_stage(run_id, "bundle", CanonicalDailyBundle)
         features = self._read_stage(run_id, "features", FeatureArtifact)
         llm_client = self._resolve_llm_client(run_id)
-        llm_results = (
-            self._run_llm_components(llm_client, bundle.decision_at, features.items, bundle)
-            if llm_client is not None
-            else {}
-        )
+        llm_results: dict[tuple[str, str], AgentComponentResult] = {}
+        if llm_client is not None:
+            try:
+                llm_results = self._run_llm_components(
+                    llm_client, bundle.decision_at, features.items, bundle
+                )
+            except Exception as exc:
+                if not _is_degradable_llm_error(exc):
+                    raise
+                # Numeric scoring and the PIT evidence bundle remain valid when
+                # the optional model gateway is unavailable.  Complete the run
+                # with the same deterministic Agent mapping used when no model
+                # configuration is enabled, and leave an auditable warning.
+                llm_client = None
+                self._record_llm_degradation(run_id, exc)
         items: list[SymbolAgentSet] = []
         for feature_item in features.items:
             evidence = self._evidence_for_symbol(bundle, feature_item.symbol)
@@ -1706,7 +1727,10 @@ class BuiltinDailyBackend:
         required_symbols: tuple[str, ...] = (),
     ) -> CanonicalDailyBundle:
         configured = os.environ.get("ASHARE_CANONICAL_BUNDLE")
-        if configured:
+        reused = self._load_reused_bundle(trading_date, decision_at, run_id=run_id)
+        if reused is not None:
+            bundle = reused
+        elif configured:
             stripped = configured.strip()
             payload = (
                 stripped if stripped.startswith("{") else Path(stripped).read_text(encoding="utf-8")
@@ -1759,6 +1783,46 @@ class BuiltinDailyBackend:
         if bundle.trading_date != trading_date or bundle.decision_at != decision_at:
             raise ValueError("canonical bundle does not match requested trading_date/decision_at")
         return bundle
+
+    def _load_reused_bundle(
+        self,
+        trading_date: date,
+        decision_at: datetime,
+        *,
+        run_id: str | None,
+    ) -> CanonicalDailyBundle | None:
+        if run_id is None:
+            return None
+        with self.session_factory() as session:
+            current = session.get(JobRun, run_id)
+            if current is None:
+                raise KeyError(run_id)
+            source_id = (current.manifest or {}).get("source_bundle_run_id")
+            if not isinstance(source_id, str) or not source_id:
+                return None
+            source = session.get(JobRun, source_id)
+            if source is None or source.run_type != "DAILY":
+                raise RuntimeError("historical research source bundle is unavailable")
+            if current.user_id is None or source.user_id != current.user_id:
+                raise RuntimeError("historical research source bundle ownership mismatch")
+            expected_digest = (source.manifest or {}).get("acquired_bundle_sha256")
+            if not isinstance(expected_digest, str) or len(expected_digest) != 64:
+                raise RuntimeError("historical research source bundle is not immutable")
+
+        actual_digest = self._stage_digest(source_id, "bundle")
+        if actual_digest != expected_digest:
+            raise RuntimeError("historical research source bundle hash mismatch")
+        bundle = self._read_stage(source_id, "bundle", CanonicalDailyBundle)
+        if bundle.trading_date != trading_date:
+            raise RuntimeError("historical research source bundle date mismatch")
+        if bundle.decision_at > decision_at:
+            raise RuntimeError(
+                "historical research source bundle is newer than the requested decision"
+            )
+        # The original bundle was validated against its own decision point. A
+        # later historical decision can safely reuse it, but its bundle-level
+        # decision_at must match the new run for downstream PIT checks.
+        return bundle.model_copy(update={"decision_at": decision_at})
 
     def _record_akshare_acquisition_events(
         self,
@@ -1944,13 +2008,45 @@ class BuiltinDailyBackend:
                 )
             return (symbol, component), result
 
-        completed = await asyncio.gather(
-            *(
-                run_one(symbol, component, features, evidence)
-                for symbol, component, features, evidence in components
+        completed: list[tuple[tuple[str, str], AgentComponentResult]] = []
+        batch_size = max(1, self._settings.llm_agent_max_concurrency)
+        for offset in range(0, len(components), batch_size):
+            completed.extend(
+                await asyncio.gather(
+                    *(
+                        run_one(symbol, component, features, evidence)
+                        for symbol, component, features, evidence in components[
+                            offset : offset + batch_size
+                        ]
+                    )
+                )
             )
-        )
         return dict(completed)
+
+    def _record_llm_degradation(self, run_id: str, error: Exception) -> None:
+        details: dict[str, Any] = {
+            "error_type": type(error).__name__,
+            "error_code": getattr(error, "code", None),
+            "status_code": getattr(error, "status_code", None),
+            "retryable": bool(getattr(error, "retryable", False)),
+            "fallback": "builtin-deterministic",
+        }
+        with self.session_factory() as session:
+            run = session.get(JobRun, run_id)
+            if run is not None:
+                run.manifest = {
+                    **dict(run.manifest),
+                    "agent_backend_effective": "builtin-deterministic-fallback",
+                    "agent_backend_degradation": details,
+                }
+                AuditLogger(session).record(
+                    run_id,
+                    "LLM_AGENT_DEGRADED",
+                    "Model Agent unavailable; deterministic Agent mapping was used",
+                    severity="WARNING",
+                    details=details,
+                )
+                session.commit()
 
     @staticmethod
     def _scalar_features(features: FrozenModel) -> dict[str, float | int | str | bool | None]:
@@ -2074,6 +2170,14 @@ def _run_async(coroutine: Coroutine[Any, Any, T]) -> T:
     if failure:
         raise failure[0]
     return result[0]
+
+
+def _is_degradable_llm_error(error: Exception) -> bool:
+    from ashare_ai.agents.openai_compatible import OpenAICompatibleError
+
+    if isinstance(error, (OpenAICompatibleError, OSError)):
+        return True
+    return isinstance(error, RuntimeError) and str(error).strip() == "can't start new thread"
 
 
 def _bounded(value: float) -> float:
