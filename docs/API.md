@@ -147,6 +147,7 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 个人档案 | POST | `/api/v1/me/data-imports/{import_id}/apply` | 写入、幂等、202 |
 | 用户管理 | GET/POST | `/api/v1/admin/users` | 管理员 |
 | 用户管理 | PATCH | `/api/v1/admin/users/{user_id}` | 管理员 |
+| 用户管理 | DELETE | `/api/v1/admin/users/{user_id}` | 管理员、写入 |
 | 用户管理 | POST | `/api/v1/admin/users/{user_id}/password` | 管理员 |
 | 模型设置 | GET/PUT | `/api/v1/admin/model-settings` | 管理员 |
 | 模型设置 | POST | `/api/v1/admin/model-settings/test` | 管理员、写入 |
@@ -240,6 +241,7 @@ Web 登录。请求体为 `LoginRequest`：
 | `username` | string |
 | `role` | string，通常为 `USER` 或 `ADMIN` |
 | `enabled` | boolean |
+| `is_admin_account` | boolean，`true` 表示该账户是 `ADMIN_USERNAME` 指定的内置管理员账户 |
 | `created_at` | datetime |
 | `updated_at` | datetime |
 
@@ -423,11 +425,15 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 
 #### `PATCH /api/v1/admin/users/{user_id}`
 
-请求体字段均可选：`enabled: boolean|null`、`role: USER|ADMIN|null`、`password: string|null`（12–256 字符）。禁用、改角色或改密码会撤销该用户所有会话；不能禁用当前管理员或把当前管理员降级，违规返回 `409`。
+请求体字段均可选：`enabled: boolean|null`、`role: USER|ADMIN|null`、`password: string|null`（12–256 字符）。禁用、改角色或改密码会撤销该用户所有会话。内置管理员账户（`ADMIN_USERNAME` 指定的账户，响应中的 `is_admin_account=true`）不可被禁用或降级，其密码只能由本人修改；不能禁用当前管理员或把当前管理员降级，违规返回 `409`。
 
 #### `POST /api/v1/admin/users/{user_id}/password`
 
-请求体 `{"password":"<AT_LEAST_12_CHARACTERS>"}`，修改密码并撤销该用户所有会话。
+请求体 `{"password":"<AT_LEAST_12_CHARACTERS>"}`，修改密码并撤销该用户所有会话。内置管理员账户的密码同样只能由该账户本人修改，其他管理员对其重置密码返回 `409`。
+
+#### `DELETE /api/v1/admin/users/{user_id}`
+
+删除用户，成功返回 `204`。仅管理员可用（需 CSRF）。被删除用户的会话、聊天记录、聊天图片、AI 缓存与个人档案随之级联清除；其历史研究报告（任务、回测及配置审计记录）会匿名化保留（`user_id`/`created_by`/`activated_by` 置空），保证快照与清单仍可按标的、交易日与可用时间溯源。内置管理员账户不可删除，删除当前登录管理员同样返回 `409`。
 
 ### 6.2 模型设置
 
@@ -779,7 +785,7 @@ curl -sS "$BASE_URL/api/v1/search/financial?q=%E8%B4%B5%E5%B7%9E%E8%8C%85%E5%8F%
 以下路径仍由代码保留，但不在 OpenAPI 文档中展示，新增客户端不应优先使用：
 
 - `/api/v1/users` 对应 `/api/v1/admin/users` 的 GET/POST；
-- `/api/v1/users/{user_id}` 对应管理员用户 PATCH；
+- `/api/v1/users/{user_id}` 对应管理员用户 PATCH/DELETE；
 - `/api/v1/users/{user_id}/password` 对应管理员密码重置；
 - `/api/v1/market/kline/{symbol}` 对应 `/api/v1/market/klines/{symbol}`。
 

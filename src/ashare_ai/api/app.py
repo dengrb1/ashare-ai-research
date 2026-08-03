@@ -4,6 +4,7 @@ import base64
 import hmac
 import json
 import logging
+import shutil
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
@@ -25,7 +26,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from sqlalchemy import or_, select, text
+from sqlalchemy import or_, select, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -205,6 +206,8 @@ from ashare_ai.search.service import (
 )
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import (
+    ActiveModelConfiguration,
+    ActiveSystemConfiguration,
     AIChatMessage,
     AIChatThread,
     ApiIdempotencyKey,
@@ -214,12 +217,14 @@ from ashare_ai.storage.models import (
     CandidateRow,
     ExitAdviceRow,
     JobRun,
+    ModelConfigurationVersion,
     PersonalArchiveJob,
     PortfolioRow,
     ReportRow,
     ScoreRow,
     SecurityMaster,
     SnapshotManifestRow,
+    SystemConfigurationVersion,
     TradeAdviceMonitorRow,
     TradePlanRow,
     UserAccount,
@@ -736,7 +741,7 @@ def login(
         raise HTTPException(status_code=401, detail="invalid username or password")
     clear_auth_failures(source)
     create_session(db, user, response, request)
-    return UserResponse.model_validate(user)
+    return _user_response(user)
 
 
 @app.post("/api/v1/auth/token", response_model=TokenResponse)
@@ -781,7 +786,7 @@ def logout(response: Response, db: DbSession, context: Writer) -> None:
 
 @app.get("/api/v1/auth/me", response_model=UserResponse)
 def me(context: Current) -> UserResponse:
-    return UserResponse.model_validate(context.user)
+    return _user_response(context.user)
 
 
 @app.get("/api/v1/assets", response_model=AssetStateResponse)
@@ -795,7 +800,7 @@ def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
     assets = AssetStateResponse.model_validate(UserAssetService(db).get(context.user.user_id))
     return AppBootstrapResponse(
         server_time=datetime.now(UTC),
-        user=UserResponse.model_validate(context.user),
+        user=_user_response(context.user),
         assets=assets,
         capabilities=AppCapabilitiesResponse(
             max_watchlist_symbols=MAX_WATCHLIST_SYMBOLS,
@@ -2083,10 +2088,26 @@ def stream_ai_chat_message(
     )
 
 
+def _protected_admin_username() -> str | None:
+    configured = get_settings().admin_username
+    return configured.strip().casefold() if configured else None
+
+
+def _is_protected_admin(row: UserAccount) -> bool:
+    protected = _protected_admin_username()
+    return protected is not None and row.username.casefold() == protected
+
+
+def _user_response(row: UserAccount) -> UserResponse:
+    response = UserResponse.model_validate(row)
+    response.is_admin_account = _is_protected_admin(row)
+    return response
+
+
 def _list_users(db: Session, context: AuthContext) -> list[UserResponse]:
     _admin(context)
     rows = db.scalars(select(UserAccount).order_by(UserAccount.username)).all()
-    return [UserResponse.model_validate(row) for row in rows]
+    return [_user_response(row) for row in rows]
 
 
 @app.get("/api/v1/admin/users", response_model=list[UserResponse])
@@ -2115,7 +2136,7 @@ def create_user(payload: UserCreateRequest, db: DbSession, context: Writer) -> U
         db.rollback()
         raise HTTPException(status_code=409, detail="username already exists") from exc
     db.refresh(row)
-    return UserResponse.model_validate(row)
+    return _user_response(row)
 
 
 def _change_user(
@@ -2127,23 +2148,31 @@ def _change_user(
         raise HTTPException(status_code=404, detail="user not found")
     invalidates = False
     if payload.enabled is not None and payload.enabled != row.enabled:
+        if _is_protected_admin(row):
+            raise HTTPException(status_code=409, detail="cannot disable the admin account")
         if row.user_id == context.user.user_id and not payload.enabled:
             raise HTTPException(status_code=409, detail="cannot disable current administrator")
         row.enabled = payload.enabled
         invalidates = True
     if payload.role is not None and payload.role != row.role:
+        if _is_protected_admin(row) and payload.role != "ADMIN":
+            raise HTTPException(status_code=409, detail="cannot demote the admin account")
         if row.user_id == context.user.user_id and payload.role != "ADMIN":
             raise HTTPException(status_code=409, detail="cannot demote current administrator")
         row.role = payload.role
         invalidates = True
     if payload.password is not None:
+        if _is_protected_admin(row) and row.user_id != context.user.user_id:
+            raise HTTPException(
+                status_code=409, detail="only the admin account can change its own password"
+            )
         row.password_hash = hash_password(payload.password)
         invalidates = True
     if invalidates:
         invalidate_user_sessions(db, row)
     row.updated_at = datetime.now(UTC)
     db.commit()
-    return UserResponse.model_validate(row)
+    return _user_response(row)
 
 
 @app.patch("/api/v1/admin/users/{user_id}", response_model=UserResponse)
@@ -2160,6 +2189,53 @@ def reset_password(
     user_id: str, payload: PasswordResetRequest, db: DbSession, context: Writer
 ) -> UserResponse:
     return _change_user(user_id, UserUpdateRequest(password=payload.password), db, context)
+
+
+def _purge_user_private_objects(user_id: str) -> None:
+    root = get_settings().private_object_root.resolve()
+    directory = (root / user_id).resolve()
+    if directory.is_relative_to(root) and directory.exists():
+        shutil.rmtree(directory)
+
+
+@app.delete("/api/v1/admin/users/{user_id}", status_code=204)
+@app.delete("/api/v1/users/{user_id}", status_code=204, include_in_schema=False)
+def delete_user(user_id: str, db: DbSession, context: Writer) -> Response:
+    _admin(context)
+    row = db.get(UserAccount, user_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    if _is_protected_admin(row):
+        raise HTTPException(status_code=409, detail="cannot delete the admin account")
+    if row.user_id == context.user.user_id:
+        raise HTTPException(status_code=409, detail="cannot delete current administrator")
+    # Detach immutable research history instead of deleting it with the account.
+    db.execute(update(JobRun).where(JobRun.user_id == user_id).values(user_id=None))
+    db.execute(update(BacktestRun).where(BacktestRun.user_id == user_id).values(user_id=None))
+    db.execute(
+        update(ModelConfigurationVersion)
+        .where(ModelConfigurationVersion.created_by == user_id)
+        .values(created_by=None)
+    )
+    db.execute(
+        update(ActiveModelConfiguration)
+        .where(ActiveModelConfiguration.activated_by == user_id)
+        .values(activated_by=None)
+    )
+    db.execute(
+        update(SystemConfigurationVersion)
+        .where(SystemConfigurationVersion.created_by == user_id)
+        .values(created_by=None)
+    )
+    db.execute(
+        update(ActiveSystemConfiguration)
+        .where(ActiveSystemConfiguration.activated_by == user_id)
+        .values(activated_by=None)
+    )
+    _purge_user_private_objects(user_id)
+    db.delete(row)
+    db.commit()
+    return Response(status_code=204)
 
 
 def _model_draft(payload: ModelSettingsRequest) -> ModelSettingsDraft:

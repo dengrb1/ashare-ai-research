@@ -88,6 +88,7 @@ export interface User {
   is_active?: boolean
   enabled?: boolean
   disabled?: boolean
+  is_admin_account?: boolean
   created_at?: string
 }
 

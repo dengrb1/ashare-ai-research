@@ -58,6 +58,7 @@ class UserResponse(OrmResponse):
     username: str
     role: str
     enabled: bool
+    is_admin_account: bool = False
     created_at: datetime
     updated_at: datetime
 
