@@ -18,7 +18,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$script:NativeVersion = "2026.07.31.1"
+$script:NativeVersion = "2026.08.03.2"
 $script:PostgresPort = 55432
 $script:RedisPort = 56379
 $script:ApiPort = 58000
@@ -193,7 +193,7 @@ function Initialize-Directories {
 
 function Get-ListeningProcessIds([int]$port) {
     # Prefer netstat only. Get-NetTCPConnection can hang for a long time on some
-    # Windows hosts and would freeze both start and the SYSTEM watchdog loop.
+    # Windows hosts and would freeze both start and the service-account watchdog loop.
     $ids = @()
     $needle = ":$port"
     $lines = @(netstat.exe -ano -p TCP 2>$null)
@@ -548,6 +548,21 @@ function Ensure-NativeServiceAccount([string]$pythonRoot) {
     return $principal
 }
 
+function Protect-NativeRuntime {
+    $currentPrincipal = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $servicePrincipal = "{0}\{1}" -f $env:COMPUTERNAME, (Get-NativeServiceAccountName)
+    $rules = @(
+        ("{0}:(OI)(CI)F" -f $currentPrincipal),
+        ("{0}:(OI)(CI)F" -f $servicePrincipal),
+        "*S-1-5-18:(OI)(CI)F",
+        "*S-1-5-32-544:(OI)(CI)F"
+    )
+    & icacls.exe $script:Root /inheritance:r /grant:r $rules /T /C | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "could not restrict the native runtime directory ACL"
+    }
+}
+
 function Read-NativeServiceCredential {
     $passwordPath = Join-Path $script:Root "config\service-password.txt"
     if (-not (Test-Path -LiteralPath $passwordPath -PathType Leaf)) {
@@ -560,6 +575,18 @@ function Read-NativeServiceCredential {
     $principal = "{0}\{1}" -f $env:COMPUTERNAME, (Get-NativeServiceAccountName)
     $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
     return [PSCredential]::new($principal, $securePassword)
+}
+
+function Read-NativeServicePassword {
+    $passwordPath = Join-Path $script:Root "config\service-password.txt"
+    if (-not (Test-Path -LiteralPath $passwordPath -PathType Leaf)) {
+        throw "native service account is missing; run install first"
+    }
+    $password = (Get-Content -LiteralPath $passwordPath -Raw).Trim()
+    if ([string]::IsNullOrWhiteSpace($password)) {
+        throw "native service account password is empty"
+    }
+    return $password
 }
 
 function Write-NativeEnv([string]$postgresPassword, [string]$redisPassword, [string]$adminPassword, [string]$fernetKey) {
@@ -810,7 +837,14 @@ function Get-NativePowerShellPath {
 }
 
 function Get-NativeTaskArguments {
-    $scriptPath = Join-Path $script:ScriptRoot "ashare-native.ps1"
+    $controllerDirectory = Join-Path $script:Root "controller"
+    New-Item -ItemType Directory -Force -Path $controllerDirectory | Out-Null
+    $scriptPath = Join-Path $controllerDirectory "ashare-native.ps1"
+    Copy-Item -Force -LiteralPath (Join-Path $script:ScriptRoot "ashare-native.ps1") -Destination $scriptPath
+    $lockPath = Join-Path $script:ScriptRoot "dependencies.lock.json"
+    if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
+        Copy-Item -Force -LiteralPath $lockPath -Destination (Join-Path $controllerDirectory "dependencies.lock.json")
+    }
     $root = $script:Root.TrimEnd("\")
     $source = $script:SourceRoot.TrimEnd("\")
     return '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Command watchdog -Root "{1}" -SourceRoot "{2}" -WatchdogIntervalSeconds {3}' -f $scriptPath, $root, $source, $WatchdogIntervalSeconds
@@ -855,11 +889,13 @@ function Register-NativeWatchdogTask {
     $powerShell = Get-NativePowerShellPath
     $action = New-ScheduledTaskAction -Execute $powerShell -Argument (Get-NativeTaskArguments) -WorkingDirectory $script:Root
     $trigger = New-ScheduledTaskTrigger -AtStartup
-    $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+    $servicePrincipal = "{0}\{1}" -f $env:COMPUTERNAME, (Get-NativeServiceAccountName)
+    $servicePassword = Read-NativeServicePassword
+    $principal = New-ScheduledTaskPrincipal -UserId $servicePrincipal -LogonType Password -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 365)
-    Register-ScheduledTask -TaskName $script:WatchdogTaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+    Register-ScheduledTask -TaskName $script:WatchdogTaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -User $servicePrincipal -Password $servicePassword -Force | Out-Null
     Write-AtomicText $script:TaskNamePath $script:WatchdogTaskName
-    Write-NativeEvent "registered SYSTEM watchdog task $($script:WatchdogTaskName)"
+    Write-NativeEvent "registered limited service-account watchdog task $($script:WatchdogTaskName)"
 }
 
 function Ensure-NativeWatchdogTask {
@@ -1159,6 +1195,7 @@ function Invoke-Install {
     Write-NativePortConfig
     $pythonRoot = Split-Path -Parent $pythonExecutablePath
     $serviceAccount = Ensure-NativeServiceAccount $pythonRoot
+    Protect-NativeRuntime
     Register-NativeWatchdogTask
     $secretFile = Join-Path $script:Root "config\admin-credentials.txt"
     Write-Host "Native installation is ready at $script:Root"

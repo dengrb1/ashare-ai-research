@@ -355,7 +355,7 @@ class Controller:
                 "redis_bin": str(Path(redis).parent) if redis else "",
                 "redis_cli": redis_cli or "",
                 "source_root": str(self.source_root),
-                "version": "2026.08.03.1",
+                "version": "2026.08.03.2",
             },
         )
         if missing:

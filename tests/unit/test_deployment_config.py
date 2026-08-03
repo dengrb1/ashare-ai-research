@@ -179,6 +179,11 @@ def test_native_windows_entry_is_external_and_checksum_verified() -> None:
     assert "WorkingSet64" in installer
     assert "Start-Process" in installer
     assert "AshareAIService" in installer
+    assert "LogonType Password" in installer
+    assert "RunLevel Limited" in installer
+    assert "Protect-NativeRuntime" in installer
+    assert '"*S-1-5-18:(OI)(CI)F"' in installer
+    assert 'UserId "SYSTEM"' not in installer
     assert "native-ports.json" in installer
     assert "pwd.py" in installer
     assert "postgres.exe" in installer
