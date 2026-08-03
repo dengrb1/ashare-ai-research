@@ -1,0 +1,7 @@
+AshareAI.NativeControlCenter.exe
+AshareAI.NativeControlCenter.Cli.exe
+AshareAI.NativeControlCenter.pdb
+*.test.exe
+dist/stage/
+dist/payload.zip
+dist/*.exe
