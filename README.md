@@ -118,17 +118,40 @@ npm run dev
 
 研究中心提供持久化 AI 问答。用户可询问任意问题，也可用 `@名称`、`@002138` 或 `@600690.SH` 附加由已提交证券主数据精确解析的行情、近 30 根日 K、个人持仓、最近正式评分和强相关新闻；同名歧义会拒绝绑定。启用联网时通过同一 Compose 私有网络中的 SearXNG 检索最多 5 条 Google、Bing 或 DuckDuckGo 结果，公共检索按 SHA-256 查询键缓存，含“最新、今日、实时”等时效词缓存 5 分钟，普通查询缓存 30 分钟，并以 Redis 单飞抑制并发重复请求。无历史 `decision_at` 时服务端在并行数据返回后冻结实时决策时点；显式历史时点只读取 PIT 合格数据并禁止联网，避免未来信息。模型不会获得数据库、凭据或任意内网访问能力。
 
-### Windows 原生启动包
+### 原生管理器应用
 
-不使用 Docker/WSL 时，可用 [`docs/NATIVE_WINDOWS.md`](docs/NATIVE_WINDOWS.md) 中的固定入口安装和管理原生运行组：
+不使用 Docker/WSL 时，可用 [`docs/NATIVE_WINDOWS.md`](docs/NATIVE_WINDOWS.md) 中的原生入口安装和管理运行组。
+
+Windows 管理器位于 [`windows/native-control-center`](windows/native-control-center)，是测试版本，可能不稳定；它包含中文 WinForms GUI、命令行入口和单文件安装包：
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 .\scripts\native\ashare-native.cmd install
 .\scripts\native\ashare-native.cmd start
+.\windows\native-control-center\build.ps1
+.\windows\native-control-center\AshareAI.NativeControlCenter.exe
+.\windows\native-control-center\AshareAI.NativeControlCenter.Cli.exe status --json
+.\windows\native-control-center\ashareai.cmd logs --tail 200
 ```
 
-安装器把固定版本的 PostgreSQL、Redis 兼容服务、SearXNG 运行依赖、Python 环境和构建后的 Web 资源放在仓库外；`status -Json` 输出由 API、Web（嵌入 API）、Job Worker、Exit Advice Worker 及可选 Research Worker 组成的 Windows 进程组工作集。停止、诊断和再次启动均使用同一外部运行目录，源码树不接收运行数据、依赖二进制或本地凭据。
+`dist\AshareAI-Setup.exe` 是 Windows 单文件安装包，携带中文 GUI、CLI、`ashareai.cmd`、预构建 Web、固定 Python 安装器和固定 SearXNG 压缩包。安装后不需要 Docker Desktop、WSL、Node.js 或 Git。安装包支持无人值守部署：
+
+```powershell
+.\windows\native-control-center\dist\AshareAI-Setup.exe /quiet /dir "D:\AshareAI" /root "D:\AshareAI\runtime"
+.\windows\native-control-center\dist\AshareAI-Setup.exe /quiet /start-services
+.\windows\native-control-center\dist\AshareAI-Setup.exe /uninstall /quiet
+```
+
+直接双击 Windows 安装包时可以选择管理器目录和运行目录；默认管理器目录是安装包所在目录下的 `AshareAI`，默认运行目录是其下的 `runtime`。安装器把固定版本的 PostgreSQL、Redis 兼容服务、SearXNG 运行依赖、Python 环境和构建后的 Web 资源放在仓库外；`status -Json` 输出由 API、Web（嵌入 API）、Job Worker、Exit Advice Worker 及可选 Research Worker 组成的 Windows 进程组工作集。停止、诊断和再次启动均使用同一外部运行目录，源码树不接收运行数据、依赖二进制或本地凭据。
+
+Linux 非 Docker 管理器位于 [`linux/native-control-center`](linux/native-control-center)，同样是测试版本，可能不稳定；它提供 Tkinter/ttk GUI 和同目录控制器，与 Windows 管理器保持相同的命令契约和状态 JSON 字段：
+
+```bash
+python3 linux/native-control-center/native_control_center.py
+linux/native-control-center/ashare-native-linux.sh status --json
+```
+
+Linux 管理器覆盖安装更新、启动、停止、重启、修复、诊断、打开 Web、服务表、活动记录和看门狗日志。安装器会在源码树外创建私有 venv，安装锁定的 Python 依赖，复制 `web/dist`，探测 PostgreSQL/Redis-compatible/SearXNG 运行条件，并把绝对路径写入 `config/native-paths.json`。缺少系统级 PostgreSQL 或 Redis-compatible 二进制时，安装会明确列出缺失项而不会伪报成功；状态刷新仍可在未安装目录上快速返回。
 
 ### 完整 Docker 栈
 

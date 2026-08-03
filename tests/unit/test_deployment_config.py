@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import yaml
@@ -183,7 +185,83 @@ def test_native_windows_entry_is_external_and_checksum_verified() -> None:
     assert "Wait-PostgresReady" in installer
     assert "pg_ctl.exe" in installer
     assert (native / "ashare-native.cmd").is_file()
+    assert "New-Item -ItemType Directory -Force -Path $logDirectory" in installer
+    assert '"status" { Invoke-Status; exit 0 }' in installer
+    assert "Get-NativeInstallationState" in installer
+    assert "Test-NativeRuntimeHealthyFast" in installer
+    assert "-Fast" in installer
+    gui = ROOT / "windows" / "native-control-center"
+    assert (gui / "Program.cs").is_file()
+    assert (gui / "CommandSupport.cs").is_file()
+    assert (gui / "Cli.cs").is_file()
+    assert (gui / "ashareai.cmd").is_file()
+    assert "System.Windows.Forms" in (gui / "Program.cs").read_text(encoding="utf-8")
+    assert "JavaScriptSerializer" in (gui / "Program.cs").read_text(encoding="utf-8")
+    program = (gui / "Program.cs").read_text(encoding="utf-8")
+    assert "AshareAI.Controller" in program
+    assert "AshareAI 本机运行管理器" in program
+    assert "UseWaitCursor = true" not in program
+    assert "--auto-install" in program
+    assert "operation != \"status\"" in program
+    assert "queuedOperation" in program
+    assert "requireAdministrator" in (gui / "app.manifest").read_text(encoding="utf-8")
+    assert (gui / "build.ps1").is_file()
+    assert (gui / "Installer.cs").is_file()
+    assert (gui / "setup.manifest").is_file()
+    build = (gui / "build.ps1").read_text(encoding="utf-8")
+    assert "AshareAI.Payload" in build
+    assert "AshareAI.NativeControlCenter.Cli.exe" in build
+    command_support = (gui / "CommandSupport.cs").read_text(encoding="utf-8")
+    commands = ("install", "start", "stop", "restart", "repair", "status", "doctor", "open", "logs")
+    for command in commands:
+        assert f'"{command}"' in command_support
+    installer_cs = (gui / "Installer.cs").read_text(encoding="utf-8")
+    assert "/quiet" in installer_cs
+    assert "/start-services" in installer_cs
+    assert "QuietUninstallString" in installer_cs
+    assert "/no-install-deps" in installer_cs
+    assert len(searxng["sha256"]) == 64
+    assert searxng["archive_url"].endswith(f"{searxng['commit']}.zip")
+    assert not (native / "gui.cmd").exists()
     assert (ROOT / "docs" / "NATIVE_WINDOWS.md").is_file()
+    linux_gui = ROOT / "linux" / "native-control-center"
+    assert (linux_gui / "native_control_center.py").is_file()
+    assert (linux_gui / "ashare-native-linux.sh").is_file()
+    assert (linux_gui / "README.md").is_file()
+    linux_gui_text = (linux_gui / "native_control_center.py").read_text(encoding="utf-8")
+    assert "DEFAULT_CONTROLLER" in linux_gui_text
+    assert "subprocess.run" in linux_gui_text
+    linux_controller = (linux_gui / "ashare-native-linux.sh").read_text(encoding="utf-8")
+    assert "status_json" in linux_controller
+    assert "docker compose" not in linux_controller.lower()
+    assert "docker run" not in linux_controller.lower()
+    assert (linux_gui / "native_controller.py").is_file()
+
+
+def test_linux_native_status_is_fast_and_safe_before_install(tmp_path: Path) -> None:
+    controller = ROOT / "linux" / "native-control-center" / "native_controller.py"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(controller),
+            "status",
+            "--root",
+            str(tmp_path),
+            "--source-root",
+            str(ROOT),
+            "--json",
+            "--fast",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    report = json.loads(result.stdout)
+    assert report["desired_state"] == "STOPPED"
+    assert report["runtime_healthy"] is False
+    assert report["installation"]["status"] == "NOT_INSTALLED"
+    assert set(report["ports"]) == {"postgres", "redis", "api", "searxng"}
+    assert "T" in report["collected_at"]
 
 
 def test_first_release_policy_fixes_required_constraints() -> None:

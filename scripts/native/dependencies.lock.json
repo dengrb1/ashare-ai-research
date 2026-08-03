@@ -25,6 +25,8 @@
       "version": "2026.7.31-057a77168",
       "kind": "git",
       "url": "https://github.com/searxng/searxng.git",
+      "archive_url": "https://github.com/searxng/searxng/archive/057a77168d3175ce2e42e5b10f46a8df073886d5.zip",
+      "sha256": "b7e3dcc5f8c9ed749df7dd261ee4e22d7b46f552602d1ff2dd08978074b4b5a3",
       "tag": "master",
       "commit": "057a77168d3175ce2e42e5b10f46a8df073886d5",
       "commit_prefix": "057a77168"
