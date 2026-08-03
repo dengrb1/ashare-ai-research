@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from httpx import Request, Response
 from sqlalchemy import create_engine, select
@@ -13,6 +14,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from ashare_ai.api.app import (
+    _historical_bundle_source_run,
     _market_session_calendar_cache,
     _market_session_status,
     app,
@@ -21,6 +23,7 @@ from ashare_ai.api.auth import hash_password
 from ashare_ai.api.dependencies import get_db
 from ashare_ai.api.schemas import MarketSessionStatus
 from ashare_ai.core.config import Settings
+from ashare_ai.core.time import SHANGHAI
 from ashare_ai.market.service import (
     AKShareMarketProvider,
     MarketDataService,
@@ -1370,6 +1373,61 @@ def test_research_submission_prepares_frozen_manifest_and_deduplicates(monkeypat
     finally:
         app.dependency_overrides.clear()
         session.close()
+
+
+def test_historical_bundle_source_is_user_scoped_and_requires_hash(monkeypatch) -> None:
+    session, _, user = _database()
+    trading_date = date(2026, 7, 30)
+    session.add(
+        JobRun(
+            run_id="historical-source",
+            user_id=user.user_id,
+            run_type="DAILY",
+            trading_date=trading_date,
+            decision_at=datetime(2026, 7, 30, 18, tzinfo=SHANGHAI),
+            status="FAILED",
+            idempotency_key="historical-source-key",
+            manifest={"acquired_bundle_sha256": "a" * 64},
+            input_hash="b" * 64,
+            started_at=datetime(2026, 7, 30, 18, tzinfo=SHANGHAI),
+        )
+    )
+    session.commit()
+
+    class SettingsStub:
+        canonical_bundle_mode = "akshare"
+
+    class CalendarStub:
+        def sessions(self, start_date: date, end_date: date) -> tuple[date, ...]:
+            del start_date, end_date
+            return (trading_date, date(2026, 7, 31))
+
+    monkeypatch.setattr("ashare_ai.api.app.get_effective_settings", lambda: SettingsStub())
+    monkeypatch.setattr("ashare_ai.api.app.FreeExchangeCalendar", CalendarStub)
+    now = datetime(2026, 7, 31, 10, tzinfo=SHANGHAI)
+
+    assert (
+        _historical_bundle_source_run(
+            session,
+            user_id=user.user_id,
+            trading_date=trading_date,
+            now=now,
+        )
+        == "historical-source"
+    )
+
+    source = session.get(JobRun, "historical-source")
+    assert source is not None
+    source.manifest = {}
+    session.commit()
+    with pytest.raises(HTTPException) as caught:
+        _historical_bundle_source_run(
+            session,
+            user_id=user.user_id,
+            trading_date=trading_date,
+            now=now,
+        )
+    assert caught.value.status_code == 409
 
 
 def test_research_submission_reuses_a_waiting_data_readiness_run(monkeypatch) -> None:
