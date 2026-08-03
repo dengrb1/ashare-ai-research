@@ -8,7 +8,8 @@ const PREFETCH_INTERVAL_MS = 5 * 60 * 1000
 const DAILY_CACHE_MS = 5 * 60 * 1000
 const INTRADAY_CACHE_MS = 30 * 1000
 const MARKET_STATUS_POLL_MS = 60 * 1000
-export const MARKET_REFRESH_INTERVAL_OPTIONS = [15, 30, 60, 120] as const
+const VISIBILITY_REFRESH_THROTTLE_MS = 5 * 1000
+export const MARKET_REFRESH_INTERVAL_OPTIONS = [5, 10, 15, 30, 60, 120] as const
 type MarketRefreshIntervalSeconds = (typeof MARKET_REFRESH_INTERVAL_OPTIONS)[number]
 
 export interface KlineCacheEntry {
@@ -111,7 +112,7 @@ export function MarketProvider({ children }: { children: ReactNode }) {
   const [defaultProfitTrigger, setDefaultProfitTrigger] = useState<number | null>(null)
   const [stopLossMonitorEnabled, setStopLossMonitorEnabled] = useState(true)
   const [buyMonitorEnabled, setBuyMonitorEnabled] = useState(true)
-  const [marketRefreshIntervalSeconds, setMarketRefreshIntervalSeconds] = useState<MarketRefreshIntervalSeconds>(15)
+  const [marketRefreshIntervalSeconds, setMarketRefreshIntervalSeconds] = useState<MarketRefreshIntervalSeconds>(5)
   const [assetsLoading, setAssetsLoading] = useState(true)
   const [assetsSaving, setAssetsSaving] = useState(false)
   const [quotesLoading, setQuotesLoading] = useState(true)
@@ -125,8 +126,13 @@ export function MarketProvider({ children }: { children: ReactNode }) {
   const klineInflight = useRef(new Map<string, Promise<KlineCacheEntry>>())
   const assetMutation = useRef(false)
   const prefetchInflight = useRef<Promise<void> | null>(null)
+  const prefetchController = useRef<AbortController | null>(null)
   const focusedQuoteInflight = useRef(new Map<string, Promise<void>>())
+  const focusedQuoteControllers = useRef(new Map<string, AbortController>())
   const bulkQuoteInflight = useRef<Promise<void> | null>(null)
+  const bulkQuoteController = useRef<AbortController | null>(null)
+  const refreshQueue = useRef<Promise<void> | null>(null)
+  const lastVisibilityRefreshAt = useRef(0)
   const quoteLoadCount = useRef(0)
   const [klineVersion, setKlineVersion] = useState(0)
   const prefetchSymbols = useMemo(() => marketPrefetchSymbols(watchlist, positions), [watchlist, positions])
@@ -146,7 +152,7 @@ export function MarketProvider({ children }: { children: ReactNode }) {
       setDefaultProfitTrigger(state.default_profit_trigger == null ? null : Number(state.default_profit_trigger))
       setStopLossMonitorEnabled(state.stop_loss_monitor_enabled !== false)
       setBuyMonitorEnabled(state.buy_monitor_enabled !== false)
-      setMarketRefreshIntervalSeconds(state.market_refresh_interval_seconds ?? 15)
+      setMarketRefreshIntervalSeconds(state.market_refresh_interval_seconds ?? 5)
     }).catch((error) => {
       if (!active) return
       setMeta((current) => ({ ...current, error: error instanceof Error ? error.message : '自选与持仓加载失败' }))
@@ -214,15 +220,27 @@ export function MarketProvider({ children }: { children: ReactNode }) {
   const refreshSymbol = useCallback(async (symbol: string, force = false) => {
     const normalized = symbol.trim().toUpperCase()
     if (!normalized) return
-    const key = `${normalized}:${force ? 'force' : 'cached'}`
+    const key = normalized
     const existing = focusedQuoteInflight.current.get(key)
-    if (existing) return existing
+    if (existing && !force) return existing
+    if (existing && force) focusedQuoteControllers.current.get(key)?.abort()
+    const controller = new AbortController()
+    focusedQuoteControllers.current.set(key, controller)
     beginQuoteLoad()
-    const work = api.quote(normalized, force)
+    let work: Promise<void>
+    work = api.quote(normalized, force, controller.signal)
       .then((row) => { mergeQuotes([row]) })
-      .catch(reportQuoteError)
+      .catch((error) => {
+        if (error instanceof DOMException && error.name === 'AbortError') return
+        reportQuoteError(error)
+      })
       .finally(() => {
-        focusedQuoteInflight.current.delete(key)
+        if (focusedQuoteInflight.current.get(key) === work) {
+          focusedQuoteInflight.current.delete(key)
+        }
+        if (focusedQuoteControllers.current.get(key) === controller) {
+          focusedQuoteControllers.current.delete(key)
+        }
         endQuoteLoad()
       })
     focusedQuoteInflight.current.set(key, work)
@@ -233,13 +251,25 @@ export function MarketProvider({ children }: { children: ReactNode }) {
     const excluded = excludedSymbol?.trim().toUpperCase()
     const symbols = activeSymbols.filter((symbol) => symbol !== excluded)
     if (!symbols.length) return
-    if (bulkQuoteInflight.current) return bulkQuoteInflight.current
+    if (bulkQuoteInflight.current && !force) return bulkQuoteInflight.current
+    if (bulkQuoteInflight.current && force) bulkQuoteController.current?.abort()
+    const controller = new AbortController()
+    bulkQuoteController.current = controller
     beginQuoteLoad()
-    const work = api.quotes(symbols, force)
+    let work: Promise<void>
+    work = api.quotes(symbols, force, controller.signal)
       .then(mergeQuotes)
-      .catch(reportQuoteError)
+      .catch((error) => {
+        if (error instanceof DOMException && error.name === 'AbortError') return
+        reportQuoteError(error)
+      })
       .finally(() => {
-        bulkQuoteInflight.current = null
+        if (bulkQuoteInflight.current === work) {
+          bulkQuoteInflight.current = null
+        }
+        if (bulkQuoteController.current === controller) {
+          bulkQuoteController.current = null
+        }
         endQuoteLoad()
       })
     bulkQuoteInflight.current = work
@@ -247,21 +277,31 @@ export function MarketProvider({ children }: { children: ReactNode }) {
   }, [activeSymbols.join(','), beginQuoteLoad, endQuoteLoad, mergeQuotes, reportQuoteError])
 
   const refresh = useCallback(async (force = false) => {
+    if (refreshQueue.current) return refreshQueue.current
     if (!activeSymbols.length) {
       setQuotesLoading(false)
       return
     }
-    const prioritySymbol = activeSymbols[0]
-    await refreshSymbol(prioritySymbol, force)
-    void refreshRemaining(prioritySymbol, force)
+    const work = (async () => {
+      const prioritySymbol = activeSymbols[0]
+      await refreshSymbol(prioritySymbol, force)
+      await refreshRemaining(prioritySymbol, force)
+    })().finally(() => {
+      refreshQueue.current = null
+    })
+    refreshQueue.current = work
+    return work
   }, [activeSymbols.join(','), refreshRemaining, refreshSymbol])
 
   const prefetch = useCallback(async () => {
     if (!prefetchSymbols.length) return
     if (prefetchInflight.current) return prefetchInflight.current
-    const work = (async () => {
+    const controller = new AbortController()
+    prefetchController.current = controller
+    let work: Promise<void>
+    work = (async () => {
       try {
-        const payload = await api.prefetchMarket(prefetchSymbols, ['day'], 160, false)
+        const payload = await api.prefetchMarket(prefetchSymbols, ['day'], 160, false, controller.signal)
         let changed = false
         Object.entries(payload.klines || {}).forEach(([symbol, periods]) => {
           const daily = periods.day
@@ -274,9 +314,17 @@ export function MarketProvider({ children }: { children: ReactNode }) {
           setMeta((current) => ({ ...current, error: `部分行情预加载失败：${Object.keys(payload.errors).join('、')}` }))
         }
       } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') return
         setMeta((current) => ({ ...current, error: error instanceof Error ? error.message : '行情预加载失败' }))
       }
-    })().finally(() => { prefetchInflight.current = null })
+    })().finally(() => {
+      if (prefetchInflight.current === work) {
+        prefetchInflight.current = null
+      }
+      if (prefetchController.current === controller) {
+        prefetchController.current = null
+      }
+    })
     prefetchInflight.current = work
     return work
   }, [prefetchSymbols.join(',')])
@@ -296,6 +344,9 @@ export function MarketProvider({ children }: { children: ReactNode }) {
       active = false
       cancelIdle()
       window.clearInterval(timer)
+      focusedQuoteControllers.current.forEach((controller) => controller.abort())
+      bulkQuoteController.current?.abort()
+      prefetchController.current?.abort()
     }
   }, [assetsLoading, marketRefreshIntervalSeconds, prefetch, refresh])
 
@@ -309,6 +360,9 @@ export function MarketProvider({ children }: { children: ReactNode }) {
     if (assetsLoading) return
     const refreshWhenVisible = () => {
       if (document.visibilityState !== 'visible') return
+      const now = Date.now()
+      if (now - lastVisibilityRefreshAt.current < VISIBILITY_REFRESH_THROTTLE_MS) return
+      lastVisibilityRefreshAt.current = now
       // Browsers throttle background timers.  A forced quote read on return
       // prevents an old in-memory or Redis entry from surviving a tab switch.
       void refresh(true)
@@ -346,7 +400,7 @@ export function MarketProvider({ children }: { children: ReactNode }) {
       setDefaultProfitTrigger(saved.default_profit_trigger == null ? null : Number(saved.default_profit_trigger))
       setStopLossMonitorEnabled(saved.stop_loss_monitor_enabled !== false)
       setBuyMonitorEnabled(saved.buy_monitor_enabled !== false)
-      setMarketRefreshIntervalSeconds(saved.market_refresh_interval_seconds ?? 15)
+      setMarketRefreshIntervalSeconds(saved.market_refresh_interval_seconds ?? 5)
     } catch (error) {
       setMeta((current) => ({ ...current, error: error instanceof Error ? error.message : '自选与持仓保存失败' }))
       throw error
@@ -432,7 +486,7 @@ export function MarketProvider({ children }: { children: ReactNode }) {
       )
       setStopLossMonitorEnabled(saved.stop_loss_monitor_enabled ?? true)
       setBuyMonitorEnabled(saved.buy_monitor_enabled ?? true)
-      setMarketRefreshIntervalSeconds(saved.market_refresh_interval_seconds ?? 15)
+      setMarketRefreshIntervalSeconds(saved.market_refresh_interval_seconds ?? 5)
     }
     catch (error) { setExitMonitorEnabled(previousEnabled); setDefaultProfitTrigger(previousAmount); setStopLossMonitorEnabled(previousStopLoss); setBuyMonitorEnabled(previousBuyMonitor); throw error }
     finally { endAssetMutation() }
@@ -447,7 +501,7 @@ export function MarketProvider({ children }: { children: ReactNode }) {
     setMarketRefreshIntervalSeconds(seconds)
     try {
       const saved = await api.saveMarketRefreshSettings(seconds)
-      setMarketRefreshIntervalSeconds(saved.market_refresh_interval_seconds ?? 15)
+      setMarketRefreshIntervalSeconds(saved.market_refresh_interval_seconds ?? 5)
     } catch (error) {
       setMarketRefreshIntervalSeconds(previous)
       setMeta((current) => ({ ...current, error: error instanceof Error ? error.message : '自动刷新设置保存失败' }))

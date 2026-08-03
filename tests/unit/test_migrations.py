@@ -31,7 +31,7 @@ def test_cli_migrate_bootstraps_empty_database_at_alembic_head(tmp_path, monkeyp
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar()
-                assert revision == "0025_ai_chat_compaction"
+                assert revision == "0027_ai_cache_singleflight"
             assert {
                 "exit_advice",
                 "ai_response_cache",
@@ -48,6 +48,16 @@ def test_cli_migrate_bootstraps_empty_database_at_alembic_head(tmp_path, monkeyp
             } <= tables
             assert "compacted_history_sha256" in {
                 column["name"] for column in inspect(engine).get_columns("ai_chat_messages")
+            }
+            assert "market_refresh_migrations" in tables
+            refresh_column = next(
+                column
+                for column in inspect(engine).get_columns("user_asset_states")
+                if column["name"] == "market_refresh_interval_seconds"
+            )
+            assert str(refresh_column["default"]).strip("()'") == "5"
+            assert "last_singleflight_wait_ms" in {
+                column["name"] for column in inspect(engine).get_columns("ai_response_cache")
             }
         finally:
             engine.dispose()

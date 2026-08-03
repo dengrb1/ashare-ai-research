@@ -153,6 +153,7 @@ from ashare_ai.api.schemas import (
     UserResponse,
     UserUpdateRequest,
 )
+from ashare_ai.api.static_web import NativeSPAStaticFiles
 from ashare_ai.api.system_settings_unlock import issue_unlock, require_settings_unlock
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.hashing import sha256_bytes, stable_hash
@@ -2343,7 +2344,9 @@ def get_model_settings(db: DbSession, context: Current) -> ModelSettingsResponse
     try:
         return _model_settings_response(db)
     except ModelSettingsError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=503, detail={"code": exc.code, "message": str(exc)}
+        ) from exc
 
 
 @app.put("/api/v1/admin/model-settings", response_model=ModelSettingsResponse)
@@ -2360,7 +2363,9 @@ async def put_model_settings(
         return _model_settings_response(db)
     except ModelSettingsError as exc:
         db.rollback()
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=422, detail={"code": exc.code, "message": str(exc)}
+        ) from exc
 
 
 @app.post("/api/v1/admin/model-settings/test", response_model=ModelProbeResponse)
@@ -2369,10 +2374,14 @@ async def test_model_settings(
 ) -> ModelProbeResponse:
     _admin(context)
     try:
-        result = await ModelConfigurationService().probe(_model_draft(payload), db)
+        result = await ModelConfigurationService().probe(
+            _model_draft(payload), db, include_streaming=True
+        )
         return ModelProbeResponse(**result.__dict__)
     except ModelSettingsError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=422, detail={"code": exc.code, "message": str(exc)}
+        ) from exc
 
 
 @app.post("/api/v1/admin/model-settings/models", response_model=ModelListResponse)
@@ -2384,7 +2393,9 @@ async def list_model_settings_models(
         models = await ModelConfigurationService().list_models(_model_draft(payload), db)
         return ModelListResponse(models=models)
     except ModelSettingsError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=422, detail={"code": exc.code, "message": str(exc)}
+        ) from exc
 
 
 @app.get("/api/v1/admin/system-settings", response_model=SystemSettingsResponse)
@@ -4068,3 +4079,17 @@ def financial_search_status(
     if isinstance(service, FinancialSearchService):
         return service.status(db)
     return service.status()
+
+
+def _mount_native_web() -> None:
+    root = get_settings().native_web_root
+    if root is None:
+        return
+    root = root.expanduser().resolve()
+    if not (root / "index.html").is_file():
+        logger.warning("native web root is configured but index.html is missing: %s", root)
+        return
+    app.mount("/", NativeSPAStaticFiles(directory=str(root), html=True), name="native-web")
+
+
+_mount_native_web()

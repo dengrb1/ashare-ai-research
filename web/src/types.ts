@@ -142,7 +142,7 @@ export interface AssetState {
   default_profit_trigger?: number | string | null
   stop_loss_monitor_enabled?: boolean
   buy_monitor_enabled?: boolean
-  market_refresh_interval_seconds?: 15 | 30 | 60 | 120
+  market_refresh_interval_seconds?: 5 | 10 | 15 | 30 | 60 | 120
   updated_at?: string | null
 }
 

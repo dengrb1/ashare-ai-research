@@ -12,6 +12,12 @@ import redis
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from ashare_ai.agents.ai_cache import (
+    AICacheBusyError,
+    AICacheGeneration,
+    AICacheLease,
+    AIResultCacheService,
+)
 from ashare_ai.agents.attachments import (
     MAX_IMAGES_PER_MESSAGE,
     MAX_MESSAGE_IMAGE_BYTES,
@@ -40,7 +46,6 @@ from ashare_ai.storage.models import (
     AIChatCompaction,
     AIChatMessage,
     AIChatThread,
-    AIResponseCacheRow,
 )
 
 CHAT_PROMPT_VERSION = "stock-chat-v5"
@@ -433,6 +438,7 @@ async def stream_chat_response(
             assistant_message_id = assistant_message.message_id
 
     chunks: list[str] = []
+    cache_lease: AICacheLease | None = None
     try:
         if runtime is None:
             raise ChatStreamError(
@@ -799,19 +805,34 @@ async def stream_chat_response(
             }
         )
         attachment_context_sha = stable_hash([row.content_sha256 for row in attachments])
-        with SessionLocal() as session:
-            cached = session.scalar(
-                select(AIResponseCacheRow).where(
-                    AIResponseCacheRow.user_id == user_id,
-                    AIResponseCacheRow.purpose == "CHAT",
-                    AIResponseCacheRow.request_sha256 == request_sha,
-                    AIResponseCacheRow.expires_at > datetime.now(UTC),
-                )
+        cache_service = AIResultCacheService(session_factory=SessionLocal)
+
+        def validate_chat_cache(value: dict[str, Any]) -> None:
+            cached_content = value.get("content")
+            if not isinstance(cached_content, str) or not cached_content.strip():
+                raise ValueError("chat cache content is empty")
+
+        try:
+            cache_result, cache_lease = await asyncio.to_thread(
+                cache_service.acquire,
+                user_id=user_id,
+                purpose="CHAT",
+                request_sha256=request_sha,
+                validate=validate_chat_cache,
             )
-            if cached is not None:
-                cached.hit_count += 1
-                cached.last_hit_at = datetime.now(UTC)
-                text = str(cached.response.get("content") or "")
+        except AICacheBusyError as exc:
+            raise ChatStreamError(
+                "相同问题仍在生成中，请稍后重试",
+                code="CHAT_CACHE_BUSY",
+                request_id=request_id,
+                retryable=True,
+                status_code=409,
+            ) from exc
+
+        if cache_result is not None:
+            cached = cache_result.row
+            text = str(cache_result.response.get("content") or "")
+            with SessionLocal() as session:
                 _complete_assistant(
                     session,
                     assistant_message_id,
@@ -819,8 +840,8 @@ async def stream_chat_response(
                     status="COMPLETED",
                     symbols=symbols,
                     refs=refs,
-                    model=model,
-                    reasoning_effort=reasoning_effort,
+                    model=cached.model_name,
+                    reasoning_effort=cached.reasoning_effort,
                     sources=sources,
                     context_sha=context_sha,
                     response_sha=cached.response_sha256,
@@ -830,7 +851,7 @@ async def stream_chat_response(
                     cache_write_tokens=0,
                     output_tokens=cached.output_tokens,
                     reasoning_tokens=0,
-                    cache_policy=profile.cache_policy,
+                    cache_policy=cached.cache_policy,
                     context_budget_status=context_budget_status,
                     private_context_snapshot=dynamic_context,
                     streaming_mode="CACHED",
@@ -840,29 +861,33 @@ async def stream_chat_response(
                     compacted_history_sha256=compacted_history_sha,
                 )
                 session.commit()
-                record_chat_metric(
-                    user_id=user_id,
-                    metric="answer",
-                    hit=True,
-                    latency_ms=0,
-                )
-                record_chat_metric(
-                    user_id=user_id,
-                    metric="model",
-                    hit=True,
-                    latency_ms=0,
-                )
-                yield {"type": "cache", "cache_hit": True, "sources": sources}
-                yield {"type": "stage", "stage": "generation", "status": "CACHED"}
-                for index in range(0, len(text), 80):
-                    yield {"type": "delta", "delta": text[index : index + 80]}
-                yield {
-                    "type": "done",
-                    "cache_hit": True,
-                    "status": "COMPLETED",
-                    "streaming_mode": "CACHED",
-                }
-                return
+            record_chat_metric(
+                user_id=user_id,
+                metric="answer",
+                hit=True,
+                latency_ms=0,
+                singleflight_wait_ms=cache_result.singleflight_wait_ms,
+            )
+            record_chat_metric(
+                user_id=user_id,
+                metric="model",
+                hit=True,
+                latency_ms=0,
+                singleflight_wait_ms=cache_result.singleflight_wait_ms,
+            )
+            yield {"type": "cache", "cache_hit": True, "sources": sources}
+            yield {"type": "stage", "stage": "generation", "status": "CACHED"}
+            for index in range(0, len(text), 80):
+                yield {"type": "delta", "delta": text[index : index + 80]}
+            yield {
+                "type": "done",
+                "cache_hit": True,
+                "cache_hits": cached.hit_count,
+                "singleflight_wait_ms": cache_result.singleflight_wait_ms,
+                "status": "COMPLETED",
+                "streaming_mode": "CACHED",
+            }
+            return
 
         yield {"type": "context", "cache_hit": False, "sources": sources}
         yield {"type": "stage", "stage": "generation", "status": "STARTED"}
@@ -934,7 +959,48 @@ async def stream_chat_response(
                 code="MODEL_EMPTY_RESPONSE",
                 request_id=request_id,
             )
-        response_sha = stable_hash({"content": text})
+        if cache_lease is None:
+            raise ChatStreamError(
+                "AI 缓存租约状态无效",
+                code="CHAT_CACHE_STATE_INVALID",
+                request_id=request_id,
+                retryable=True,
+            )
+        generated_cache = AICacheGeneration(
+            response={"content": text},
+            model_name=actual_model,
+            reasoning_effort=reasoning_effort,
+            input_tokens=input_tokens,
+            cached_input_tokens=cached_input_tokens,
+            cache_write_tokens=cache_write_tokens,
+            output_tokens=output_tokens,
+            reasoning_tokens=reasoning_tokens,
+            cache_policy=profile.cache_policy,
+        )
+        stored_cache = await asyncio.to_thread(
+            cache_service.store,
+            lease=cache_lease,
+            user_id=user_id,
+            purpose="CHAT",
+            request_sha256=request_sha,
+            prompt_version=CHAT_PROMPT_VERSION,
+            ttl_seconds=24 * 60 * 60,
+            validate=validate_chat_cache,
+            generation=generated_cache,
+        )
+        cache_lease = None
+        cache_hit = stored_cache.cache_hit
+        cached_row = stored_cache.row
+        if cache_hit:
+            input_tokens = cached_row.input_tokens
+            cached_input_tokens = cached_row.input_tokens
+            cache_write_tokens = 0
+            output_tokens = cached_row.output_tokens
+            reasoning_tokens = 0
+            actual_model = cached_row.model_name
+            response_sha = cached_row.response_sha256
+        else:
+            response_sha = cached_row.response_sha256
         with SessionLocal() as session:
             _complete_assistant(
                 session,
@@ -948,7 +1014,7 @@ async def stream_chat_response(
                 sources=sources,
                 context_sha=context_sha,
                 response_sha=response_sha,
-                cache_hit=False,
+                cache_hit=cache_hit,
                 input_tokens=input_tokens,
                 cached_input_tokens=cached_input_tokens,
                 cache_write_tokens=cache_write_tokens,
@@ -963,26 +1029,6 @@ async def stream_chat_response(
                 model_configuration_sha256=runtime.config_sha256,
                 attachment_context_sha256=attachment_context_sha,
                 compacted_history_sha256=compacted_history_sha,
-            )
-            session.add(
-                AIResponseCacheRow(
-                    user_id=user_id,
-                    purpose="CHAT",
-                    request_sha256=request_sha,
-                    response_sha256=response_sha,
-                    model_name=actual_model,
-                    reasoning_effort=reasoning_effort,
-                    prompt_version=CHAT_PROMPT_VERSION,
-                    response={"content": text},
-                    input_tokens=input_tokens,
-                    cached_input_tokens=cached_input_tokens,
-                    cache_write_tokens=cache_write_tokens,
-                    output_tokens=output_tokens,
-                    reasoning_tokens=reasoning_tokens,
-                    cache_policy=profile.cache_policy,
-                    created_at=datetime.now(UTC),
-                    expires_at=datetime.now(UTC) + timedelta(hours=24),
-                )
             )
             try:
                 if streaming_mode == "DEGRADED":
@@ -1003,20 +1049,24 @@ async def stream_chat_response(
         record_chat_metric(
             user_id=user_id,
             metric="answer",
-            hit=False,
+            hit=cache_hit,
             latency_ms=model_elapsed_ms,
+            singleflight_wait_ms=stored_cache.singleflight_wait_ms,
             degraded=streaming_mode == "DEGRADED",
         )
         record_chat_metric(
             user_id=user_id,
             metric="model",
-            hit=False,
+            hit=cache_hit,
             latency_ms=model_elapsed_ms,
+            singleflight_wait_ms=stored_cache.singleflight_wait_ms,
             degraded=streaming_mode == "DEGRADED",
         )
         yield {
             "type": "done",
-            "cache_hit": False,
+            "cache_hit": cache_hit,
+            "cache_hits": cached_row.hit_count,
+            "singleflight_wait_ms": stored_cache.singleflight_wait_ms,
             "status": "COMPLETED",
             "input_tokens": input_tokens,
             "cached_input_tokens": cached_input_tokens,
@@ -1073,6 +1123,9 @@ async def stream_chat_response(
             code="CHAT_INTERNAL_ERROR",
             request_id=request_id,
         ) from exc
+    finally:
+        if cache_lease is not None:
+            cache_lease.release()
 
 
 def _complete_assistant(
