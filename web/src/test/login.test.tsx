@@ -30,6 +30,7 @@ describe('login flow', () => {
     await userEvent.click(screen.getByRole('button', { name: /进入终端/ }))
 
     expect(await screen.findByRole('heading', { name: '全局仪表盘' })).toBeInTheDocument()
+    expect(screen.getByText('v2.0.3', { selector: '.app-version' })).toBeInTheDocument()
     const loginCall = mockFetch.mock.calls.find(([url]) => String(url).endsWith('/auth/login'))
     expect(loginCall?.[1]).toMatchObject({ method: 'POST', credentials: 'include' })
     await waitFor(() => expect(mockFetch.mock.calls.some(([url, init]) => String(url).endsWith('/market/prefetch') && init?.method === 'POST')).toBe(true))

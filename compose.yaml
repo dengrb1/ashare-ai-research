@@ -29,7 +29,9 @@ x-app-service: &app-service
 services:
   # Optional public HTTPS edge. It is intentionally profile-gated so the
   # default local stack stays loopback-only and existing external proxies keep
-  # working unchanged.
+  # working unchanged.  EDGE_* values are interpolated from the shell/.env
+  # baseline; with the topology controller installed, the persisted system
+  # settings are injected into its compose subprocess and take precedence.
   edge-gateway:
     profiles: ["edge"]
     build:

@@ -36,6 +36,11 @@ PUBLIC_SETTING_FIELDS = frozenset(
     {
         "research_execution_mode",
         "edge_gateway_enabled",
+        "edge_domain",
+        "edge_acme_email",
+        "edge_acme_ca_server",
+        "edge_frpc_enabled",
+        "edge_frpc_config_file",
         "auto_restart_enabled",
         "llm_agent_max_concurrency",
         "object_store_endpoint",
@@ -404,6 +409,27 @@ class SystemConfigurationService:
                     "DUAL mode requires model gateway capacity of at least "
                     f"{required_gateway_capacity}; raise MODEL_GATEWAY_MAX_CONCURRENCY "
                     "or lower per-run concurrency"
+                )
+        # The edge-gateway entrypoint fails closed at container start without a
+        # public domain and ACME email, so refuse to persist an enabled gateway
+        # that can never boot.  The frpc config file itself is a host-side,
+        # untracked file; only its non-empty path is validated here and the
+        # topology controller checks the file exists before starting the service.
+        if target.edge_gateway_enabled:
+            if not target.edge_domain:
+                raise SystemSettingsError(
+                    "enabling the public edge gateway requires a public domain "
+                    "(EDGE_DOMAIN / edge_domain)"
+                )
+            if not target.edge_acme_email:
+                raise SystemSettingsError(
+                    "enabling the public edge gateway requires an ACME account "
+                    "email (EDGE_ACME_EMAIL / edge_acme_email)"
+                )
+            if target.edge_frpc_enabled and not target.edge_frpc_config_file.strip():
+                raise SystemSettingsError(
+                    "enabling the edge frpc client requires a non-empty frpc config "
+                    "file path (EDGE_FRPC_CONFIG_FILE / edge_frpc_config_file)"
                 )
         if current.execution_mode != target.research_execution_mode:
             active_research = int(

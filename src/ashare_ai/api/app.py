@@ -735,6 +735,7 @@ def health(db: DbSession) -> HealthResponse:
         status="ok" if database == "ok" else "degraded",
         version=__version__,
         database=database,
+        git_sha=_api_settings.git_sha,
     )
 
 
@@ -2445,7 +2446,7 @@ def _system_settings_restart_command(
 
 
 @app.get("/api/internal/topology-desired")
-def topology_desired(request: Request, db: DbSession) -> dict[str, str | bool]:
+def topology_desired(request: Request, db: DbSession) -> dict[str, object]:
     """Return only the desired Compose topology to the local task scheduler."""
 
     expected = get_settings().topology_controller_token
@@ -2459,6 +2460,11 @@ def topology_desired(request: Request, db: DbSession) -> dict[str, str | bool]:
     return {
         "research_execution_mode": runtime.settings.research_execution_mode,
         "edge_gateway_enabled": runtime.settings.edge_gateway_enabled,
+        "edge_domain": runtime.settings.edge_domain,
+        "edge_acme_email": runtime.settings.edge_acme_email,
+        "edge_acme_ca_server": runtime.settings.edge_acme_ca_server,
+        "edge_frpc_enabled": runtime.settings.edge_frpc_enabled,
+        "edge_frpc_config_file": runtime.settings.edge_frpc_config_file,
         "auto_restart_enabled": runtime.settings.auto_restart_enabled,
         "restart_required": restart_required,
         "topology_sha256": runtime.topology_sha256,

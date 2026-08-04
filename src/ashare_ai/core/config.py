@@ -100,6 +100,16 @@ class Settings(BaseSettings):
     llm_agent_max_concurrency: int = Field(default=4, ge=1, le=16)
     research_execution_mode: Literal["SERIAL", "DUAL"] = "SERIAL"
     edge_gateway_enabled: bool = False
+    # Public HTTPS edge-gateway (nginx + acme.sh + optional frpc client)
+    # settings.  The environment remains the deployment baseline, but every
+    # value below is also administrator-overridable from the system settings
+    # center; the host-side topology controller injects the persisted values
+    # into the compose subprocess that (re)creates the edge-gateway service.
+    edge_domain: str | None = None
+    edge_acme_email: str | None = None
+    edge_acme_ca_server: str = "letsencrypt"
+    edge_frpc_enabled: bool = False
+    edge_frpc_config_file: str = "./docker/edge-gateway/frpc.disabled.toml"
     # When enabled, the host-side topology controller force-recreates the
     # affected Compose services after a persisted topology change instead of
     # leaving the operator to run the restart command shown in the UI.
@@ -123,6 +133,30 @@ class Settings(BaseSettings):
     @classmethod
     def empty_neodata_path_is_unconfigured(cls, value: object) -> object:
         return None if isinstance(value, str) and not value.strip() else value
+
+    @field_validator("edge_domain", mode="before")
+    @classmethod
+    def clean_edge_domain(cls, value: object) -> object:
+        if value is None:
+            return None
+        domain = str(value).strip().lower().rstrip(".")
+        if domain and (
+            domain.startswith(("http://", "https://"))
+            or "/" in domain
+            or any(char.isspace() for char in domain)
+        ):
+            raise ValueError("edge domain must be a bare DNS host name without scheme or path")
+        return domain or None
+
+    @field_validator("edge_acme_email", mode="before")
+    @classmethod
+    def clean_edge_acme_email(cls, value: object) -> object:
+        if value is None:
+            return None
+        email = str(value).strip()
+        if email and ("@" not in email or any(char.isspace() for char in email)):
+            raise ValueError("edge ACME account email must contain @ and no whitespace")
+        return email or None
 
     @property
     def trusted_host_list(self) -> list[str]:

@@ -6,6 +6,9 @@ import { formatTime } from './Ui'
 import { ThemeToggle } from '../context/ThemeContext'
 import { useRefreshControl } from '../context/RefreshContext'
 import { NotificationBell } from './NotificationBell'
+import packageJson from '../../package.json'
+
+const APP_VERSION = `v${packageJson.version}`
 
 const NAV = [
   { to: '/', label: '全局仪表盘', icon: '◫', end: true },
@@ -131,7 +134,7 @@ export function AppShell() {
       </header>
       {delayed && <div className="stale-banner">上游行情暂不可用，当前展示最近成功缓存。冻结研究与回测快照不受影响。</div>}
       <main className="content"><Outlet /></main>
-      <footer className="disclaimer">本系统仅用于研究、回测与模拟组合，不构成投资建议，不接入真实交易。</footer>
+      <footer className="disclaimer"><span>本系统仅用于研究、回测与模拟组合，不构成投资建议，不接入真实交易。</span><span className="app-version" aria-label={`系统版本 ${APP_VERSION}`}>{APP_VERSION}</span></footer>
     </div>
   </div>
 }

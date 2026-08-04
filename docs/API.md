@@ -192,6 +192,8 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 财报检索 | GET | `/api/v1/search/financial` | 登录 |
 | 财报检索 | GET | `/api/v1/search/status` | 登录 |
 
+`GET /api/v1/health` 返回 `{status, version, database, git_sha}`：`version` 为系统版本号（如 `2.0.3`），`git_sha` 为构建源码提交（未提供时 `UNVERSIONED`）。该接口公开，不要求登录，不返回任何凭据或运行配置。
+
 ## 4. 认证接口
 
 ### `POST /api/v1/auth/login`
@@ -467,6 +469,7 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 `PUT /api/v1/admin/system-settings` 接收 `SystemSettingsRequest` 的任意非空子集，支持 `Idempotency-Key`。每次成功保存均创建一个新的不可变 PostgreSQL 版本；同一个键与同一请求体重试不会创建第二个版本，同键不同请求体返回 `409`。可编辑公开字段包括：
 
 - `research_execution_mode=SERIAL|DUAL`、`llm_agent_max_concurrency=1..4`、`edge_gateway_enabled` 与 `auto_restart_enabled`；
+- 公网边缘网关：`edge_domain`（公网 DNS 域名）、`edge_acme_email`（ACME 账号邮箱）、`edge_acme_ca_server`（默认 `letsencrypt`）、`edge_frpc_enabled` 与 `edge_frpc_config_file`（宿主机未跟踪的 frpc.toml 路径）；启用 `edge_gateway_enabled` 时必须同时提供域名与邮箱，启用 `edge_frpc_enabled` 时必须提供非空配置文件路径，否则返回 `422`；
 - 对象存储 endpoint/bucket/TLS，SearXNG 地址/超时/结果数；
 - 行情、金融检索缓存与并发/限流；
 - 每日研究启动与重试间隔、旧版重试窗口兼容值、Worker lease、AKShare 参数、数据包模式、演示数据开关、最低上市日和成交额；旧版窗口仅保持读取/写入兼容，自动补数统一在权威交易日历确定的下一交易日 09:25（上海时间）截止；
@@ -482,9 +485,9 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 docker compose -p ashare-ai-src -f compose.yaml --profile dual-research up -d --force-recreate job-worker research-worker
 ```
 
-其他系统设置会在下一次 API 请求、Worker 轮询或任务启动时加载。默认不会创建 `edge-gateway`。安装本机拓扑控制器后，保存 `research_execution_mode` 或 `edge_gateway_enabled` 会由该受限的本机计划任务自动同步对应的 Compose profile；API 仍不拥有 Docker socket。
+其他系统设置会在下一次 API 请求、Worker 轮询或任务启动时加载。默认不会创建 `edge-gateway`。安装本机拓扑控制器后，保存 `research_execution_mode`、`edge_gateway_enabled` 或任一公网边缘网关字段会由该受限的本机计划任务自动同步对应的 Compose profile，并把持久化的网关值注入 `edge-gateway` 容器；API 仍不拥有 Docker socket。
 
-`auto_restart_enabled` 默认关闭：此时执行拓扑变化仍需管理员手动运行页面返回的重启命令。开启后，本机拓扑控制器会在检测到“已保存执行拓扑 ≠ Worker 实际加载拓扑”（`restart_required=true`）时自动 `--force-recreate` 重建 `job-worker` 与 DUAL 模式下的两个 `research-worker`，使新拓扑在启动时生效，无需手动重启；`edge-gateway` 只按开关启停、不强制重建。控制器状态文件记录最近一次“已强制应用”的拓扑哈希，因此同一拓扑只强制重建一次，不会因 Worker 心跳延迟或手动 `docker stop` 反复重建。未安装拓扑控制器时该开关不产生效果，页面提示需先安装。内部接口 `GET /api/internal/topology-desired` 除 `research_execution_mode` 与 `edge_gateway_enabled` 外，返回 `auto_restart_enabled`、`restart_required` 与 `topology_sha256` 供控制器决策，仅限持有 `TOPOLOGY_CONTROLLER_TOKEN` 的本机任务访问。
+`auto_restart_enabled` 默认关闭：此时执行拓扑变化仍需管理员手动运行页面返回的重启命令。开启后，本机拓扑控制器会在检测到“已保存执行拓扑 ≠ Worker 实际加载拓扑”（`restart_required=true`）时自动 `--force-recreate` 重建 `job-worker` 与 DUAL 模式下的两个 `research-worker`，使新拓扑在启动时生效，无需手动重启；`edge-gateway` 只按开关启停、不强制重建。控制器状态文件记录最近一次“已强制应用”的拓扑哈希，因此同一拓扑只强制重建一次，不会因 Worker 心跳延迟或手动 `docker stop` 反复重建。未安装拓扑控制器时该开关不产生效果，页面提示需先安装。内部接口 `GET /api/internal/topology-desired` 除 `research_execution_mode` 与 `edge_gateway_enabled` 外，返回 `auto_restart_enabled`、`restart_required` 与 `topology_sha256` 供控制器决策；同时返回 `edge_domain`、`edge_acme_email`、`edge_acme_ca_server`、`edge_frpc_enabled`、`edge_frpc_config_file`，控制器据此校验并把持久化值注入 `docker compose up edge-gateway` 的子进程环境（网关配置变更会以配置哈希差异触发 `--force-recreate`）。该接口仅限持有 `TOPOLOGY_CONTROLLER_TOKEN` 的本机任务访问。
 
 ## 7. 研究结果、报告和 Trade Plan
 

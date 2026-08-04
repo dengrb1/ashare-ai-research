@@ -24,14 +24,9 @@ if (-not (Test-Path -LiteralPath $EnvFile)) { New-Item -ItemType File -Path $Env
 $lines = Get-Content -LiteralPath $EnvFile
 $lines = @($lines | Where-Object { $_ -notmatch '^TOPOLOGY_CONTROLLER_TOKEN=' })
 $lines += "TOPOLOGY_CONTROLLER_TOKEN=$token"
-foreach ($default in @(
-    'EDGE_DOMAIN=ashare.dengrb.top',
-    'EDGE_FRPC_ENABLED=true',
-    'EDGE_FRPC_CONFIG_FILE=./.secrets/edge-frpc.toml'
-)) {
-    $key = $default.Split('=', 2)[0]
-    if (-not ($lines | Where-Object { $_ -match "^$key=" })) { $lines += $default }
-}
+# Edge-gateway configuration is administrator-managed in the system settings
+# center and injected by the controller from /api/internal/topology-desired,
+# so the installer no longer seeds EDGE_* defaults into .env.
 Set-Content -LiteralPath $EnvFile -Value $lines -Encoding utf8
 
 $script = Join-Path $PSScriptRoot 'run-topology-controller.vbs'
