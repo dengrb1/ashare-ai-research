@@ -93,10 +93,11 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-5.6-sol"
     llm_reasoning_effort: str = "high"
     llm_timeout_seconds: float = Field(default=90.0, gt=0, le=600)
-    # This is intentionally bounded to the per-research-run capacity exposed
-    # by the administrator control plane.  DUAL mode has two fixed research
-    # workers, so its aggregate maximum is always two times this value.
-    llm_agent_max_concurrency: int = Field(default=4, ge=1, le=4)
+    # Per-run model-agent concurrency. The control plane validates the DUAL-mode
+    # aggregate (two research workers) stays within MODEL_GATEWAY_MAX_CONCURRENCY,
+    # so the upper bound here only mirrors the gateway headroom an operator can
+    # raise.  The default keeps existing single-gateway deployments unchanged.
+    llm_agent_max_concurrency: int = Field(default=4, ge=1, le=16)
     research_execution_mode: Literal["SERIAL", "DUAL"] = "SERIAL"
     edge_gateway_enabled: bool = False
     # Deployment-only capability for the local host task which applies

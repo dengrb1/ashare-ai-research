@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -388,3 +389,47 @@ def test_odd_lot_must_be_full_exit() -> None:
         volatilities={"600000.SH": 0.0},
     )[0]
     assert result.reject_reason == RejectReason.ODD_LOT_NOT_FULL_EXIT
+
+
+def _execute(
+    model: DailyExecutionModel,
+    rule: TradingRule,
+    bar: ExecutionBar,
+    *,
+    quantity: int = 100,
+    side: Side = Side.BUY,
+) -> Any:
+    account = AccountState(cash=Decimal("100000"))
+    return model.execute_orders(
+        orders=[Order(order_id="o", symbol="600000.SH", side=side, quantity=quantity)],
+        bars={"600000.SH": bar},
+        rules={"600000.SH": rule},
+        account=account,
+        next_trading_date=date(2025, 1, 3),
+        adv_amounts={"600000.SH": Decimal("100000000")},
+        volatilities={"600000.SH": 0.0},
+    )[0]
+
+
+def test_malformed_price_tick_rejects_order_instead_of_aborting_backtest() -> None:
+    model = DailyExecutionModel(make_config())
+    rule = make_rule(details={"price_tick": "abc"})
+    result = _execute(model, rule, make_bar())
+    assert result.status == OrderStatus.REJECTED
+    assert result.reject_reason == RejectReason.DATA_QUALITY_BLOCK
+
+
+def test_malformed_buy_step_rejects_order_instead_of_aborting_backtest() -> None:
+    model = DailyExecutionModel(make_config())
+    rule = make_rule(details={"buy_min_qty": "abc", "buy_qty_step": "abc"})
+    result = _execute(model, rule, make_bar())
+    assert result.status == OrderStatus.REJECTED
+    assert result.reject_reason == RejectReason.DATA_QUALITY_BLOCK
+
+
+def test_conflicting_official_limits_reject_order_instead_of_aborting_backtest() -> None:
+    model = DailyExecutionModel(make_config())
+    # official_limit_down (10) >= official_limit_up (9) is conflicting data.
+    result = _execute(model, make_rule(), make_bar(upper="9", lower="10"))
+    assert result.status == OrderStatus.REJECTED
+    assert result.reject_reason == RejectReason.DATA_QUALITY_BLOCK

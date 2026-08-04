@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import decimal
 from collections import defaultdict
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
@@ -14,6 +15,7 @@ from ashare_ai.trading.rules import (
     PriceLimitPolicy,
     RuleNotFoundError,
     TradingRule,
+    TradingRuleError,
     resolve_price_band,
 )
 
@@ -232,6 +234,11 @@ class DailyExecutionModel:
             )
         except RuleNotFoundError:
             return self._reject(order, RejectReason.MISSING_OFFICIAL_LIMIT)
+        except (TradingRuleError, decimal.InvalidOperation):
+            # Conflicting or malformed rule data fails this one order rather
+            # than aborting the entire backtest.  The position simply does not
+            # trade that day.
+            return self._reject(order, RejectReason.DATA_QUALITY_BLOCK)
 
         if order.limit_price is not None:
             if band.upper is not None and order.limit_price > band.upper:
@@ -272,9 +279,16 @@ class DailyExecutionModel:
             if order.side == Side.SELL and fill_price < order.limit_price:
                 return self._reject(order, RejectReason.LIMIT_PRICE_NOT_MARKETABLE)
 
-        tick = Decimal(
-            str(rule.details.get("price_tick", self.config.price_limit_policy.default_price_tick))
-        )
+        try:
+            tick = Decimal(
+                str(
+                    rule.details.get(
+                        "price_tick", self.config.price_limit_policy.default_price_tick
+                    )
+                )
+            )
+        except (ValueError, decimal.InvalidOperation):
+            return self._reject(order, RejectReason.DATA_QUALITY_BLOCK)
         fill_price = self._round_money(fill_price, tick)
         notional = fill_price * fill_quantity
         commission = max(rule.minimum_commission, notional * rule.commission_rate)
@@ -333,9 +347,12 @@ class DailyExecutionModel:
         account: AccountState,
         trading_date: date,
     ) -> RejectReason | None:
-        buy_min = int(rule.details.get("buy_min_qty", rule.lot_size))
-        buy_step = int(rule.details.get("buy_qty_step", rule.lot_size))
-        sell_step = int(rule.details.get("sell_qty_step", rule.lot_size))
+        try:
+            buy_min = int(rule.details.get("buy_min_qty", rule.lot_size))
+            buy_step = int(rule.details.get("buy_qty_step", rule.lot_size))
+            sell_step = int(rule.details.get("sell_qty_step", rule.lot_size))
+        except (TypeError, ValueError):
+            return RejectReason.DATA_QUALITY_BLOCK
         if min(buy_min, buy_step, sell_step) <= 0:
             return RejectReason.DATA_QUALITY_BLOCK
 

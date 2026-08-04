@@ -287,6 +287,11 @@ SystemSettingsUnlockToken = Annotated[str | None, Header(alias="X-System-Setting
 _market_session_calendar_cache: dict[date, tuple[date, ...]] = {}
 _market_session_calendar_cache_lock = Lock()
 
+# Bound the number of symbols a single quote request may ask for; the market
+# service scans a full-market snapshot per request, so this prevents one
+# authenticated caller from forcing an arbitrarily large scan.
+MAX_QUOTE_SYMBOLS = 100
+
 
 def _market_session_status(now: datetime | None = None) -> MarketSessionStatus:
     """Return a fail-closed live-session status without exposing calendar internals."""
@@ -4057,8 +4062,18 @@ def market_quote(symbol: str, _: Current, refresh: bool = False) -> QuoteRespons
 
 @app.get("/api/v1/market/quotes", response_model=list[QuoteResponse])
 def market_quotes(symbols: str, _: Current, refresh: bool = False) -> list[QuoteResponse]:
+    requested = [item.strip() for item in symbols.split(",") if item.strip()]
+    if not requested:
+        raise HTTPException(status_code=422, detail="symbols must not be empty")
+    if len(requested) > MAX_QUOTE_SYMBOLS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"symbols must not exceed {MAX_QUOTE_SYMBOLS} entries",
+        )
     try:
-        rows = get_market_data_service().quotes(symbols.split(","), force_refresh=refresh)
+        rows = get_market_data_service().quotes(requested, force_refresh=refresh)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail="market quotes unavailable") from exc
     return [QuoteResponse.model_validate(row) for row in rows]

@@ -64,6 +64,7 @@ class TradeAdviceService:
                 model, reasoning = runtime.model_for("research")
                 config_hash = runtime.config_sha256
             changed = 0
+            marked_unavailable = False
             for row in rows:
                 if row.generated_for == current.date():
                     continue
@@ -71,8 +72,16 @@ class TradeAdviceService:
                 if quote is None or quote.get("price") is None:
                     row.error_code = "QUOTE_UNAVAILABLE"
                     row.updated_at = current.astimezone(UTC)
+                    marked_unavailable = True
                     continue
                 price = Decimal(str(quote["price"]))
+                if price <= 0:
+                    # A suspended stock may report 0.0; treat it as unavailable
+                    # instead of targeting a buy at an impossible zero price.
+                    row.error_code = "QUOTE_UNAVAILABLE"
+                    row.updated_at = current.astimezone(UTC)
+                    marked_unavailable = True
+                    continue
                 change_pct = abs(Decimal(str(quote.get("change_pct") or 0)))
                 # Higher intraday momentum receives a wider upside target; quiet
                 # stocks receive closer targets. The model configuration is saved
@@ -110,7 +119,7 @@ class TradeAdviceService:
                 )
                 row.error_code, row.updated_at = None, current.astimezone(UTC)
                 changed += 1
-            if changed:
+            if changed or marked_unavailable:
                 session.commit()
             return changed
 
@@ -140,6 +149,8 @@ class TradeAdviceService:
                 if quote is None or quote.get("price") is None or row.error_code:
                     continue
                 price = Decimal(str(quote["price"]))
+                if price <= 0:
+                    continue
                 buy_target = row.manual_buy_price or row.ai_buy_price
                 sell_target = row.manual_sell_price or row.ai_sell_price
                 stop_loss_target = row.stop_loss_price

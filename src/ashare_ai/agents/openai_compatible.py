@@ -87,6 +87,7 @@ class OpenAICompatibleStructuredLLMClient:
         retry_backoff: float = 0.25,
         cache_policy: CachePolicy = "COMPATIBLE",
         client: httpx.AsyncClient | None = None,
+        reuse_client: bool = False,
     ) -> None:
         if not base_url.strip():
             raise ValueError("base_url must not be empty")
@@ -115,6 +116,26 @@ class OpenAICompatibleStructuredLLMClient:
         self._retry_backoff = retry_backoff
         self._cache_policy = cache_policy
         self._client = client
+        # Reusing one connection pool across many calls avoids a fresh TCP/TLS
+        # handshake per request.  Callers on a bounded lifetime (e.g. a worker
+        # that exits after one research run) may leave the shared client to be
+        # closed at process exit; long-lived processes should call aclose().
+        self._shared_client = (
+            httpx.AsyncClient(timeout=timeout_seconds) if reuse_client else None
+        )
+
+    def _client_for(self) -> tuple[httpx.AsyncClient, bool]:
+        """Return (client, owns_it) where owns_it means the caller must close it."""
+        if self._client is not None:
+            return self._client, False
+        if self._shared_client is not None:
+            return self._shared_client, False
+        return httpx.AsyncClient(timeout=self._timeout), True
+
+    async def aclose(self) -> None:
+        if self._shared_client is not None:
+            await self._shared_client.aclose()
+            self._shared_client = None
 
     async def generate_structured(
         self,
@@ -148,8 +169,7 @@ class OpenAICompatibleStructuredLLMClient:
         attempts = 0
         schema_fallback_used = False
         advanced_fallback_used = False
-        owns_client = self._client is None
-        client = self._client or httpx.AsyncClient(timeout=self._timeout)
+        client, owns_client = self._client_for()
         try:
             while True:
                 try:
@@ -361,8 +381,7 @@ class OpenAICompatibleStructuredLLMClient:
             request_body["previous_response_id"] = previous_response_id
         if advanced_controls:
             request_body["prompt_cache_key"] = _prompt_cache_key(prompt_cache_key, messages)
-        owns_client = self._client is None
-        client = self._client or httpx.AsyncClient(timeout=self._timeout)
+        client, owns_client = self._client_for()
         attempts = 0
         emitted_text = False
         advanced_fallback_used = False

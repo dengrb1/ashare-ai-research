@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import os
 import threading
@@ -23,12 +24,15 @@ from ashare_ai.core.contracts import (
     AgentComponentResult,
     Candidate,
     CompositeScore,
+    DailyBar,
     DataQualityInputs,
     EvidenceRef,
+    FinancialFact,
     FrozenModel,
     PointInTimeRecord,
 )
 from ashare_ai.core.hashing import canonical_json, sha256_bytes, stable_hash
+from ashare_ai.core.security import safe_error_message
 from ashare_ai.core.system_settings import get_effective_settings
 from ashare_ai.core.time import SHANGHAI
 from ashare_ai.features.fundamental import FundamentalFeatures, extract_fundamental_features
@@ -87,6 +91,8 @@ from ashare_ai.universe.builder import UniverseConfig, UniverseResult, build_dyn
 
 M = TypeVar("M", bound=BaseModel)
 T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
 
 _COMPONENT_SYSTEM_INSTRUCTIONS: dict[str, str] = {
     "fundamental": (
@@ -702,24 +708,31 @@ class BuiltinDailyBackend:
             raise ValueError("feature stage received an unknown universe artifact")
         bundle = self._read_stage(run_id, "bundle", CanonicalDailyBundle)
         universe = self._read_stage(run_id, "universe", UniverseResult)
+        included = set(universe.included)
+        # Group the bundle by symbol once so extraction is linear in the bundle
+        # size instead of re-scanning every record for every universe symbol.
+        facts_by_symbol = _group_records_by_symbol(bundle.financial_facts, included)
+        bars_by_symbol = _group_records_by_symbol(bundle.bars, included)
+        disclosures_by_symbol = _group_records_by_symbol(bundle.disclosures, included)
+        news_by_symbol = _group_news_by_symbol(bundle.news, included)
         items = tuple(
             SymbolFeatureSet(
                 symbol=symbol,
                 fundamental=extract_fundamental_features(
-                    bundle.financial_facts,
+                    facts_by_symbol.get(symbol, ()),
                     decision_at=bundle.decision_at,
                     trading_date=bundle.trading_date,
                     symbol=symbol,
                 ),
                 technical=extract_technical_features(
-                    bundle.bars,
+                    bars_by_symbol.get(symbol, ()),
                     decision_at=bundle.decision_at,
                     trading_date=bundle.trading_date,
                     symbol=symbol,
                 ),
                 sentiment=extract_sentiment_features(
-                    bundle.disclosures,
-                    bundle.news,
+                    disclosures_by_symbol.get(symbol, ()),
+                    news_by_symbol.get(symbol, ()),
                     symbol=symbol,
                     decision_at=bundle.decision_at,
                     trading_date=bundle.trading_date,
@@ -742,12 +755,18 @@ class BuiltinDailyBackend:
             raise ValueError("agent stage received an unknown feature artifact")
         bundle = self._read_stage(run_id, "bundle", CanonicalDailyBundle)
         features = self._read_stage(run_id, "features", FeatureArtifact)
+        evidence_index = self._evidence_index(bundle)
         llm_client = self._resolve_llm_client(run_id)
         llm_results: dict[tuple[str, str], AgentComponentResult] = {}
+        llm_failures = 0
+        llm_request_count = 0
+        first_failure: Exception | None = None
         if llm_client is not None:
             try:
-                llm_results = self._run_llm_components(
-                    llm_client, bundle.decision_at, features.items, bundle
+                llm_results, llm_failures, llm_request_count, first_failure = (
+                    self._run_llm_components(
+                        llm_client, bundle.decision_at, features.items, bundle, evidence_index
+                    )
                 )
             except Exception as exc:
                 if not _is_degradable_llm_error(exc):
@@ -758,81 +777,40 @@ class BuiltinDailyBackend:
                 # configuration is enabled, and leave an auditable warning.
                 llm_client = None
                 self._record_llm_degradation(run_id, exc)
+            else:
+                if llm_request_count and llm_failures == llm_request_count:
+                    # The gateway rejected every component; keep the exact
+                    # all-or-nothing degradation contract and audit trail.
+                    llm_client = None
+                    self._record_llm_degradation(
+                        run_id, first_failure or RuntimeError("all LLM component agents failed")
+                    )
+                elif llm_failures:
+                    # A transient failure in one component must not discard the
+                    # model analysis of every other symbol; degrade only the
+                    # affected pairs and leave an auditable warning.
+                    self._record_llm_partial_degradation(run_id, llm_failures)
         items: list[SymbolAgentSet] = []
         for feature_item in features.items:
-            evidence = self._evidence_for_symbol(bundle, feature_item.symbol)
+            evidence = self._evidence_for_index(evidence_index, feature_item.symbol)
             quality = bundle.data_quality[feature_item.symbol]
             if llm_client is None:
                 results = (
-                    self._agent_result(
-                        "fundamental",
-                        50.0
-                        if quality.get("fundamental_placeholder")
-                        else self._fundamental_score(feature_item.fundamental),
-                        0.2
-                        if quality.get("fundamental_placeholder")
-                        else feature_item.fundamental.completeness,
-                        evidence[0],
-                        feature_item.fundamental,
-                    ),
-                    self._agent_result(
-                        "technical",
-                        self._technical_score(feature_item.technical),
-                        feature_item.technical.completeness,
-                        evidence[1],
-                        feature_item.technical,
-                    ),
-                    self._agent_result(
-                        "sentiment",
-                        50.0
-                        if quality.get("sentiment_placeholder")
-                        else self._sentiment_score(feature_item.sentiment),
-                        0.2
-                        if quality.get("sentiment_placeholder")
-                        else feature_item.sentiment.completeness,
-                        evidence[2],
-                        feature_item.sentiment,
-                    ),
+                    self._deterministic_component("fundamental", feature_item, quality, evidence),
+                    self._deterministic_component("technical", feature_item, quality, evidence),
+                    self._deterministic_component("sentiment", feature_item, quality, evidence),
                 )
             else:
-                fundamental_result = (
-                    self._agent_result(
-                        "fundamental",
-                        50.0,
-                        0.2,
-                        evidence[0],
-                        feature_item.fundamental,
-                    )
-                    if quality.get("fundamental_placeholder")
-                    else self._run_llm_component(
-                        "fundamental",
-                        feature_item.symbol,
-                        llm_results,
-                    )
-                )
-                sentiment_result = (
-                    self._agent_result(
-                        "sentiment",
-                        50.0,
-                        0.2,
-                        evidence[2],
-                        feature_item.sentiment,
-                    )
-                    if quality.get("sentiment_placeholder")
-                    else self._run_llm_component(
-                        "sentiment",
-                        feature_item.symbol,
-                        llm_results,
-                    )
-                )
                 results = (
-                    fundamental_result,
-                    self._run_llm_component(
-                        "technical",
-                        feature_item.symbol,
-                        llm_results,
+                    self._component_result(
+                        "fundamental", feature_item, quality, evidence, llm_results
                     ),
-                    sentiment_result,
+                    self._component_result(
+                        "technical", feature_item, quality, evidence, llm_results
+                    ),
+                    self._component_result(
+                        "sentiment", feature_item, quality, evidence, llm_results
+                    ),
                 )
             items.append(SymbolAgentSet(symbol=feature_item.symbol, results=results))
         artifact = AgentArtifact(
@@ -1937,15 +1915,11 @@ class BuiltinDailyBackend:
             reasoning_effort=runtime.research_reasoning_effort,
             timeout_seconds=runtime.timeout_seconds,
             cache_policy=runtime.profile_for(runtime.research_model).cache_policy,
+            # Reuse one connection pool across the many component calls in a
+            # single research run instead of opening a fresh TLS connection per
+            # request.  The worker process exits when the run completes.
+            reuse_client=True,
         )
-
-    def _run_llm_component(
-        self,
-        component: Literal["fundamental", "technical", "sentiment"],
-        symbol: str,
-        results: dict[tuple[str, str], AgentComponentResult],
-    ) -> AgentComponentResult:
-        return results[(symbol, component)]
 
     def _run_llm_components(
         self,
@@ -1953,12 +1927,18 @@ class BuiltinDailyBackend:
         decision_at: datetime,
         feature_items: Sequence[SymbolFeatureSet],
         bundle: CanonicalDailyBundle,
-    ) -> dict[tuple[str, str], AgentComponentResult]:
+        evidence_index: dict[str, tuple[EvidenceRef, EvidenceRef, EvidenceRef]],
+    ) -> tuple[
+        dict[tuple[str, str], AgentComponentResult],
+        int,
+        int,
+        Exception | None,
+    ]:
         requests: list[
             tuple[str, Literal["fundamental", "technical", "sentiment"], FrozenModel, EvidenceRef]
         ] = []
         for feature_item in feature_items:
-            evidence = self._evidence_for_symbol(bundle, feature_item.symbol)
+            evidence = self._evidence_for_index(evidence_index, feature_item.symbol)
             quality = bundle.data_quality[feature_item.symbol]
             if not quality.get("fundamental_placeholder"):
                 requests.append(
@@ -1980,7 +1960,12 @@ class BuiltinDailyBackend:
         components: Sequence[
             tuple[str, Literal["fundamental", "technical", "sentiment"], FrozenModel, EvidenceRef]
         ],
-    ) -> dict[tuple[str, str], AgentComponentResult]:
+    ) -> tuple[
+        dict[tuple[str, str], AgentComponentResult],
+        int,
+        int,
+        Exception | None,
+    ]:
         for _, _, _, evidence in components:
             if evidence.available_at > decision_at:
                 raise ValueError("component request cannot include future evidence")
@@ -2008,20 +1993,31 @@ class BuiltinDailyBackend:
                 )
             return (symbol, component), result
 
+        # All tasks start immediately and the semaphore keeps at most
+        # llm_agent_max_concurrency model calls in flight, so a slow call no
+        # longer stalls an entire batch.  Degradable failures are isolated per
+        # component; a hard failure still aborts the run exactly as before.
         completed: list[tuple[tuple[str, str], AgentComponentResult]] = []
-        batch_size = max(1, self._settings.llm_agent_max_concurrency)
-        for offset in range(0, len(components), batch_size):
-            completed.extend(
-                await asyncio.gather(
-                    *(
-                        run_one(symbol, component, features, evidence)
-                        for symbol, component, features, evidence in components[
-                            offset : offset + batch_size
-                        ]
-                    )
+        failed = 0
+        first_failure: Exception | None = None
+        tasks = [
+            asyncio.create_task(run_one(symbol, component, features, evidence))
+            for symbol, component, features, evidence in components
+        ]
+        for outcome in await asyncio.gather(*tasks, return_exceptions=True):
+            if isinstance(outcome, BaseException):
+                if not isinstance(outcome, Exception) or not _is_degradable_llm_error(outcome):
+                    raise outcome
+                failed += 1
+                if first_failure is None:
+                    first_failure = outcome
+                logger.warning(
+                    "LLM component agent failed; deterministic fallback will be used: %s",
+                    safe_error_message(outcome),
                 )
-            )
-        return dict(completed)
+                continue
+            completed.append(outcome)
+        return dict(completed), failed, len(components), first_failure
 
     def _record_llm_degradation(self, run_id: str, error: Exception) -> None:
         details: dict[str, Any] = {
@@ -2115,26 +2111,144 @@ class BuiltinDailyBackend:
         return _bounded(55 + 35 * features.tone_score - 40 * features.event_risk_ratio)
 
     @staticmethod
-    def _evidence_for_symbol(
-        bundle: CanonicalDailyBundle, symbol: str
+    def _evidence_index(
+        bundle: CanonicalDailyBundle,
+    ) -> dict[str, tuple[EvidenceRef, EvidenceRef, EvidenceRef]]:
+        """Map every symbol to its PIT evidence maxima in one linear pass.
+
+        This mirrors ``_evidence_for_symbol`` selection semantics without
+        re-scanning the whole bundle once per universe symbol (O(n) instead of
+        O(n * symbols)).
+        """
+        financial: dict[str, FinancialFact] = {}
+        for fact in bundle.financial_facts:
+            current_financial = financial.get(fact.symbol)
+            fact_key = (fact.report_period_end, fact.available_at, fact.source_record_id)
+            if current_financial is None or fact_key > (
+                current_financial.report_period_end,
+                current_financial.available_at,
+                current_financial.source_record_id,
+            ):
+                financial[fact.symbol] = fact
+        bars: dict[str, DailyBar] = {}
+        for bar in bundle.bars:
+            current_bar = bars.get(bar.symbol)
+            bar_key = (bar.trading_date, bar.available_at, bar.source_record_id)
+            if current_bar is None or bar_key > (
+                current_bar.trading_date,
+                current_bar.available_at,
+                current_bar.source_record_id,
+            ):
+                bars[bar.symbol] = bar
+        documents: dict[str, PointInTimeRecord] = {}
+        for document in (*bundle.disclosures, *bundle.news):
+            current_document = documents.get(document.symbol)
+            document_key = (document.available_at, document.source_record_id)
+            if current_document is None or document_key > (
+                current_document.available_at,
+                current_document.source_record_id,
+            ):
+                documents[document.symbol] = document
+        index: dict[str, tuple[EvidenceRef, EvidenceRef, EvidenceRef]] = {}
+        for symbol in financial:
+            if symbol not in bars or symbol not in documents:
+                continue
+            index[symbol] = (
+                _evidence_ref(financial[symbol]),
+                _evidence_ref(bars[symbol]),
+                _evidence_ref(documents[symbol]),
+            )
+        return index
+
+    @staticmethod
+    def _evidence_for_index(
+        index: dict[str, tuple[EvidenceRef, EvidenceRef, EvidenceRef]], symbol: str
     ) -> tuple[EvidenceRef, EvidenceRef, EvidenceRef]:
-        financial = max(
-            (item for item in bundle.financial_facts if item.symbol == symbol),
-            key=lambda item: (item.report_period_end, item.available_at, item.source_record_id),
+        try:
+            return index[symbol]
+        except KeyError:
+            raise ValueError(f"no point-in-time evidence available for {symbol}") from None
+
+    @staticmethod
+    def _deterministic_component(
+        component: Literal["fundamental", "technical", "sentiment"],
+        feature_item: SymbolFeatureSet,
+        quality: Mapping[str, Any],
+        evidence: tuple[EvidenceRef, EvidenceRef, EvidenceRef],
+    ) -> AgentComponentResult:
+        """Replicate the no-model mapping used when a model gateway is absent.
+
+        Also used as the per-component fallback when a single model call fails.
+        """
+        if component == "fundamental":
+            return BuiltinDailyBackend._agent_result(
+                "fundamental",
+                50.0
+                if quality.get("fundamental_placeholder")
+                else BuiltinDailyBackend._fundamental_score(feature_item.fundamental),
+                0.2
+                if quality.get("fundamental_placeholder")
+                else feature_item.fundamental.completeness,
+                evidence[0],
+                feature_item.fundamental,
+            )
+        if component == "technical":
+            return BuiltinDailyBackend._agent_result(
+                "technical",
+                BuiltinDailyBackend._technical_score(feature_item.technical),
+                feature_item.technical.completeness,
+                evidence[1],
+                feature_item.technical,
+            )
+        return BuiltinDailyBackend._agent_result(
+            "sentiment",
+            50.0
+            if quality.get("sentiment_placeholder")
+            else BuiltinDailyBackend._sentiment_score(feature_item.sentiment),
+            0.2
+            if quality.get("sentiment_placeholder")
+            else feature_item.sentiment.completeness,
+            evidence[2],
+            feature_item.sentiment,
         )
-        bar = max(
-            (item for item in bundle.bars if item.symbol == symbol),
-            key=lambda item: (item.trading_date, item.available_at, item.source_record_id),
+
+    @staticmethod
+    def _component_result(
+        component: Literal["fundamental", "technical", "sentiment"],
+        feature_item: SymbolFeatureSet,
+        quality: Mapping[str, Any],
+        evidence: tuple[EvidenceRef, EvidenceRef, EvidenceRef],
+        llm_results: Mapping[tuple[str, str], AgentComponentResult],
+    ) -> AgentComponentResult:
+        result = llm_results.get((feature_item.symbol, component))
+        if result is not None:
+            return result
+        return BuiltinDailyBackend._deterministic_component(
+            component, feature_item, quality, evidence
         )
-        document: PointInTimeRecord = max(
-            (item for item in (*bundle.disclosures, *bundle.news) if item.symbol == symbol),
-            key=lambda item: (item.available_at, item.source_record_id),
-        )
-        return (
-            _evidence_ref(financial),
-            _evidence_ref(bar),
-            _evidence_ref(document),
-        )
+
+    def _record_llm_partial_degradation(self, run_id: str, failed_count: int) -> None:
+        details: dict[str, Any] = {
+            "error_type": "partial-component-fallback",
+            "retryable": True,
+            "fallback": "builtin-deterministic",
+            "failed_components": failed_count,
+        }
+        with self.session_factory() as session:
+            run = session.get(JobRun, run_id)
+            if run is not None:
+                manifest = dict(run.manifest)
+                manifest["agent_backend_effective"] = "builtin-llm-with-partial-fallback"
+                manifest["agent_backend_degradation"] = details
+                run.manifest = manifest
+                AuditLogger(session).record(
+                    run_id,
+                    "LLM_AGENT_PARTIAL_DEGRADED",
+                    "Some component analyses fell back to deterministic scoring",
+                    severity="WARNING",
+                    details=details,
+                )
+                session.commit()
 
 
 def _evidence_ref(record: PointInTimeRecord) -> EvidenceRef:
@@ -2146,6 +2260,27 @@ def _evidence_ref(record: PointInTimeRecord) -> EvidenceRef:
         available_at=record.available_at,
         payload_sha256=record.payload_sha256,
     )
+
+
+def _group_records_by_symbol(
+    records: Sequence[Any], symbols: set[str]
+) -> dict[str, list[Any]]:
+    """Partition PIT records by symbol so per-symbol extraction is linear."""
+    grouped: dict[str, list[Any]] = {}
+    for record in records:
+        if record.symbol in symbols:
+            grouped.setdefault(record.symbol, []).append(record)
+    return grouped
+
+
+def _group_news_by_symbol(news: Sequence[Any], symbols: set[str]) -> dict[str, list[Any]]:
+    """Partition news by every related symbol (a story can cover several)."""
+    grouped: dict[str, list[Any]] = {}
+    for item in news:
+        for related in item.related_symbols:
+            if related in symbols:
+                grouped.setdefault(related, []).append(item)
+    return grouped
 
 
 def _run_async(coroutine: Coroutine[Any, Any, T]) -> T:
