@@ -21,6 +21,9 @@ chown -R nginx:nginx /tmp/client_temp /tmp/proxy_temp /tmp/fastcgi_temp /tmp/uws
 
 export EDGE_DOMAIN
 envsubst '${EDGE_DOMAIN}' < /etc/nginx/templates/edge.conf.template > /tmp/edge.conf
+if [ -s /etc/edge/managed.conf ]; then
+  cat /etc/edge/managed.conf >> /tmp/edge.conf
+fi
 
 stop_children() {
   [ -n "$NGINX_PID" ] && nginx -s quit >/dev/null 2>&1 || true

@@ -87,6 +87,32 @@ export interface SystemSettingsUnlock {
   expires_at: string
 }
 
+export interface EdgeProxyHost {
+  id?: string | null
+  name: string
+  domains: string[]
+  forward_scheme: 'http' | 'https'
+  forward_host: string
+  forward_port: number
+  ssl_enabled: boolean
+  websocket_support: boolean
+  enabled: boolean
+  notes: string
+}
+
+export interface EdgeGatewayConfiguration {
+  configuration_id?: string | null
+  version: number
+  enabled: boolean
+  proxy_hosts: EdgeProxyHost[]
+  frpc_toml: string
+  config_sha256?: string | null
+  apply_status: string
+  apply_message?: string | null
+  applied_at?: string | null
+  applied_sha256?: string | null
+}
+
 export interface User {
   id?: string
   user_id?: string

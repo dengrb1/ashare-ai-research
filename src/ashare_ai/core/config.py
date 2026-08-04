@@ -122,6 +122,9 @@ class Settings(BaseSettings):
     # control plane fail closed before enabling two research consumers.
     model_gateway_max_concurrency: int = Field(default=8, ge=1, le=128)
     model_settings_encryption_keys: str | None = None
+    edge_gateway_encryption_keys: str | None = None
+    edge_gateway_config_dir: Path = Path(".secrets/edge-gateway")
+    edge_proxy_target_allowlist: str = "web"
     personal_data_encryption_keys: str | None = None
     mipush_app_secret: str | None = None
     mipush_package_name: str | None = None

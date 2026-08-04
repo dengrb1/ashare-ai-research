@@ -88,6 +88,7 @@ class Controller:
                 raise RuntimeError("edge-gateway frpc config file is missing")
 
     def _edge_values(self, desired: dict[str, object]) -> dict[str, str]:
+        config_dir = str(desired.get("edge_gateway_config_dir") or "./.secrets/edge-gateway")
         return {
             "EDGE_DOMAIN": str(desired.get("edge_domain") or ""),
             "EDGE_ACME_EMAIL": str(desired.get("edge_acme_email") or ""),
@@ -95,11 +96,34 @@ class Controller:
                 desired.get("edge_acme_ca_server") or "letsencrypt"
             ),
             "EDGE_FRPC_ENABLED": "true" if bool(desired.get("edge_frpc_enabled")) else "false",
-            "EDGE_FRPC_CONFIG_FILE": str(
-                desired.get("edge_frpc_config_file")
-                or "./docker/edge-gateway/frpc.disabled.toml"
-            ),
+            "EDGE_GATEWAY_CONFIG_DIR": config_dir,
+            "EDGE_GATEWAY_CONFIG_FILE": f"{config_dir}/managed.conf",
+            "EDGE_FRPC_CONFIG_FILE": f"{config_dir}/frpc.toml",
         }
+
+    def _edge_config(self, token: str) -> dict[str, object]:
+        request = urllib.request.Request(
+            "http://127.0.0.1:8000/api/internal/edge-gateway-config",
+            headers={"X-Topology-Controller-Token": token},
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.load(response)
+        if not isinstance(payload, dict):
+            raise RuntimeError("edge-gateway config response is not an object")
+        return cast(dict[str, object], payload)
+
+    def _write_edge_config(self, values: dict[str, str], config: dict[str, object]) -> None:
+        directory = Path(values["EDGE_GATEWAY_CONFIG_DIR"])
+        if not directory.is_absolute():
+            directory = self.root / directory
+        directory.mkdir(parents=True, exist_ok=True)
+        for filename, content in (("frpc.toml", config.get("frpc_toml")), ("managed.conf", config.get("nginx_conf"))):
+            if not isinstance(content, str):
+                raise RuntimeError(f"edge-gateway {filename} is missing")
+            target = directory / filename
+            temporary = target.with_suffix(target.suffix + ".tmp")
+            temporary.write_text(content, encoding="utf-8")
+            temporary.replace(target)
 
     def _apply_workers(self, base: tuple[str, ...], mode: str, force: bool) -> None:
         if mode == "DUAL":
@@ -127,6 +151,7 @@ class Controller:
         topology_sha = str(desired.get("topology_sha256", ""))
         base = ("compose", "-p", "ashare-ai-src", "-f", "compose.yaml")
         result = 0
+        token = (self.secrets / "topology-controller.token").read_text(encoding="utf-8").strip()
         force = auto_restart and restart_required
         worker_state = f"{mode}:{topology_sha}:{1 if force else 0}"
         try:
@@ -157,6 +182,11 @@ class Controller:
             if self._read_state(self.edge_state_path) != edge_state:
                 if edge:
                     self._validate_edge(edge_values)
+                    edge_config = self._edge_config(token)
+                    self._write_edge_config(edge_values, edge_config)
+                    # A saved TOML is the authoritative FRP enablement switch
+                    # for the dedicated gateway page.
+                    edge_values["EDGE_FRPC_ENABLED"] = "true" if str(edge_config.get("frpc_toml") or "").strip() else "false"
                     self._docker(
                         *base,
                         "--profile",
@@ -168,6 +198,14 @@ class Controller:
                         "edge-gateway",
                         env_extra=edge_values,
                     )
+                    applied = urllib.request.Request(
+                        "http://127.0.0.1:8000/api/internal/edge-gateway-applied",
+                        data=json.dumps({"configuration_id": edge_config.get("configuration_id"), "sha256": edge_config.get("config_sha256"), "status": "APPLIED", "message": None}).encode(),
+                        headers={"Content-Type": "application/json", "X-Topology-Controller-Token": token},
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(applied, timeout=10):
+                        pass
                 else:
                     self._stop_if_running("edge", "edge-gateway")
                 self.edge_state_path.write_text(edge_state, encoding="ascii")

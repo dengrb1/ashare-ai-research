@@ -110,13 +110,16 @@ docker compose -p ashare-ai-src -f compose.yaml exec -T api \
 - 边缘网关域名（`edge_domain` / `EDGE_DOMAIN`）的 DNS A/AAAA 记录已指向此服务器；
 - 准备好用于 ACME 账号恢复通知的邮箱（`edge_acme_email` / `EDGE_ACME_EMAIL`）。
 
-网关配置由系统设置中心管理：管理员解锁后，在「系统设置 → 高级配置 → 公网边缘网关」填写域名、ACME 邮箱、CA 服务器（默认 `letsencrypt`）、FRP 开关与 FRP 配置文件路径，并在「执行模式」中开启「公网边缘网关（FRP）」总开关。启用总开关时必须同时提供域名与邮箱，启用 FRP 时必须提供非空配置文件路径，否则保存返回 `422`。安装本机拓扑控制器后，控制器会在下次轮询时把持久化值注入 `docker compose up edge-gateway` 的子进程环境，并据此启动或重建网关；无需手工编辑 `.env`。`.env` 中的同名 `EDGE_*` 变量仍保留为部署基线，供未安装控制器的部署手动启动：
+网关配置由「管理 → Edge Gateway」专用页面管理：管理员解锁后编辑 FRP TOML，并用结构化代理主机表维护 Nginx。FRP 内容服务端加密保存，控制器只在配置哈希变化时原子写入并重建网关；无需手工编辑 `.env`。首次启用前设置以下环境变量：
 
 ```env
 EDGE_DOMAIN=
 EDGE_ACME_EMAIL=
 EDGE_FRPC_ENABLED=false
 EDGE_FRPC_CONFIG_FILE=./docker/edge-gateway/frpc.disabled.toml
+EDGE_GATEWAY_ENCRYPTION_KEYS=<Fernet key>
+EDGE_GATEWAY_CONFIG_DIR=./.secrets/edge-gateway
+EDGE_PROXY_TARGET_ALLOWLIST=web
 ```
 
 首次启动会以 ACME HTTP-01 自动申请 ECDSA P-256 证书，证书和 ACME 账号保存在 Compose 的 `edge-certificates`、`edge-acme-data` 卷中：

@@ -158,6 +158,9 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 系统设置 | DELETE | `/api/v1/admin/system-settings/{field}` | 管理员、写入 |
 | 系统设置解锁 | POST | `/api/v1/admin/system-settings/unlock` | 管理员、写入；当前账户密码二次验证 |
 | 系统资源 | GET | `/api/v1/admin/system-resources` | 管理员；运行环境只读指标 |
+| Edge Gateway | GET/PUT | `/api/v1/admin/edge-gateway` | 管理员；写入需解锁与幂等键 |
+| Edge Gateway 校验 | POST | `/api/v1/admin/edge-gateway/validate` | 管理员；结构化 Nginx/FRP 校验 |
+| Edge Gateway 回滚 | POST | `/api/v1/admin/edge-gateway/rollback` | 管理员；写入需解锁 |
 | 研究结果 | GET | `/api/v1/scores/{trading_date}` | 登录 |
 | 研究结果 | GET | `/api/v1/scores/{trading_date}/{symbol}` | 登录 |
 | 研究结果 | GET | `/api/v1/scores/{trading_date}/{symbol}/lineage` | 登录 |
@@ -461,6 +464,12 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 `POST /api/v1/admin/model-settings/test` 返回 `ModelProbeResponse`：`reachable`、`message`、`model`、`checked_at`、`structured_output_supported`、`streaming_supported`。该显式操作才会在结构化探测后追加一次 8 秒上限的流式能力检测并更新 `streaming_supported`。`POST /api/v1/admin/model-settings/models` 返回 `{"models":["..."]}`。
 
 ### 系统设置中心
+
+### Edge Gateway 配置中心
+
+`GET /api/v1/admin/edge-gateway` 返回当前版本、结构化代理主机、配置哈希和应用状态；未携带有效 `X-System-Settings-Unlock` 时不返回 FRP 明文。`PUT` 使用当前管理员解锁令牌保存最多 32 个代理主机和 64 KiB FRP TOML，FRP 内容使用 `EDGE_GATEWAY_ENCRYPTION_KEYS` 加密，提交按 `Idempotency-Key` 去重。代理目标必须匹配 `EDGE_PROXY_TARGET_ALLOWLIST`（默认 `web`）或私有/回环 IP，禁止自定义 Nginx 指令。
+
+本机拓扑控制器使用 `GET /api/internal/edge-gateway-config` 读取已校验配置，原子写入未跟踪的 `EDGE_GATEWAY_CONFIG_DIR`，并通过 `POST /api/internal/edge-gateway-applied` 回报应用结果；两个接口只接受 `TOPOLOGY_CONTROLLER_TOKEN`，API 不访问 Docker socket。
 
 `GET /api/v1/admin/system-settings` 返回有效的公开设置、每项来源（`database|environment`）、不可变配置版本/哈希、敏感项是否已配置、环境只读状态、Worker 心跳、已加载执行模式及各队列 `pending/processing` 摘要。它绝不返回 Tushare、对象存储或模型密钥，也不返回数据库/Redis 地址、认证参数、Fernet 密钥或卷路径。Worker 心跳可以包含清洗后的内存、内存上限和 CPU 指标。
 

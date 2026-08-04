@@ -83,6 +83,11 @@ from ashare_ai.api.schemas import (
     AIChatThreadPatchRequest,
     AIChatThreadRequest,
     AIChatThreadResponse,
+    EdgeGatewayAppliedRequest,
+    EdgeGatewayConfigurationRequest,
+    EdgeGatewayConfigurationResponse,
+    EdgeGatewayValidateRequest,
+    EdgeGatewayValidationResponse,
     AICostSummaryResponse,
     AIModelOptionsResponse,
     AppBootstrapResponse,
@@ -161,6 +166,7 @@ from ashare_ai.api.schemas import (
 from ashare_ai.api.static_web import NativeSPAStaticFiles
 from ashare_ai.api.system_settings_unlock import issue_unlock, require_settings_unlock
 from ashare_ai.core.config import get_settings
+from ashare_ai.core.edge_gateway import EdgeGatewayConfigurationService, EdgeGatewayError, render_nginx, validate_frpc_toml, validate_proxy_hosts
 from ashare_ai.core.hashing import sha256_bytes, stable_hash
 from ashare_ai.core.security import safe_error_message
 from ashare_ai.core.system_settings import (
@@ -212,6 +218,8 @@ from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import (
     ActiveModelConfiguration,
     ActiveSystemConfiguration,
+    ActiveEdgeGatewayConfiguration,
+    EdgeGatewayConfigurationVersion,
     AIChatMessage,
     AIChatThread,
     ApiIdempotencyKey,
@@ -2456,19 +2464,138 @@ def topology_desired(request: Request, db: DbSession) -> dict[str, object]:
     if not hmac.compare_digest(received, expected):
         raise HTTPException(status_code=403, detail="topology controller is not authorized")
     runtime = SystemConfigurationService().resolve(db)
+    edge_config = EdgeGatewayConfigurationService().public_view(db)
     _, restart_required, _, _ = _system_worker_snapshot(str(runtime.topology_sha256))
     return {
         "research_execution_mode": runtime.settings.research_execution_mode,
-        "edge_gateway_enabled": runtime.settings.edge_gateway_enabled,
+        "edge_gateway_enabled": bool(edge_config["enabled"]) if edge_config.get("version", 0) else runtime.settings.edge_gateway_enabled,
         "edge_domain": runtime.settings.edge_domain,
         "edge_acme_email": runtime.settings.edge_acme_email,
         "edge_acme_ca_server": runtime.settings.edge_acme_ca_server,
         "edge_frpc_enabled": runtime.settings.edge_frpc_enabled,
         "edge_frpc_config_file": runtime.settings.edge_frpc_config_file,
+        "edge_gateway_config_dir": str(get_settings().edge_gateway_config_dir),
         "auto_restart_enabled": runtime.settings.auto_restart_enabled,
         "restart_required": restart_required,
         "topology_sha256": runtime.topology_sha256,
     }
+
+
+def _edge_gateway_response(db: Session, *, reveal: bool = False) -> EdgeGatewayConfigurationResponse:
+    return EdgeGatewayConfigurationResponse.model_validate(
+        EdgeGatewayConfigurationService().public_view(db, reveal=reveal)
+    )
+
+
+@app.get("/api/v1/admin/edge-gateway", response_model=EdgeGatewayConfigurationResponse)
+def get_edge_gateway(
+    db: DbSession,
+    context: Current,
+    unlock_token: SystemSettingsUnlockToken = None,
+) -> EdgeGatewayConfigurationResponse:
+    _admin(context)
+    reveal = bool(unlock_token)
+    if reveal:
+        require_settings_unlock(context, unlock_token)
+    try:
+        return _edge_gateway_response(db, reveal=reveal)
+    except EdgeGatewayError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/admin/edge-gateway/validate", response_model=EdgeGatewayValidationResponse)
+def validate_edge_gateway(
+    payload: EdgeGatewayValidateRequest,
+    context: Writer,
+) -> EdgeGatewayValidationResponse:
+    _admin(context)
+    try:
+        hosts = validate_proxy_hosts([item.model_dump() for item in payload.proxy_hosts])
+        validate_frpc_toml(payload.frpc_toml)
+        rendered = render_nginx(hosts)
+        return EdgeGatewayValidationResponse(
+            nginx_sha256=sha256_bytes(rendered.encode()), proxy_count=len(hosts)
+        )
+    except EdgeGatewayError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.put("/api/v1/admin/edge-gateway", response_model=EdgeGatewayConfigurationResponse)
+def put_edge_gateway(
+    payload: EdgeGatewayConfigurationRequest,
+    db: DbSession,
+    context: Writer,
+    unlock_token: SystemSettingsUnlockToken = None,
+    idempotency_key: IdempotencyKey = None,
+) -> EdgeGatewayConfigurationResponse:
+    _admin(context)
+    require_settings_unlock(context, unlock_token)
+    body = payload.model_dump(mode="json")
+    fingerprint = _idempotency_fingerprint(context.user.user_id, "/api/v1/admin/edge-gateway", idempotency_key, body)
+    replay = _find_idempotency(db, user_id=context.user.user_id, route="/api/v1/admin/edge-gateway", fingerprint=fingerprint)
+    if replay is not None:
+        return _edge_gateway_response(db, reveal=True)
+    try:
+        result = EdgeGatewayConfigurationService().save(
+            db,
+            enabled=payload.enabled,
+            proxy_hosts=[item.model_dump() for item in payload.proxy_hosts],
+            frpc_toml=payload.frpc_toml,
+            user_id=context.user.user_id,
+        )
+        _remember_idempotency(db, user_id=context.user.user_id, route="/api/v1/admin/edge-gateway", fingerprint=fingerprint, resource_type="EDGE_GATEWAY_CONFIGURATION", resource_id=result.get("configuration_id") or "environment")
+        db.commit()
+        return EdgeGatewayConfigurationResponse.model_validate(result)
+    except EdgeGatewayError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/admin/edge-gateway/rollback", response_model=EdgeGatewayConfigurationResponse)
+def rollback_edge_gateway(
+    db: DbSession,
+    context: Writer,
+    unlock_token: SystemSettingsUnlockToken = None,
+) -> EdgeGatewayConfigurationResponse:
+    _admin(context)
+    require_settings_unlock(context, unlock_token)
+    service = EdgeGatewayConfigurationService()
+    pointer = db.get(ActiveEdgeGatewayConfiguration, "default")
+    if pointer is None:
+        raise HTTPException(status_code=409, detail="no edge-gateway configuration to roll back")
+    current = db.get(EdgeGatewayConfigurationVersion, pointer.configuration_id)
+    previous = db.scalar(
+        select(EdgeGatewayConfigurationVersion)
+        .where(EdgeGatewayConfigurationVersion.version < (current.version if current else 1))
+        .order_by(EdgeGatewayConfigurationVersion.version.desc())
+    )
+    if previous is None:
+        raise HTTPException(status_code=409, detail="no previous edge-gateway configuration")
+    pointer.configuration_id = previous.configuration_id
+    pointer.activated_by = context.user.user_id
+    pointer.activated_at = datetime.now(UTC)
+    db.commit()
+    return _edge_gateway_response(db, reveal=True)
+
+
+@app.get("/api/internal/edge-gateway-config")
+def edge_gateway_internal_config(request: Request, db: DbSession) -> dict[str, object]:
+    expected = get_settings().topology_controller_token
+    received = request.headers.get("X-Topology-Controller-Token", "")
+    if not expected or not hmac.compare_digest(received, expected):
+        raise HTTPException(status_code=403, detail="topology controller is not authorized")
+    return EdgeGatewayConfigurationService().internal_payload(db)
+
+
+@app.post("/api/internal/edge-gateway-applied")
+def edge_gateway_applied(request: Request, payload: EdgeGatewayAppliedRequest, db: DbSession) -> dict[str, bool]:
+    expected = get_settings().topology_controller_token
+    received = request.headers.get("X-Topology-Controller-Token", "")
+    if not expected or not hmac.compare_digest(received, expected):
+        raise HTTPException(status_code=403, detail="topology controller is not authorized")
+    EdgeGatewayConfigurationService().mark_applied(db, payload.configuration_id, payload.sha256, payload.status, payload.message)
+    db.commit()
+    return {"ok": True}
 
 
 def _system_settings_payload(

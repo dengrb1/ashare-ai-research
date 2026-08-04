@@ -42,10 +42,12 @@ services:
       EDGE_ACME_EMAIL: "${EDGE_ACME_EMAIL:-}"
       EDGE_ACME_CA_SERVER: "${EDGE_ACME_CA_SERVER:-letsencrypt}"
       EDGE_FRPC_ENABLED: "${EDGE_FRPC_ENABLED:-false}"
+      EDGE_GATEWAY_CONFIG_DIR: "${EDGE_GATEWAY_CONFIG_DIR:-./.secrets/edge-gateway}"
     volumes:
       - edge-acme-data:/var/lib/acme
       - edge-certificates:/etc/edge/certs
       - "${EDGE_FRPC_CONFIG_FILE:-./docker/edge-gateway/frpc.disabled.toml}:/etc/edge/frpc.toml:ro"
+      - "${EDGE_GATEWAY_CONFIG_FILE:-./docker/edge-gateway/managed.disabled.conf}:/etc/edge/managed.conf:ro"
     depends_on:
       web:
         condition: service_healthy

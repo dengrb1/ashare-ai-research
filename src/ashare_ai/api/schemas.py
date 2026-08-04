@@ -231,6 +231,56 @@ class SystemSettingsUnlockResponse(BaseModel):
     expires_at: datetime
 
 
+class EdgeProxyHost(BaseModel):
+    id: str | None = None
+    name: str = Field(min_length=1, max_length=80)
+    domains: list[str] = Field(min_length=1, max_length=8)
+    forward_scheme: Literal["http", "https"] = "http"
+    forward_host: str = Field(min_length=1, max_length=253)
+    forward_port: int = Field(default=80, ge=1, le=65535)
+    ssl_enabled: bool = True
+    websocket_support: bool = True
+    enabled: bool = True
+    notes: str = Field(default="", max_length=240)
+
+
+class EdgeGatewayConfigurationRequest(BaseModel):
+    enabled: bool = False
+    proxy_hosts: list[EdgeProxyHost] = Field(default_factory=list, max_length=32)
+    frpc_toml: str = Field(default="", max_length=65536)
+
+
+class EdgeGatewayValidateRequest(BaseModel):
+    proxy_hosts: list[EdgeProxyHost] = Field(default_factory=list, max_length=32)
+    frpc_toml: str = Field(default="", max_length=65536)
+
+
+class EdgeGatewayConfigurationResponse(BaseModel):
+    configuration_id: str | None = None
+    version: int
+    enabled: bool
+    proxy_hosts: list[EdgeProxyHost] = Field(default_factory=list)
+    frpc_toml: str = ""
+    config_sha256: str | None = None
+    apply_status: str
+    apply_message: str | None = None
+    applied_at: datetime | None = None
+    applied_sha256: str | None = None
+
+
+class EdgeGatewayValidationResponse(BaseModel):
+    valid: bool = True
+    nginx_sha256: str
+    proxy_count: int
+
+
+class EdgeGatewayAppliedRequest(BaseModel):
+    configuration_id: str
+    sha256: str = Field(min_length=64, max_length=64)
+    status: Literal["APPLIED", "FAILED"]
+    message: str | None = Field(default=None, max_length=500)
+
+
 class WorkerHealthResponse(BaseModel):
     worker_id: str
     role: str
