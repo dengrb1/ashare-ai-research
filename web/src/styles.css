@@ -761,6 +761,12 @@ small, .eyebrow, .kicker, label, th, td, .nav-group, .topbar p, .disclaimer { fo
 .notification-item.critical .notification-severity { color:var(--danger); }
 .notification-item.high .notification-severity { color:var(--warning); }
 .notification-read { align-self:start; }
+.notification-actions { display:flex; flex-direction:column; gap:6px; align-items:center; align-self:start; }
+.notification-actions .icon-button { width:26px; height:26px; }
+.danger-icon { color: var(--danger); }
+.danger-icon:hover { color: var(--danger) !important; border-color: color-mix(in srgb, var(--danger) 40%, transparent); background: var(--danger-soft); }
+.notification-delete { color:var(--muted-2); }
+.notification-delete:hover { color:var(--danger); }
 .notification-more { margin:10px; }
 .chat-stage-strip { display:flex; flex-wrap:wrap; gap:7px; margin:0 0 12px; }
 .chat-stage { padding:4px 8px; color:var(--muted); background:var(--surface-2); border:1px solid var(--line); border-radius:999px; font-size:11px; }

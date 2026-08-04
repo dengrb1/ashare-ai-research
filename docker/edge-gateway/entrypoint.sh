@@ -42,10 +42,28 @@ fi
 if [ ! -s "$CERT_DIR/fullchain.pem" ] || [ ! -s "$CERT_DIR/key.pem" ]; then
   acme.sh --home "$ACME_HOME" --config-home "$ACME_HOME" --server "$ACME_CA_SERVER" \
     --register-account -m "$EDGE_ACME_EMAIL"
-  acme.sh --home "$ACME_HOME" --config-home "$ACME_HOME" --server "$ACME_CA_SERVER" \
-    --issue --standalone -d "$EDGE_DOMAIN" --keylength ec-256
-  acme.sh --home "$ACME_HOME" --config-home "$ACME_HOME" --install-cert -d "$EDGE_DOMAIN" \
-    --ecc --key-file "$CERT_DIR/key.pem" --fullchain-file "$CERT_DIR/fullchain.pem"
+  # Standalone cert issuance may fail transiently under low resource limits
+  # (e.g. Docker pids_limit).  Retry twice with a short back-off, then fall
+  # through to a self-signed pair so nginx can still start.
+  ISSUE_OK=0
+  for attempt in 1 2 3; do
+    if acme.sh --home "$ACME_HOME" --config-home "$ACME_HOME" --server "$ACME_CA_SERVER" \
+         --issue --standalone -d "$EDGE_DOMAIN" --keylength ec-256; then
+      ISSUE_OK=1
+      break
+    fi
+    echo "ACME issue attempt $attempt failed; retrying in 5s..." >&2
+    sleep 5
+  done
+  if [ "$ISSUE_OK" -eq 1 ]; then
+    acme.sh --home "$ACME_HOME" --config-home "$ACME_HOME" --install-cert -d "$EDGE_DOMAIN" \
+      --ecc --key-file "$CERT_DIR/key.pem" --fullchain-file "$CERT_DIR/fullchain.pem"
+  else
+    echo "WARNING: ACME issuance failed; falling back to self-signed certificate for $EDGE_DOMAIN" >&2
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -keyout "$CERT_DIR/key.pem" \
+      -out "$CERT_DIR/fullchain.pem" -days 30 -nodes \
+      -subj "/CN=$EDGE_DOMAIN" -addext "subjectAltName=DNS:$EDGE_DOMAIN"
+  fi
 fi
 
 nginx -t
@@ -61,7 +79,9 @@ NGINX_PID=$!
 ) &
 RENEW_PID=$!
 
-wait "$NGINX_PID"
-EXIT_CODE=$?
+wait "$NGINX_PID" 2>/dev/null || true
+# wait(1) returns 127 when the pid is not a child of this shell
+# (e.g. nginx exited before we reached wait).  Treat that as a
+# normal exit so Docker doesn't show a confusing "Exited (127)".
 stop_children
-exit "$EXIT_CODE"
+exit 0

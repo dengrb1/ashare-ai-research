@@ -140,27 +140,31 @@ def execute_trade_plan_job(
             )
 
         calendar = bundle.trading_calendar
+        # Partition each bundle series by symbol once so strategy optimization is
+        # linear in the bundle size instead of re-scanning every record per symbol.
+        grouped_bars = _group_by_symbol(bundle.bars)
+        grouped_rules = _group_by_symbol(bundle.rules)
+        grouped_adv = _group_by_symbol(bundle.adv_amounts)
+        grouped_volatility = _group_by_symbol(bundle.volatilities)
         bars_by_symbol = {
-            symbol: tuple(item for item in bundle.bars if item.symbol == symbol)
-            for symbol in row.symbols
+            symbol: tuple(grouped_bars.get(symbol, ())) for symbol in row.symbols
         }
         rules_by_symbol = {
-            symbol: {item.trading_date: item.rule for item in bundle.rules if item.symbol == symbol}
+            symbol: {
+                item.trading_date: item.rule for item in grouped_rules.get(symbol, ())
+            }
             for symbol in row.symbols
         }
         adv_by_symbol = {
             symbol: {
-                item.trading_date: item.value
-                for item in bundle.adv_amounts
-                if item.symbol == symbol
+                item.trading_date: item.value for item in grouped_adv.get(symbol, ())
             }
             for symbol in row.symbols
         }
         volatility_by_symbol = {
             symbol: {
                 item.trading_date: float(item.value)
-                for item in bundle.volatilities
-                if item.symbol == symbol
+                for item in grouped_volatility.get(symbol, ())
             }
             for symbol in row.symbols
         }
@@ -532,3 +536,11 @@ def consume_trade_plan_queue() -> None:
         lease_seconds=get_settings().worker_lease_seconds,
     )
     queue.consume_forever(run_trade_plan_job)
+
+
+def _group_by_symbol(records: Any) -> dict[str, list[Any]]:
+    """Partition a PIT series by symbol in one linear pass."""
+    grouped: dict[str, list[Any]] = {}
+    for item in records:
+        grouped.setdefault(item.symbol, []).append(item)
+    return grouped

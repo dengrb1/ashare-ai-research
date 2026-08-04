@@ -107,3 +107,56 @@ def test_expired_dedupe_key_is_reused_without_waiting_for_cleanup() -> None:
         assert reused.notification_type == "BUY_ENTRY_RANGE_HIT"
         assert reused.read_at is None
         assert reused.expires_at.replace(tzinfo=UTC) == now + timedelta(days=180)
+
+
+def test_notifications_can_be_deleted_and_cleared_only_by_owner() -> None:
+    engine = _engine()
+    Base.metadata.create_all(engine)
+    now = datetime(2026, 7, 20, 8, tzinfo=UTC)
+    with Session(engine) as session:
+        _add_user(session, "owner-user", now)
+        _add_user(session, "other-user", now)
+        service = NotificationService(session)
+        first = service.create(
+            user_id="owner-user",
+            notification_type="STOP_LOSS_TRIGGERED",
+            severity="HIGH",
+            title="删除我",
+            body="owner",
+            dedupe_key="owner-1",
+            now=now,
+        )
+        second = service.create(
+            user_id="owner-user",
+            notification_type="BUY_ENTRY_RANGE_HIT",
+            severity="WARNING",
+            title="保留我",
+            body="owner",
+            dedupe_key="owner-2",
+            now=now,
+        )
+        foreign = service.create(
+            user_id="other-user",
+            notification_type="SYSTEM",
+            severity="INFO",
+            title="他人通知",
+            body="others",
+            dedupe_key="other-1",
+            now=now,
+        )
+        session.commit()
+
+        # Deleting a foreign id is a no-op and never touches the other user.
+        assert service.delete("owner-user", [foreign.notification_id]) == 0
+        assert service.delete("owner-user", [first.notification_id]) == 1
+        session.flush()
+        remaining, _ = service.list("owner-user", now=now)
+        assert [item.notification_id for item in remaining] == [second.notification_id]
+        assert session.get(type(foreign), foreign.notification_id) is not None
+
+        assert service.clear_all("owner-user") == 1
+        session.flush()
+        assert service.list("owner-user", now=now) == ([], None)
+        assert session.get(type(foreign), foreign.notification_id) is not None
+        assert service.clear_all("other-user") == 1
+        assert service.list("other-user", now=now) == ([], None)

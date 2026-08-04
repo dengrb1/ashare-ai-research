@@ -90,6 +90,21 @@ class ModelProfileSettings(BaseModel):
     cache_write_price_per_million: Decimal = Field(default=Decimal("0"), ge=0)
     output_price_per_million: Decimal = Field(default=Decimal("0"), ge=0)
 
+    @field_validator(
+        "input_price_per_million",
+        "cached_input_price_per_million",
+        "cache_write_price_per_million",
+        "output_price_per_million",
+        mode="before",
+    )
+    @classmethod
+    def _empty_decimal_coerces_to_zero(cls, value: object) -> object:
+        """Coerce empty string to Decimal('0') so clearing an HTML number
+        input in the model profiles editor does not cause a 422."""
+        if isinstance(value, str) and not value.strip():
+            return Decimal("0")
+        return value
+
     @model_validator(mode="after")
     def reserve_fits_window(self) -> ModelProfileSettings:
         if self.output_token_reserve + self.reasoning_token_reserve >= self.context_window_tokens:
@@ -156,6 +171,7 @@ class SystemSettingsRequest(BaseModel):
 
     research_execution_mode: Literal["SERIAL", "DUAL"] | None = None
     edge_gateway_enabled: bool | None = None
+    auto_restart_enabled: bool | None = None
     llm_agent_max_concurrency: int | None = Field(default=None, ge=1, le=4)
     object_store_endpoint: str | None = Field(default=None, max_length=2048)
     object_store_bucket: str | None = Field(default=None, min_length=1, max_length=255)
@@ -1071,6 +1087,15 @@ class RunActivityItem(RunResponse):
 class RunActivityResponse(BaseModel):
     items: list[RunActivityItem]
     next_cursor: str | None = None
+
+
+class RunClearRequest(BaseModel):
+    before: date | None = None
+
+
+class RunCleanupResponse(BaseModel):
+    deleted: int = Field(ge=0)
+    before: date | None = None
 
 
 class ResearchRunResponse(RunResponse):

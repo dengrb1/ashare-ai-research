@@ -223,6 +223,35 @@ class NotificationService:
         )
         return self.mark_read(user_id, [row.notification_id for row in rows], now=current)
 
+    def delete(self, user_id: str, notification_ids: Sequence[str]) -> int:
+        """Permanently remove a caller-owned set of notifications."""
+        rows = list(
+            self.session.scalars(
+                select(NotificationRow).where(
+                    NotificationRow.user_id == user_id,
+                    NotificationRow.notification_id.in_(list(dict.fromkeys(notification_ids))),
+                )
+            ).all()
+        )
+        for row in rows:
+            self.session.delete(row)
+        if rows:
+            self.session.flush()
+        return len(rows)
+
+    def clear_all(self, user_id: str) -> int:
+        """Permanently remove every notification owned by one user."""
+        rows = list(
+            self.session.scalars(
+                select(NotificationRow).where(NotificationRow.user_id == user_id)
+            ).all()
+        )
+        for row in rows:
+            self.session.delete(row)
+        if rows:
+            self.session.flush()
+        return len(rows)
+
     def cleanup_expired(self, *, now: datetime | None = None, batch_size: int = 500) -> int:
         current = (now or datetime.now(UTC)).astimezone(UTC)
         rows = list(

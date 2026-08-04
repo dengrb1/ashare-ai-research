@@ -343,8 +343,13 @@ class FinancialSearchService:
                 return False
             events.append(now)
             if len(self._rate_events) > 10_000:
+                # Purge users whose newest event already fell out of the window.
+                # Every deque always holds its latest timestamp, so filtering on
+                # non-emptiness alone never removes anything.
                 self._rate_events = {
-                    key: value for key, value in self._rate_events.items() if value
+                    key: value
+                    for key, value in self._rate_events.items()
+                    if value and value[-1] > cutoff
                 }
             return True
 

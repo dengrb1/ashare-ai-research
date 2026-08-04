@@ -55,8 +55,8 @@ def test_optional_edge_gateway_is_isolated_and_memory_bounded() -> None:
     compose = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
     edge = compose["services"]["edge-gateway"]
     assert edge["profiles"] == ["edge"]
-    assert edge["mem_limit"] == "64m"
-    assert edge["pids_limit"] == 32
+    assert edge["mem_limit"] == "96m"
+    assert edge["pids_limit"] == 128
     assert edge["read_only"] is True
     assert "ports" not in edge
     assert edge["depends_on"] == {"web": {"condition": "service_healthy"}}

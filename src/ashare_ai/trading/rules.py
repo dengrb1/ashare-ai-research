@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import decimal
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_UP, Decimal
@@ -375,7 +376,10 @@ def resolve_price_band(
     if prev_close is None or rule.price_limit_ratio is None:
         raise RuleNotFoundError("cannot derive price limits without previous close and ratio")
 
-    tick = Decimal(str(rule.details.get("price_tick", policy.default_price_tick)))
+    try:
+        tick = Decimal(str(rule.details.get("price_tick", policy.default_price_tick)))
+    except (ValueError, decimal.InvalidOperation) as exc:
+        raise RuleConflictError("price tick must be a valid decimal") from exc
     if tick <= 0:
         raise RuleConflictError("price tick must be positive")
     upper = _round_to_tick(prev_close * (Decimal("1") + rule.price_limit_ratio), tick)

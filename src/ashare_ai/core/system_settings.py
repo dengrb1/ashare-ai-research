@@ -36,6 +36,7 @@ PUBLIC_SETTING_FIELDS = frozenset(
     {
         "research_execution_mode",
         "edge_gateway_enabled",
+        "auto_restart_enabled",
         "llm_agent_max_concurrency",
         "object_store_endpoint",
         "object_store_bucket",

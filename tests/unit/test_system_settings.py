@@ -136,6 +136,9 @@ def test_topology_controller_endpoint_requires_its_private_capability(monkeypatc
     settings = Settings(topology_controller_token="x" * 32)
     monkeypatch.setattr("ashare_ai.api.app.get_settings", lambda: settings)
     monkeypatch.setattr("ashare_ai.core.system_settings.get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "ashare_ai.api.app._system_worker_snapshot", lambda _hash: ("SERIAL", False, [], {})
+    )
 
     def override_db():
         with factory() as session:
@@ -149,12 +152,31 @@ def test_topology_controller_endpoint_requires_its_private_capability(monkeypatc
             "/api/internal/topology-desired", headers={"X-Topology-Controller-Token": "x" * 32}
         )
         assert response.status_code == 200
-        assert response.json() == {
-            "research_execution_mode": "SERIAL",
-            "edge_gateway_enabled": False,
-        }
+        body = response.json()
+        assert body["research_execution_mode"] == "SERIAL"
+        assert body["edge_gateway_enabled"] is False
+        assert body["auto_restart_enabled"] is False
+        assert body["restart_required"] is False
+        assert isinstance(body["topology_sha256"], str) and body["topology_sha256"]
     finally:
         app.dependency_overrides.clear()
+
+
+def test_auto_restart_enabled_is_versioned_and_restorable() -> None:
+    session, service = _service()
+    assert service.resolve(session).settings.auto_restart_enabled is False
+    saved = service.save(
+        session,
+        public_updates={"auto_restart_enabled": True},
+        secret_updates={},
+        user_id=None,
+    )
+    assert saved.settings.auto_restart_enabled is True
+    assert service.public_view(session)["sources"]["auto_restart_enabled"] == "database"
+    restored = service.restore_field(session, field="auto_restart_enabled", user_id=None)
+    session.commit()
+    assert restored.settings.auto_restart_enabled is False
+    assert service.public_view(session)["sources"]["auto_restart_enabled"] == "environment"
 
 
 def test_system_settings_api_requires_admin_csrf_and_is_idempotent(monkeypatch) -> None:

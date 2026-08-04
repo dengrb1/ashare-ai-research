@@ -1015,6 +1015,12 @@ class MarketDataService:
         self._cache_guard = threading.Lock()
         self._locks: dict[str, threading.Lock] = {}
         self._guard = threading.Lock()
+        # Distinct market cache keys (klines start/end/limit combinations) are
+        # directly influenced by authenticated callers.  The cache itself is
+        # LRU-bounded, so the per-key lock table is capped at twice that and any
+        # overflow keys share one fallback lock instead of growing memory.
+        self._max_locks = max(1024, self.settings.market_cache_max_entries * 2)
+        self._overflow_lock = threading.Lock()
         self._provider_slots = threading.BoundedSemaphore(
             max(
                 self.settings.market_provider_max_workers,
@@ -1033,7 +1039,18 @@ class MarketDataService:
 
     def _lock(self, key: str) -> threading.Lock:
         with self._guard:
-            return self._locks.setdefault(key, threading.Lock())
+            lock = self._locks.get(key)
+            if lock is not None:
+                return lock
+            if len(self._locks) >= self._max_locks:
+                # Bounded memory under cache-key abuse: overflow keys share one
+                # stable lock.  Mutual exclusion still holds (the same key always
+                # resolves to the same object) and only abuse-generated keys pay
+                # the extra contention.
+                return self._overflow_lock
+            lock = threading.Lock()
+            self._locks[key] = lock
+            return lock
 
     def _redis(self) -> Any | None:
         if self._redis_override is not ...:
