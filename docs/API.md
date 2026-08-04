@@ -472,6 +472,8 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 
 `GET /api/v1/admin/edge-gateway` 返回当前版本、结构化代理主机、配置哈希、应用状态和 `source_sync`；未携带有效 `X-System-Settings-Unlock` 时不返回 FRP 明文。服务端每次读取都会检查部署配置目录中的 `frpc.toml`/`managed.conf`，外部变更会导入新的不可变版本。`PUT` 使用当前管理员解锁令牌保存最多 32 个代理主机和 64 KiB FRP TOML，FRP 内容使用 `EDGE_GATEWAY_ENCRYPTION_KEYS` 加密，提交按 `Idempotency-Key` 去重。代理目标必须匹配 `EDGE_PROXY_TARGET_ALLOWLIST`（默认 `web`）或私有/回环 IP，禁止自定义 Nginx 指令。
 
+请求和响应中的 `validation_mode` 为 `STRICT` 或 `COMPATIBLE`，默认 `STRICT`。严格模式要求当前 FRP camelCase 字段；兼容模式额外接受旧版 `[common]`、snake_case 连接/代理字段和旧式代理段落名，适合 FRP 0.x 配置。两种模式都会拒绝非法 TOML、非 `127.0.0.1` 的 FRP 本地目标以及非 80/443 的网关端口，不能用来关闭安全门禁。`GET /api/v1/admin/edge-gateway/logs?limit=200` 返回最近 FRP 运行日志；日志只读取部署挂载的日志目录并脱敏 Token、密码、密钥和 Authorization 值。
+
 本机拓扑控制器使用 `GET /api/internal/edge-gateway-config` 读取已校验配置，原子写入未跟踪的 `EDGE_GATEWAY_CONFIG_DIR`，并通过 `POST /api/internal/edge-gateway-applied` 回报应用结果；两个接口只接受 `TOPOLOGY_CONTROLLER_TOKEN`，API 不访问 Docker socket。
 
 `GET /api/v1/admin/system-settings` 返回有效的公开设置、每项来源（`database|environment`）、不可变配置版本/哈希、敏感项是否已配置、环境只读状态、Worker 心跳、已加载执行模式及各队列 `pending/processing` 摘要。它绝不返回 Tushare、对象存储或模型密钥，也不返回数据库/Redis 地址、认证参数、Fernet 密钥或卷路径。Worker 心跳可以包含清洗后的内存、内存上限和 CPU 指标。

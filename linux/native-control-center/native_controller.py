@@ -344,6 +344,7 @@ class Controller:
                 "EDGE_GATEWAY_SOURCE_DIR": str(self.config / "edge-gateway"),
                 "EDGE_GATEWAY_HOST_SOURCE_DIR": str(self.config / "edge-gateway"),
                 "EDGE_GATEWAY_CONFIG_DIR": str(self.config / "edge-gateway"),
+                "EDGE_GATEWAY_LOG_DIR": str(self.root / "logs" / "edge-gateway"),
             }
         )
         atomic_write(
@@ -448,7 +449,9 @@ class Controller:
         environment["EDGE_GATEWAY_SOURCE_DIR"] = str(self.config / "edge-gateway")
         environment["EDGE_GATEWAY_HOST_SOURCE_DIR"] = str(self.config / "edge-gateway")
         environment["EDGE_GATEWAY_CONFIG_DIR"] = str(self.config / "edge-gateway")
+        environment["EDGE_GATEWAY_LOG_DIR"] = str(self.root / "logs" / "edge-gateway")
         (self.config / "edge-gateway").mkdir(parents=True, exist_ok=True)
+        (self.root / "logs" / "edge-gateway").mkdir(parents=True, exist_ok=True)
         services: list[dict[str, object]] = []
         self.set_desired_state("RUNNING")
         try:

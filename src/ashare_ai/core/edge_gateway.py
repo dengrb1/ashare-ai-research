@@ -22,11 +22,21 @@ from ashare_ai.storage.models import (
 
 MAX_TOML_BYTES = 64 * 1024
 MAX_PROXY_HOSTS = 32
+MAX_LOG_LINES = 300
+MAX_LOG_BYTES = 128 * 1024
 _DOMAIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+_SENSITIVE_LOG_VALUE = re.compile(
+    r"(?i)(authorization|auth(?:\.token)?|token|password|secret|api[_-]?key)\s*[:=]\s*([^\s,;]+)"
+)
 
 
 class EdgeGatewayError(ValueError):
     pass
+
+
+def _sanitize_log_line(value: str) -> str:
+    sanitized = _SENSITIVE_LOG_VALUE.sub(r"\1=[REDACTED]", value.strip())
+    return sanitized[:2000]
 
 
 def _cipher(settings: Settings) -> tuple[Fernet, str]:
@@ -40,7 +50,9 @@ def _cipher(settings: Settings) -> tuple[Fernet, str]:
         raise EdgeGatewayError("EDGE_GATEWAY_ENCRYPTION_KEYS is invalid") from exc
 
 
-def validate_frpc_toml(value: str, settings: Settings | None = None) -> dict[str, Any]:
+def validate_frpc_toml(
+    value: str, settings: Settings | None = None, *, strict: bool = True
+) -> dict[str, Any]:
     if not isinstance(value, str) or not value.strip():
         raise EdgeGatewayError("FRP TOML cannot be empty")
     if len(value.encode()) > MAX_TOML_BYTES:
@@ -49,22 +61,60 @@ def validate_frpc_toml(value: str, settings: Settings | None = None) -> dict[str
         parsed = tomllib.loads(value)
     except tomllib.TOMLDecodeError as exc:
         raise EdgeGatewayError(f"invalid FRP TOML: {exc}") from exc
-    if not parsed.get("serverAddr") or not isinstance(parsed.get("serverPort"), int):
-        raise EdgeGatewayError("serverAddr and integer serverPort are required")
+    common_value = parsed.get("common")
+    common: dict[str, Any] = common_value if not strict and isinstance(common_value, dict) else {}
+    server_addr = parsed.get("serverAddr")
+    server_port = parsed.get("serverPort")
+    if not strict:
+        # FRP 0.x commonly stores connection settings below [common], while
+        # some transitional configs put the snake_case keys at the root.
+        server_addr = server_addr or common.get("server_addr") or parsed.get("server_addr")
+        server_port = (
+            server_port
+            if server_port is not None
+            else common.get("server_port", parsed.get("server_port"))
+        )
+    if not server_addr or not isinstance(server_port, int):
+        raise EdgeGatewayError(
+            "serverAddr/serverPort are required (strict mode uses camelCase; "
+            "compatibility mode also accepts snake_case)"
+        )
     proxies = parsed.get("proxies", [])
+    if not strict and not proxies:
+        proxies = [
+            {"name": key, **item}
+            for key, item in parsed.items()
+            if key not in {
+                "common", "auth", "serverAddr", "serverPort", "server_addr", "server_port"
+            }
+            and isinstance(item, dict)
+        ]
     if not isinstance(proxies, list) or len(proxies) > MAX_PROXY_HOSTS:
         raise EdgeGatewayError("FRP proxies must be a list of at most 32 entries")
     for proxy in proxies:
         if not isinstance(proxy, dict) or not proxy.get("name"):
             raise EdgeGatewayError("each FRP proxy needs a name")
-        if proxy.get("localIP", "127.0.0.1") != "127.0.0.1":
+        local_ip = proxy.get("localIP", "127.0.0.1")
+        local_port = proxy.get("localPort")
+        domains = proxy.get("customDomains", [])
+        if not strict:
+            local_ip = proxy.get("localIP", proxy.get("local_ip", "127.0.0.1"))
+            local_port = proxy.get("localPort", proxy.get("local_port"))
+            domains = proxy.get("customDomains", proxy.get("custom_domains", []))
+            if isinstance(domains, str):
+                domains = [domains]
+        if local_ip != "127.0.0.1":
             raise EdgeGatewayError("FRP localIP must be 127.0.0.1")
-        if proxy.get("localPort") not in {80, 443}:
+        if local_port not in {80, 443}:
             raise EdgeGatewayError("FRP localPort must be 80 or 443")
     settings = settings or get_settings()
     if settings.edge_domain:
         for proxy in proxies:
             domains = proxy.get("customDomains", [])
+            if not strict:
+                domains = proxy.get("customDomains", proxy.get("custom_domains", []))
+                if isinstance(domains, str):
+                    domains = [domains]
             if any(domain != settings.edge_domain for domain in domains):
                 raise EdgeGatewayError("FRP customDomains must match EDGE_DOMAIN")
     return parsed
@@ -172,11 +222,46 @@ class EdgeGatewayConfigurationService:
             toml = cipher.decrypt(row.encrypted_frpc_toml.encode()).decode() if reveal else ""
         except InvalidToken as exc:
             raise EdgeGatewayError("edge gateway configuration cannot be decrypted") from exc
-        return {"configuration_id": row.configuration_id, "version": row.version, "enabled": row.enabled, "proxy_hosts": row.proxy_hosts, "frpc_toml": toml, "config_sha256": row.config_sha256, "apply_status": row.apply_status, "apply_message": row.apply_message, "applied_at": row.applied_at, "applied_sha256": row.applied_sha256, "source_sync": True}
+        return {"configuration_id": row.configuration_id, "version": row.version, "enabled": row.enabled, "validation_mode": row.validation_mode, "proxy_hosts": row.proxy_hosts, "frpc_toml": toml, "config_sha256": row.config_sha256, "apply_status": row.apply_status, "apply_message": row.apply_message, "applied_at": row.applied_at, "applied_sha256": row.applied_sha256, "source_sync": True}
 
     def _source_dir(self) -> Path:
         path = self.settings.edge_gateway_source_dir
         return path if path.is_absolute() else Path.cwd() / path
+
+    def _log_dir(self) -> Path:
+        path = self.settings.edge_gateway_log_dir
+        return path if path.is_absolute() else Path.cwd() / path
+
+    def read_frp_logs(self, *, limit: int = MAX_LOG_LINES) -> dict[str, Any]:
+        log_path = self._log_dir() / "frpc.log"
+        if not log_path.is_file():
+            return {
+                "available": False,
+                "message": "FRP 服务尚未启动，暂时没有运行日志。",
+                "lines": [],
+                "updated_at": None,
+            }
+        try:
+            with log_path.open("rb") as handle:
+                handle.seek(0, 2)
+                size = handle.tell()
+                handle.seek(max(0, size - MAX_LOG_BYTES))
+                content = handle.read().decode("utf-8", errors="replace")
+            updated_at = datetime.fromtimestamp(log_path.stat().st_mtime, UTC)
+        except OSError:
+            return {
+                "available": False,
+                "message": "FRP 日志暂时无法读取。",
+                "lines": [],
+                "updated_at": None,
+            }
+        lines = [_sanitize_log_line(line) for line in content.splitlines()]
+        return {
+            "available": True,
+            "message": "已读取最近的 FRP 运行日志。",
+            "lines": lines[-max(1, min(limit, MAX_LOG_LINES)) :],
+            "updated_at": updated_at,
+        }
 
     def _read_external(self) -> tuple[str | None, list[dict[str, Any]] | None]:
         directory = self._source_dir()
@@ -218,7 +303,28 @@ class EdgeGatewayConfigurationService:
             hosts = external_hosts or []
             try:
                 self._syncing = True
-                self.save(db, enabled=False, proxy_hosts=hosts, frpc_toml=frpc, user_id=None, write_files=False)
+                try:
+                    self.save(
+                        db,
+                        enabled=False,
+                        proxy_hosts=hosts,
+                        frpc_toml=frpc,
+                        user_id=None,
+                        write_files=False,
+                    )
+                except EdgeGatewayError:
+                    # Existing operator-managed files may use older FRP field
+                    # names. Keep the same safety checks while preserving them
+                    # in compatibility mode so the UI can make the mode explicit.
+                    self.save(
+                        db,
+                        enabled=False,
+                        validation_mode="COMPATIBLE",
+                        proxy_hosts=hosts,
+                        frpc_toml=frpc,
+                        user_id=None,
+                        write_files=False,
+                    )
                 db.commit()
             finally:
                 self._syncing = False
@@ -231,20 +337,21 @@ class EdgeGatewayConfigurationService:
             return
         try:
             self._syncing = True
-            self.save(db, enabled=row.enabled, proxy_hosts=next_hosts, frpc_toml=next_frpc, user_id=None, write_files=False)
+            self.save(db, enabled=row.enabled, proxy_hosts=next_hosts, frpc_toml=next_frpc, user_id=None, write_files=False, validation_mode=row.validation_mode)
             db.commit()
         finally:
             self._syncing = False
 
-    def save(self, db: Session, *, enabled: bool, proxy_hosts: list[dict[str, Any]], frpc_toml: str, user_id: str | None, write_files: bool = True) -> dict[str, Any]:
+    def save(self, db: Session, *, enabled: bool, proxy_hosts: list[dict[str, Any]], frpc_toml: str, user_id: str | None, write_files: bool = True, validation_mode: str = "STRICT") -> dict[str, Any]:
         hosts = validate_proxy_hosts(proxy_hosts, self.settings)
-        validate_frpc_toml(frpc_toml, self.settings)
+        if validation_mode not in {"STRICT", "COMPATIBLE"}:
+            raise EdgeGatewayError("FRP validation mode is invalid")
+        validate_frpc_toml(frpc_toml, self.settings, strict=validation_mode == "STRICT")
         cipher, key_id = _cipher(self.settings)
-        previous = self._row(db)
         version = int(db.scalar(select(func.max(EdgeGatewayConfigurationVersion.version))) or 0) + 1
-        payload = {"enabled": enabled, "proxy_hosts": hosts, "frpc_toml": frpc_toml}
+        payload = {"enabled": enabled, "validation_mode": validation_mode, "proxy_hosts": hosts, "frpc_toml": frpc_toml}
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        row = EdgeGatewayConfigurationVersion(version=version, enabled=enabled, proxy_hosts=hosts, encrypted_frpc_toml=cipher.encrypt(frpc_toml.encode()).decode(), encryption_key_id=key_id, config_sha256=digest, created_by=user_id, created_at=datetime.now(UTC), apply_status="PENDING")
+        row = EdgeGatewayConfigurationVersion(version=version, enabled=enabled, validation_mode=validation_mode, proxy_hosts=hosts, encrypted_frpc_toml=cipher.encrypt(frpc_toml.encode()).decode(), encryption_key_id=key_id, config_sha256=digest, created_by=user_id, created_at=datetime.now(UTC), apply_status="PENDING")
         db.add(row)
         pointer = db.get(ActiveEdgeGatewayConfiguration, "default")
         if pointer is None:

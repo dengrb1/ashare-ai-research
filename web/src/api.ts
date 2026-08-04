@@ -206,8 +206,9 @@ export const api = {
   restoreSystemSetting: (field: string, unlockToken: string) => request<SystemSettings>(`/admin/system-settings/${encodeURIComponent(field)}`, { method: 'DELETE', headers: { 'X-System-Settings-Unlock': unlockToken } }),
   restoreAllSystemSettings: (unlockToken: string) => request<SystemSettings>('/admin/system-settings', { method: 'DELETE', headers: { 'X-System-Settings-Unlock': unlockToken } }),
   edgeGateway: (unlockToken?: string) => request<import('./types').EdgeGatewayConfiguration>('/admin/edge-gateway', { headers: unlockToken ? { 'X-System-Settings-Unlock': unlockToken } : undefined }),
-  validateEdgeGateway: (payload: { proxy_hosts: import('./types').EdgeProxyHost[]; frpc_toml: string }) => request<{ valid: boolean; nginx_sha256: string; proxy_count: number }>('/admin/edge-gateway/validate', { method: 'POST', body: JSON.stringify(payload) }),
-  saveEdgeGateway: (payload: { enabled: boolean; proxy_hosts: import('./types').EdgeProxyHost[]; frpc_toml: string }, unlockToken: string, idempotencyKey = crypto.randomUUID()) => request<import('./types').EdgeGatewayConfiguration>('/admin/edge-gateway', { method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey, 'X-System-Settings-Unlock': unlockToken }, body: JSON.stringify(payload) }),
+  edgeGatewayLogs: (limit = 200) => request<import('./types').EdgeGatewayLogs>(`/admin/edge-gateway/logs?limit=${limit}`),
+  validateEdgeGateway: (payload: { validation_mode: 'STRICT' | 'COMPATIBLE'; proxy_hosts: import('./types').EdgeProxyHost[]; frpc_toml: string }) => request<{ valid: boolean; nginx_sha256: string; proxy_count: number }>('/admin/edge-gateway/validate', { method: 'POST', body: JSON.stringify(payload) }),
+  saveEdgeGateway: (payload: { enabled: boolean; validation_mode: 'STRICT' | 'COMPATIBLE'; proxy_hosts: import('./types').EdgeProxyHost[]; frpc_toml: string }, unlockToken: string, idempotencyKey = crypto.randomUUID()) => request<import('./types').EdgeGatewayConfiguration>('/admin/edge-gateway', { method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey, 'X-System-Settings-Unlock': unlockToken }, body: JSON.stringify(payload) }),
   rollbackEdgeGateway: (unlockToken: string) => request<import('./types').EdgeGatewayConfiguration>('/admin/edge-gateway/rollback', { method: 'POST', headers: { 'X-System-Settings-Unlock': unlockToken } }),
 }
 

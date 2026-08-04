@@ -104,6 +104,7 @@ export interface EdgeGatewayConfiguration {
   configuration_id?: string | null
   version: number
   enabled: boolean
+  validation_mode: 'STRICT' | 'COMPATIBLE'
   proxy_hosts: EdgeProxyHost[]
   frpc_toml: string
   config_sha256?: string | null
@@ -112,6 +113,13 @@ export interface EdgeGatewayConfiguration {
   applied_at?: string | null
   applied_sha256?: string | null
   source_sync?: boolean
+}
+
+export interface EdgeGatewayLogs {
+  available: boolean
+  message: string
+  lines: string[]
+  updated_at?: string | null
 }
 
 export interface User {

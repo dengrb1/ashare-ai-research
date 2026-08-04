@@ -98,6 +98,7 @@ from ashare_ai.api.schemas import (
     EdgeGatewayAppliedRequest,
     EdgeGatewayConfigurationRequest,
     EdgeGatewayConfigurationResponse,
+    EdgeGatewayLogsResponse,
     EdgeGatewayValidateRequest,
     EdgeGatewayValidationResponse,
     ExitAdviceResponse,
@@ -2521,13 +2522,25 @@ def validate_edge_gateway(
     _admin(context)
     try:
         hosts = validate_proxy_hosts([item.model_dump() for item in payload.proxy_hosts])
-        validate_frpc_toml(payload.frpc_toml)
+        validate_frpc_toml(
+            payload.frpc_toml,
+            strict=payload.validation_mode == "STRICT",
+        )
         rendered = render_nginx(hosts)
         return EdgeGatewayValidationResponse(
             nginx_sha256=sha256_bytes(rendered.encode()), proxy_count=len(hosts)
         )
     except EdgeGatewayError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/admin/edge-gateway/logs", response_model=EdgeGatewayLogsResponse)
+def edge_gateway_logs(
+    context: Current,
+    limit: Annotated[int, Query(ge=1, le=300)] = 200,
+) -> EdgeGatewayLogsResponse:
+    _admin(context)
+    return EdgeGatewayLogsResponse(**EdgeGatewayConfigurationService().read_frp_logs(limit=limit))
 
 
 @app.put("/api/v1/admin/edge-gateway", response_model=EdgeGatewayConfigurationResponse)
@@ -2549,6 +2562,7 @@ def put_edge_gateway(
         result = EdgeGatewayConfigurationService().save(
             db,
             enabled=payload.enabled,
+            validation_mode=payload.validation_mode,
             proxy_hosts=[item.model_dump() for item in payload.proxy_hosts],
             frpc_toml=payload.frpc_toml,
             user_id=context.user.user_id,
@@ -2569,7 +2583,6 @@ def rollback_edge_gateway(
 ) -> EdgeGatewayConfigurationResponse:
     _admin(context)
     require_settings_unlock(context, unlock_token)
-    service = EdgeGatewayConfigurationService()
     pointer = db.get(ActiveEdgeGatewayConfiguration, "default")
     if pointer is None:
         raise HTTPException(status_code=409, detail="no edge-gateway configuration to roll back")

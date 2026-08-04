@@ -262,11 +262,13 @@ class EdgeProxyHost(BaseModel):
 
 class EdgeGatewayConfigurationRequest(BaseModel):
     enabled: bool = False
+    validation_mode: Literal["STRICT", "COMPATIBLE"] = "STRICT"
     proxy_hosts: list[EdgeProxyHost] = Field(default_factory=list, max_length=32)
     frpc_toml: str = Field(default="", max_length=65536)
 
 
 class EdgeGatewayValidateRequest(BaseModel):
+    validation_mode: Literal["STRICT", "COMPATIBLE"] = "STRICT"
     proxy_hosts: list[EdgeProxyHost] = Field(default_factory=list, max_length=32)
     frpc_toml: str = Field(default="", max_length=65536)
 
@@ -275,6 +277,7 @@ class EdgeGatewayConfigurationResponse(BaseModel):
     configuration_id: str | None = None
     version: int
     enabled: bool
+    validation_mode: Literal["STRICT", "COMPATIBLE"] = "STRICT"
     proxy_hosts: list[EdgeProxyHost] = Field(default_factory=list)
     frpc_toml: str = ""
     config_sha256: str | None = None
@@ -289,6 +292,13 @@ class EdgeGatewayValidationResponse(BaseModel):
     valid: bool = True
     nginx_sha256: str
     proxy_count: int
+
+
+class EdgeGatewayLogsResponse(BaseModel):
+    available: bool
+    message: str
+    lines: list[str] = Field(default_factory=list)
+    updated_at: datetime | None = None
 
 
 class EdgeGatewayAppliedRequest(BaseModel):

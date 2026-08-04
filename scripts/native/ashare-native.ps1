@@ -1337,7 +1337,9 @@ function Invoke-StartCore([switch]$ForWatchdog) {
         $apiEnv.EDGE_GATEWAY_SOURCE_DIR = (Join-Path $script:Root "config\edge-gateway")
         $apiEnv.EDGE_GATEWAY_HOST_SOURCE_DIR = (Join-Path $script:Root "config\edge-gateway")
         $apiEnv.EDGE_GATEWAY_CONFIG_DIR = (Join-Path $script:Root "config\edge-gateway")
+        $apiEnv.EDGE_GATEWAY_LOG_DIR = (Join-Path $script:Root "logs\edge-gateway")
         New-Item -ItemType Directory -Force -Path $apiEnv.EDGE_GATEWAY_SOURCE_DIR | Out-Null
+        New-Item -ItemType Directory -Force -Path $apiEnv.EDGE_GATEWAY_LOG_DIR | Out-Null
         Assert-NativePortFree $script:ApiPort
         $services += Start-ManagedProcess "api" $searxPython @("-m", "ashare_ai.cli", "api", "--host", "127.0.0.1", "--port", "$script:ApiPort") $script:Root $apiEnv "api" $null $serviceCredential
         Write-NativeEvent "api process started pid=$($services[-1].pid)"

@@ -308,6 +308,7 @@ class EdgeGatewayConfigurationVersion(Base):
     configuration_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    validation_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="STRICT")
     proxy_hosts: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     encrypted_frpc_toml: Mapped[str] = mapped_column(Text, nullable=False)
     encryption_key_id: Mapped[str] = mapped_column(String(64), nullable=False)

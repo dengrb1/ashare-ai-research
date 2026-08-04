@@ -138,13 +138,13 @@ docker compose -p ashare-ai-src -f compose.yaml --profile edge logs --tail 100 e
 
 ### 可选 frpc 客户端
 
-网关不部署 frps。若服务器需要通过已有外部 frps 暴露，复制 `docker/edge-gateway/frpc.toml.example` 到未跟踪的私有路径，填入真实 frps 地址、token 和域名；该配置中的两个代理必须分别指向同容器的 `127.0.0.1:80` 与 `127.0.0.1:443`。外部 frps 必须配置 `vhostHTTPPort=80` 与 `vhostHTTPSPort=443`，以便 HTTP-01 和 TLS 透传均能到达网关。随后在系统设置「公网边缘网关」中开启 `edge_frpc_enabled`，并把 `edge_frpc_config_file` 指向该文件（例如 `./.secrets/edge-frpc.toml`）；拓扑控制器启动网关前会校验该文件存在。
+网关不部署 frps。若服务器需要通过已有外部 frps 暴露，复制 `docker/edge-gateway/frpc.toml.example` 到未跟踪的私有路径，填入真实 frps 地址、token 和域名；该配置中的两个代理必须分别指向同容器的 `127.0.0.1:80` 与 `127.0.0.1:443`。外部 frps 必须配置 `vhostHTTPPort=80` 与 `vhostHTTPSPort=443`，以便 HTTP-01 和 TLS 透传均能到达网关。随后在管理页面的「公网边缘网关」中开启 `edge_frpc_enabled`，并把 `edge_frpc_config_file` 指向该文件（例如 `./.secrets/edge-frpc.toml`）；拓扑控制器启动网关前会校验该文件存在。
 
-`frpc.toml` 包含 token，绝不能提交、打印或放入 `*.example`。启用 `frpc` 前确认它只能声明你授权暴露的代理。关闭隧道只需在系统设置关闭 `edge_frpc_enabled` 并保存；控制器会重建 `edge-gateway`，不会删除证书卷。
+`frpc.toml` 包含 token，绝不能提交、打印或放入 `*.example`。启用 `frpc` 前确认它只能声明你授权暴露的代理。关闭隧道只需在「公网边缘网关」页面关闭 `edge_frpc_enabled` 并保存；控制器会重建 `edge-gateway`，不会删除证书卷。
 
 ### 本机拓扑控制器（Windows、Linux、macOS）
 
-控制逻辑是跨平台 Python 程序；它只在设置发生变化时调用 Compose。平台适配仅负责每分钟的无界面调度：Windows 使用 `pythonw.exe` 计划任务，Linux 使用 `systemd --user` timer，macOS 使用 LaunchAgent。安装器不会启动容器；系统设置中“公网边缘网关（FRP）”仍默认关闭。
+控制逻辑是跨平台 Python 程序；它只在设置发生变化时调用 Compose。平台适配仅负责每分钟的无界面调度：Windows 使用 `pythonw.exe` 计划任务，Linux 使用 `systemd --user` timer，macOS 使用 LaunchAgent。安装器不会启动容器；“公网边缘网关（FRP）”仍默认关闭。
 
 ```powershell
 # Windows

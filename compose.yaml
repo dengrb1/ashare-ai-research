@@ -42,10 +42,12 @@ services:
       EDGE_ACME_EMAIL: "${EDGE_ACME_EMAIL:-}"
       EDGE_ACME_CA_SERVER: "${EDGE_ACME_CA_SERVER:-letsencrypt}"
       EDGE_FRPC_ENABLED: "${EDGE_FRPC_ENABLED:-false}"
+      EDGE_GATEWAY_LOG_DIR: "/var/log/edge"
       EDGE_GATEWAY_CONFIG_DIR: "${EDGE_GATEWAY_CONFIG_DIR:-./.secrets/edge-gateway}"
     volumes:
       - edge-acme-data:/var/lib/acme
       - edge-certificates:/etc/edge/certs
+      - edge-gateway-logs:/var/log/edge
       - "${EDGE_FRPC_CONFIG_FILE:-./docker/edge-gateway/frpc.disabled.toml}:/etc/edge/frpc.toml:ro"
       - "${EDGE_GATEWAY_CONFIG_FILE:-./docker/edge-gateway/managed.disabled.conf}:/etc/edge/managed.conf:ro"
     depends_on:
@@ -105,10 +107,12 @@ services:
     environment:
       EDGE_GATEWAY_SOURCE_DIR: "/app/docker/edge-gateway"
       EDGE_GATEWAY_HOST_SOURCE_DIR: "${EDGE_GATEWAY_SOURCE_DIR:-./docker/edge-gateway}"
+      EDGE_GATEWAY_LOG_DIR: "/data/edge-gateway-logs"
     volumes:
       - lake-data:/data/lake
       - object-data:/data/objects
       - private-data:/data/private
+      - edge-gateway-logs:/data/edge-gateway-logs:ro
       - "${EDGE_GATEWAY_SOURCE_DIR:-./docker/edge-gateway}:/app/docker/edge-gateway:rw"
     mem_limit: 384m
     depends_on:
@@ -321,6 +325,7 @@ services:
 volumes:
   edge-acme-data:
   edge-certificates:
+  edge-gateway-logs:
   postgres-data:
   redis-data:
   lake-data:
