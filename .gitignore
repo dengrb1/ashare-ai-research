@@ -24,3 +24,7 @@ build/
 *.egg-info/
 .pip-install.*.log
 .pip-*.log
+
+# web/dist 构建产物入库，供 Linux 原生版等直接使用；改动 web 源码时由 pre-commit 钩子自动重建。
+!web/dist/
+!web/dist/**
