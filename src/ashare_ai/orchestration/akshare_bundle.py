@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from importlib import import_module
@@ -164,6 +166,19 @@ class BenchmarkDataNotReadyError(RuntimeError):
             },
             "missing_date_summary": missing_date_summary,
         }
+
+
+@dataclass(frozen=True)
+class _SymbolEnrichment:
+    industry_rows: list[dict[str, Any]]
+    financial_rows: list[dict[str, Any]]
+    disclosure_rows: list[dict[str, Any]]
+    news_rows: list[dict[str, Any]]
+    dividend_rows: list[dict[str, Any]]
+    industry_error: str | None
+    financial_error: str | None
+    disclosure_error: str | None
+    acquisition_events: tuple[dict[str, Any], ...]
 
 
 class AKShareCanonicalProvider:
@@ -740,12 +755,14 @@ class AKShareCanonicalBundleBuilder:
         bundle_size: int = 20,
         history_sessions: int = 90,
         news_window_days: int = 30,
+        data_fetch_workers: int = 1,
     ) -> None:
         self.provider = provider or AKShareCanonicalProvider()
         self.clock = clock or (lambda: datetime.now(SHANGHAI))
         self.bundle_size = bundle_size
         self.history_sessions = history_sessions
         self.news_window_days = news_window_days
+        self.data_fetch_workers = max(1, min(16, int(data_fetch_workers)))
         self.acquisition_events: list[dict[str, Any]] = []
 
     def build(
@@ -754,6 +771,7 @@ class AKShareCanonicalBundleBuilder:
         decision_at: datetime,
         *,
         required_symbols: tuple[str, ...] = (),
+        data_fetch_workers: int | None = None,
     ) -> CanonicalDailyBundle:
         self.acquisition_events = []
         fetched_at = self.clock()
@@ -849,26 +867,17 @@ class AKShareCanonicalBundleBuilder:
         candidates = required + list(by_symbol.values())
         target_size = min(100, self.bundle_size + len(required))
         start_date = trading_date - timedelta(days=max(180, self.history_sessions * 2))
-        selected: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
-        for security in candidates:
-            try:
-                raw_history = self.provider.daily_bars(security["symbol"], start_date, trading_date)
-            except MarketDataAcquisitionError as exc:
-                self.acquisition_events.append(
-                    {**exc.audit_details(), "outcome": "skipped_nonessential_symbol"}
-                )
-                continue
-            history = self._normalized_history(raw_history, trading_date)
-            tracked_only = bool(security.get("_tracked_only"))
-            has_current_history = bool(history and history[-1]["trading_date"] == trading_date)
-            if tracked_only:
-                if len(history) < 2:
-                    continue
-            elif len(history) < self.history_sessions or not has_current_history:
-                continue
-            selected.append((security, history[-self.history_sessions :]))
-            if len(selected) == target_size:
-                break
+        fetch_workers = max(
+            1,
+            min(16, int(data_fetch_workers or self.data_fetch_workers)),
+        )
+        selected = self._select_histories(
+            candidates,
+            start_date=start_date,
+            trading_date=trading_date,
+            target_size=target_size,
+            fetch_workers=fetch_workers,
+        )
         active_selected = [
             item
             for item in selected
@@ -892,8 +901,15 @@ class AKShareCanonicalBundleBuilder:
         events: dict[str, tuple[ActiveEventRisk, ...]] = {}
         styles: dict[str, dict[str, float]] = {}
         quality: dict[str, dict[str, Any]] = {}
+        enrichments = self._fetch_symbol_enrichments(
+            selected,
+            trading_date=trading_date,
+            fetch_workers=fetch_workers,
+        )
         for security, history in selected:
             symbol = security["symbol"]
+            enrichment = enrichments[symbol]
+            self.acquisition_events.extend(enrichment.acquisition_events)
             security_source = str(security.get("_canonical_source", self.provider.source))
             history_sources = sorted(
                 {str(item.get("_canonical_source", self.provider.source)) for item in history}
@@ -944,22 +960,8 @@ class AKShareCanonicalBundleBuilder:
                     effective_from=trading_date,
                 )
             )
-            industry_rows: list[dict[str, Any]] = []
-            industry_error: str | None = None
-            industry_fetcher = getattr(self.provider, "industry_membership", None)
-            try:
-                if callable(industry_fetcher):
-                    industry_rows = industry_fetcher(symbol)
-            except Exception as exc:
-                industry_error = type(exc).__name__
-                self.acquisition_events.append(
-                    {
-                        "operation": "industry_membership",
-                        "subject": symbol,
-                        "outcome": "placeholder_for_symbol",
-                        "error_type": industry_error,
-                    }
-                )
+            industry_rows = enrichment.industry_rows
+            industry_error = enrichment.industry_error
             industry_row = next(
                 (row for row in industry_rows if str(row.get("industry_name") or "").strip()),
                 None,
@@ -1049,70 +1051,12 @@ class AKShareCanonicalBundleBuilder:
                     )
                 )
                 previous = item["close"]
-            financial_rows: list[dict[str, Any]] = []
-            disclosure_rows: list[dict[str, Any]] = []
-            news_rows: list[dict[str, Any]] = []
-            dividend_rows: list[dict[str, Any]] = []
-            financial_error: str | None = None
-            disclosure_error: str | None = None
-            financial_fetcher = getattr(self.provider, "financial_reports", None)
-            try:
-                if callable(financial_fetcher):
-                    financial_rows = financial_fetcher(symbol)
-            except Exception as exc:
-                financial_error = type(exc).__name__
-                self.acquisition_events.append(
-                    {
-                        "operation": "financial_reports",
-                        "subject": symbol,
-                        "outcome": "placeholder_for_symbol",
-                        "error_type": financial_error,
-                    }
-                )
-            disclosure_fetcher = getattr(self.provider, "disclosures", None)
-            try:
-                if callable(disclosure_fetcher):
-                    disclosure_rows = disclosure_fetcher(
-                        symbol, trading_date - timedelta(days=365), trading_date
-                    )
-            except Exception as exc:
-                disclosure_error = type(exc).__name__
-                self.acquisition_events.append(
-                    {
-                        "operation": "disclosures",
-                        "subject": symbol,
-                        "outcome": "placeholder_for_symbol",
-                        "error_type": disclosure_error,
-                    }
-                )
-            news_fetcher = getattr(self.provider, "news", None)
-            try:
-                if callable(news_fetcher):
-                    news_rows = news_fetcher(
-                        symbol, trading_date - timedelta(days=30), trading_date
-                    )
-            except Exception as exc:
-                self.acquisition_events.append(
-                    {
-                        "operation": "news",
-                        "subject": symbol,
-                        "outcome": "news_unavailable_for_symbol",
-                        "error_type": type(exc).__name__,
-                    }
-                )
-            dividend_fetcher = getattr(self.provider, "dividends", None)
-            try:
-                if callable(dividend_fetcher):
-                    dividend_rows = dividend_fetcher(symbol)
-            except Exception as exc:
-                self.acquisition_events.append(
-                    {
-                        "operation": "dividends",
-                        "subject": symbol,
-                        "outcome": "dividends_unavailable_for_symbol",
-                        "error_type": type(exc).__name__,
-                    }
-                )
+            financial_rows = enrichment.financial_rows
+            disclosure_rows = enrichment.disclosure_rows
+            news_rows = enrichment.news_rows
+            dividend_rows = enrichment.dividend_rows
+            financial_error = enrichment.financial_error
+            disclosure_error = enrichment.disclosure_error
             symbol_facts = _financial_facts(
                 symbol=symbol,
                 trading_date=trading_date,
@@ -1266,6 +1210,175 @@ class AKShareCanonicalBundleBuilder:
             high_watermark=Decimal("10000000"),
             data_quality=quality,
             benchmark_returns=benchmark_returns,
+        )
+
+    def _select_histories(
+        self,
+        candidates: list[dict[str, Any]],
+        *,
+        start_date: date,
+        trading_date: date,
+        target_size: int,
+        fetch_workers: int,
+    ) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
+        """Fetch bounded history batches concurrently, preserving input order."""
+
+        selected: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+        with ThreadPoolExecutor(
+            max_workers=fetch_workers, thread_name_prefix="canonical-history"
+        ) as pool:
+            for offset in range(0, len(candidates), fetch_workers):
+                batch = candidates[offset : offset + fetch_workers]
+                futures = [
+                    (
+                        security,
+                        pool.submit(
+                            self.provider.daily_bars,
+                            security["symbol"],
+                            start_date,
+                            trading_date,
+                        ),
+                    )
+                    for security in batch
+                ]
+                for security, future in futures:
+                    try:
+                        raw_history = future.result()
+                    except MarketDataAcquisitionError as exc:
+                        self.acquisition_events.append(
+                            {**exc.audit_details(), "outcome": "skipped_nonessential_symbol"}
+                        )
+                        continue
+                    history = self._normalized_history(raw_history, trading_date)
+                    tracked_only = bool(security.get("_tracked_only"))
+                    has_current_history = bool(
+                        history and history[-1]["trading_date"] == trading_date
+                    )
+                    if tracked_only:
+                        if len(history) < 2:
+                            continue
+                    elif len(history) < self.history_sessions or not has_current_history:
+                        continue
+                    selected.append((security, history[-self.history_sessions :]))
+                    if len(selected) == target_size:
+                        return selected
+        return selected
+
+    def _fetch_symbol_enrichments(
+        self,
+        selected: list[tuple[dict[str, Any], list[dict[str, Any]]]],
+        *,
+        trading_date: date,
+        fetch_workers: int,
+    ) -> dict[str, _SymbolEnrichment]:
+        symbols = [security["symbol"] for security, _ in selected]
+        if fetch_workers == 1:
+            return {
+                symbol: self._fetch_symbol_enrichment(symbol, trading_date)
+                for symbol in symbols
+            }
+        with ThreadPoolExecutor(
+            max_workers=fetch_workers, thread_name_prefix="canonical-enrichment"
+        ) as pool:
+            futures = {
+                symbol: pool.submit(self._fetch_symbol_enrichment, symbol, trading_date)
+                for symbol in symbols
+            }
+            return {symbol: futures[symbol].result() for symbol in symbols}
+
+    def _fetch_symbol_enrichment(
+        self, symbol: str, trading_date: date
+    ) -> _SymbolEnrichment:
+        industry_rows: list[dict[str, Any]] = []
+        financial_rows: list[dict[str, Any]] = []
+        disclosure_rows: list[dict[str, Any]] = []
+        news_rows: list[dict[str, Any]] = []
+        dividend_rows: list[dict[str, Any]] = []
+        events: list[dict[str, Any]] = []
+        industry_error: str | None = None
+        financial_error: str | None = None
+        disclosure_error: str | None = None
+
+        industry_fetcher = getattr(self.provider, "industry_membership", None)
+        try:
+            if callable(industry_fetcher):
+                industry_rows = industry_fetcher(symbol)
+        except Exception as exc:
+            industry_error = type(exc).__name__
+            events.append(
+                {
+                    "operation": "industry_membership",
+                    "subject": symbol,
+                    "outcome": "placeholder_for_symbol",
+                    "error_type": industry_error,
+                }
+            )
+        financial_fetcher = getattr(self.provider, "financial_reports", None)
+        try:
+            if callable(financial_fetcher):
+                financial_rows = financial_fetcher(symbol)
+        except Exception as exc:
+            financial_error = type(exc).__name__
+            events.append(
+                {
+                    "operation": "financial_reports",
+                    "subject": symbol,
+                    "outcome": "placeholder_for_symbol",
+                    "error_type": financial_error,
+                }
+            )
+        disclosure_fetcher = getattr(self.provider, "disclosures", None)
+        try:
+            if callable(disclosure_fetcher):
+                disclosure_rows = disclosure_fetcher(
+                    symbol, trading_date - timedelta(days=365), trading_date
+                )
+        except Exception as exc:
+            disclosure_error = type(exc).__name__
+            events.append(
+                {
+                    "operation": "disclosures",
+                    "subject": symbol,
+                    "outcome": "placeholder_for_symbol",
+                    "error_type": disclosure_error,
+                }
+            )
+        news_fetcher = getattr(self.provider, "news", None)
+        try:
+            if callable(news_fetcher):
+                news_rows = news_fetcher(symbol, trading_date - timedelta(days=30), trading_date)
+        except Exception as exc:
+            events.append(
+                {
+                    "operation": "news",
+                    "subject": symbol,
+                    "outcome": "news_unavailable_for_symbol",
+                    "error_type": type(exc).__name__,
+                }
+            )
+        dividend_fetcher = getattr(self.provider, "dividends", None)
+        try:
+            if callable(dividend_fetcher):
+                dividend_rows = dividend_fetcher(symbol)
+        except Exception as exc:
+            events.append(
+                {
+                    "operation": "dividends",
+                    "subject": symbol,
+                    "outcome": "dividends_unavailable_for_symbol",
+                    "error_type": type(exc).__name__,
+                }
+            )
+        return _SymbolEnrichment(
+            industry_rows=industry_rows,
+            financial_rows=financial_rows,
+            disclosure_rows=disclosure_rows,
+            news_rows=news_rows,
+            dividend_rows=dividend_rows,
+            industry_error=industry_error,
+            financial_error=financial_error,
+            disclosure_error=disclosure_error,
+            acquisition_events=tuple(events),
         )
 
     def _is_latest_completed_session(

@@ -178,6 +178,9 @@ Research、Trade Plan、Backtest 等 Redis 租约队列逐个取任务；退出�
 Nginx 提供静态文件并把 `/api` 反向代理到 FastAPI；本地浏览器访问 `http://localhost`。
 PostgreSQL、Redis 和 API 默认仅绑定 `127.0.0.1`，Redis 强制密码认证。
 
+手动启动每日研究时，Web 会先要求选择标准模式或“至高模式”。至高模式由版本化
+`configs/supreme_mode.v1.json` 约束，Worker 在真正采集前读取自身 cgroup 内存余量、CPU 配额和即时 CPU 负载，计算本次 AKShare 行情、财务、公告、新闻和分红采集的有界线程数；内存余量或 CPU 压力不足时会自动退回到更低并行，最低为单路。它不会提高 `llm_agent_max_concurrency`，因此不会向模型网关施加额外并发压力。选择、策略版本/哈希、实际执行档案、资源等级和原因码都会写进不可变运行 Manifest 与审计；自动定时报告固定使用标准模式。相同范围与预算的活动研究仍会复用已有任务，避免只因启动速度偏好重复采集和生成报告。
+
 内置流水线使用 `object-data` 内容寻址卷。仓库不再捆绑安全更新滞后的 MinIO/MC 镜像；确需
 S3 兼容时，通过 `OBJECT_STORE_ENDPOINT` 接入受维护的外部 S3 服务。管理员在“系统设置”中可查看
 运行环境内存、CPU、磁盘及 API/Worker 占用；所有修改与恢复操作均须由当前登录管理员输入自己的账户密码解锁，

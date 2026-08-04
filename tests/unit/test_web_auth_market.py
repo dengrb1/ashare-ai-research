@@ -1541,6 +1541,7 @@ def test_research_submission_prepares_frozen_manifest_and_deduplicates(monkeypat
                 "total_budget": 1_000_000,
                 "per_symbol_budget": 80_000,
                 "max_stock_price": 500,
+                "supreme_mode": True,
             },
             headers={"x-csrf-token": csrf, "Idempotency-Key": "mobile-research-1"},
         )
@@ -1553,11 +1554,29 @@ def test_research_submission_prepares_frozen_manifest_and_deduplicates(monkeypat
                 "total_budget": 1_000_000,
                 "per_symbol_budget": 80_000,
                 "max_stock_price": 500,
+                "supreme_mode": True,
             },
             headers={"x-csrf-token": csrf, "Idempotency-Key": "mobile-research-1"},
         )
         assert first.status_code == 202
         assert second.status_code == 200
+        assert first.json()["supreme_mode"] is True
+        assert first.json()["execution_profile"] is None
+        reused_with_standard_mode = client.post(
+            "/api/v1/research/runs",
+            json={
+                "trading_date": "2026-07-14",
+                "scope": "CUSTOM",
+                "symbols": ["600519.SH", "000858.SZ"],
+                "total_budget": 1_000_000,
+                "per_symbol_budget": 80_000,
+                "max_stock_price": 500,
+                "supreme_mode": False,
+            },
+            headers={"x-csrf-token": csrf, "Idempotency-Key": "mobile-research-2"},
+        )
+        assert reused_with_standard_mode.status_code == 200
+        assert reused_with_standard_mode.json()["supreme_mode"] is True
         conflicting = client.post(
             "/api/v1/research/runs",
             json={
@@ -1577,6 +1596,7 @@ def test_research_submission_prepares_frozen_manifest_and_deduplicates(monkeypat
         assert run.status == "PENDING"
         assert run.manifest["dependency_lock_sha256"] == "d" * 64
         assert run.manifest["research_scope"] == "CUSTOM"
+        assert run.manifest["supreme_mode"] is True
         assert run.manifest["target_symbols"] == ["600519.SH", "000858.SZ"]
         assert run.manifest["tracked_symbols"] == ["000858.SZ", "600519.SH"]
         assert run.manifest["research_budget"] == {

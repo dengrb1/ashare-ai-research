@@ -1,0 +1,8 @@
+{
+  "version": "supreme-mode-v1",
+  "max_data_fetch_workers": 12,
+  "estimated_memory_per_fetch_worker_mib": 48,
+  "reserve_memory_mib": 160,
+  "cpu_warning_percent": 75,
+  "cpu_critical_percent": 90
+}

@@ -587,6 +587,23 @@ export interface Run {
   trigger_source?: 'AUTO' | 'MANUAL'
   automatic_report_slot?: 'A' | 'B' | null
   requested_date?: string | null
+  supreme_mode?: boolean
+  execution_profile?: {
+    policy_version: string
+    mode: 'STANDARD' | 'SUPREME'
+    data_fetch_workers: number
+    model_agent_max_concurrency: number
+    model_concurrency_changed: false
+    resource_scope: 'HOST' | 'CONTAINER'
+    logical_cores: number
+    cpu_percent: number
+    available_memory_bytes: number
+    memory_limit_bytes?: number | null
+    active_memory_bytes?: number | null
+    memory_budget_bytes: number
+    resource_level: 'NORMAL' | 'WARNING' | 'CRITICAL'
+    reason_codes: string[]
+  } | null
   reused?: boolean
   data_readiness_state?: string | null
   next_retry_at?: string | null
@@ -614,6 +631,7 @@ export interface ResearchSubmission {
   total_budget?: number
   per_symbol_budget?: number
   max_stock_price?: number
+  supreme_mode?: boolean
 }
 
 export interface ResearchSettings {

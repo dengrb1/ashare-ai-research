@@ -54,6 +54,11 @@ from ashare_ai.orchestration.bundle import (
     evidence_payload,
     make_demo_bundle,
 )
+from ashare_ai.orchestration.supreme_mode import (
+    ResearchExecutionProfile,
+    load_supreme_mode_policy,
+    resolve_execution_profile,
+)
 from ashare_ai.portfolio.builder import CandidateQuote, PortfolioBuilder, PortfolioConfig
 from ashare_ai.portfolio.events import (
     EventRiskPolicy,
@@ -362,6 +367,10 @@ class BuiltinDailyBackend:
         self.policy = FirstReleasePolicy.model_validate_json(
             self.policy_path.read_text(encoding="utf-8")
         )
+        self.supreme_mode_policy_path = Path(settings.supreme_mode_config_path)
+        self.supreme_mode_policy, self.supreme_mode_policy_sha256 = load_supreme_mode_policy(
+            self.supreme_mode_policy_path
+        )
 
     def run_manifest(self, trading_date: date, decision_at: datetime) -> dict[str, Any]:
         mode = (
@@ -388,6 +397,8 @@ class BuiltinDailyBackend:
             "canonical_history_sessions": self._settings.akshare_history_sessions,
             "policy_version": self.policy.version,
             "policy_sha256": sha256_bytes(self.policy_path.read_bytes()),
+            "supreme_mode_policy_version": self.supreme_mode_policy.version,
+            "supreme_mode_policy_sha256": self.supreme_mode_policy_sha256,
             "formula_version": self.policy.scoring.formula_version,
             "random_seed": 42,
             "tushare_fallback_configured": bool(self._settings.tushare_token),
@@ -404,6 +415,7 @@ class BuiltinDailyBackend:
 
     def sync_reference_data(self, run_id: str) -> None:
         trading_date, decision_at, manifest = self._run_context(run_id)
+        execution_profile = self._resolve_execution_profile(run_id, manifest)
         state = self._load_state(run_id)
         if "bundle" in state:
             bundle = self._read_stage(run_id, "bundle", CanonicalDailyBundle)
@@ -427,6 +439,7 @@ class BuiltinDailyBackend:
                 decision_at,
                 run_id=run_id,
                 required_symbols=tuple(manifest.get("tracked_symbols", ())),
+                data_fetch_workers=execution_profile.data_fetch_workers,
             )
             digest = self._write_stage(run_id, "bundle", bundle)
             with self.session_factory() as session:
@@ -461,6 +474,44 @@ class BuiltinDailyBackend:
                 "industries": len(bundle.industries),
             },
         )
+
+    def _resolve_execution_profile(
+        self, run_id: str, manifest: Mapping[str, Any]
+    ) -> ResearchExecutionProfile:
+        expected_policy_hash = manifest.get("supreme_mode_policy_sha256")
+        if (
+            expected_policy_hash is not None
+            and expected_policy_hash != self.supreme_mode_policy_sha256
+        ):
+            raise RuntimeError("pinned supreme mode policy hash is unavailable")
+        existing = ResearchExecutionProfile.from_manifest(manifest.get("execution_profile"))
+        if existing is not None:
+            return existing
+        requested = bool(manifest.get("supreme_mode", False))
+        if requested and expected_policy_hash is None:
+            raise RuntimeError("supreme mode run is missing its pinned execution policy")
+        profile = resolve_execution_profile(
+            supreme_mode=requested,
+            policy=self.supreme_mode_policy,
+            model_agent_max_concurrency=self._settings.llm_agent_max_concurrency,
+        )
+        with self.session_factory() as session:
+            run = session.get(JobRun, run_id)
+            if run is None:
+                raise KeyError(run_id)
+            current = dict(run.manifest or {})
+            persisted = ResearchExecutionProfile.from_manifest(current.get("execution_profile"))
+            if persisted is not None:
+                return persisted
+            run.manifest = {**current, "execution_profile": profile.manifest_value()}
+            AuditLogger(session).record(
+                run_id,
+                "SUPREME_MODE_PROFILE_RESOLVED" if requested else "STANDARD_PROFILE_RESOLVED",
+                "Research data-acquisition profile resolved from worker resources",
+                details=profile.manifest_value(),
+            )
+            session.commit()
+        return profile
 
     def ingest_and_verify(self, run_id: str) -> list[str]:
         bundle = self._read_stage(run_id, "bundle", CanonicalDailyBundle)
@@ -1703,6 +1754,7 @@ class BuiltinDailyBackend:
         *,
         run_id: str | None = None,
         required_symbols: tuple[str, ...] = (),
+        data_fetch_workers: int = 1,
     ) -> CanonicalDailyBundle:
         configured = os.environ.get("ASHARE_CANONICAL_BUNDLE")
         reused = self._load_reused_bundle(trading_date, decision_at, run_id=run_id)
@@ -1740,11 +1792,19 @@ class BuiltinDailyBackend:
                     news_window_days=self.policy.scoring.news_window_days,
                 )
             try:
-                bundle = builder.build(
-                    trading_date,
-                    decision_at,
-                    required_symbols=required_symbols,
-                )
+                if isinstance(builder, AKShareCanonicalBundleBuilder):
+                    bundle = builder.build(
+                        trading_date,
+                        decision_at,
+                        required_symbols=required_symbols,
+                        data_fetch_workers=data_fetch_workers,
+                    )
+                else:
+                    bundle = builder.build(
+                        trading_date,
+                        decision_at,
+                        required_symbols=required_symbols,
+                    )
             except MarketDataAcquisitionError as exc:
                 if run_id is not None:
                     self._record_akshare_acquisition_events(run_id, builder, fatal=exc)

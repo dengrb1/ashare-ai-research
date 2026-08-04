@@ -95,6 +95,7 @@ describe('research observation mode and precise reports', () => {
     await user.type(screen.getByPlaceholderText(/600519 或/), '600519 000858')
     await user.type(screen.getByLabelText('最高可接受股价（元）'), '500')
     await user.click(screen.getByRole('button', { name: /启动每日研究/ }))
+    await user.click(screen.getByRole('button', { name: '标准启动' }))
     await waitFor(() => expect(mockFetch.mock.calls.some(([url, init]) => String(url).endsWith('/research/runs') && init?.method === 'POST')).toBe(true))
     const call = mockFetch.mock.calls.find(([url, init]) => String(url).endsWith('/research/runs') && init?.method === 'POST')
     expect(JSON.parse(String(call?.[1]?.body))).toMatchObject({
@@ -129,6 +130,7 @@ describe('research observation mode and precise reports', () => {
     expect(screen.getByText('已选择 2 / 3 只；未勾选股票不会进入本次冻结快照。')).toBeInTheDocument()
     expect(screen.getByText('预算预览 · 2 只')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: /启动每日研究/ }))
+    await user.click(screen.getByRole('button', { name: '标准启动' }))
     await waitFor(() => expect(mockFetch.mock.calls.some(([url, init]) => String(url).endsWith('/research/runs') && init?.method === 'POST')).toBe(true))
     const call = mockFetch.mock.calls.find(([url, init]) => String(url).endsWith('/research/runs') && init?.method === 'POST')
     expect(JSON.parse(String(call?.[1]?.body))).toMatchObject({
@@ -181,6 +183,7 @@ describe('research observation mode and precise reports', () => {
     expect(confirm).toHaveBeenCalled()
     expect((await screen.findAllByText('正在停止')).length).toBeGreaterThan(0)
     await userEvent.click(screen.getByRole('button', { name: /启动每日研究/ }))
+    await userEvent.click(screen.getByRole('button', { name: '标准启动' }))
     expect(await screen.findByText('已复用进行中的研究任务')).toBeInTheDocument()
     expect(screen.getByText(/运行 ID：old-run/)).toBeInTheDocument()
   })

@@ -733,6 +733,12 @@ def _research_run_response(db: Session, row: JobRun) -> ResearchRunResponse:
             "trigger_source": manifest.get("trigger_source", "MANUAL"),
             "automatic_report_slot": manifest.get("automatic_report_slot"),
             "requested_date": manifest.get("requested_date", row.trading_date),
+            "supreme_mode": bool(manifest.get("supreme_mode", False)),
+            "execution_profile": (
+                manifest.get("execution_profile")
+                if isinstance(manifest.get("execution_profile"), dict)
+                else None
+            ),
             "data_readiness_state": (
                 "WAITING_FOR_BENCHMARKS" if normalized == "DATA_READINESS_WAITING" else None
             ),
@@ -3474,14 +3480,14 @@ def snapshots(
     return [SnapshotResponse.model_validate(row) for row in rows]
 
 
-@app.post("/api/v1/research/runs", response_model=RunResponse, status_code=202)
+@app.post("/api/v1/research/runs", response_model=ResearchRunResponse, status_code=202)
 def submit_research(
     payload: ResearchRequest,
     response: Response,
     db: DbSession,
     context: Writer,
     idempotency_key: IdempotencyKey = None,
-) -> RunResponse:
+) -> ResearchRunResponse:
     idempotency_route = "/api/v1/research/runs"
     fingerprint = _idempotency_fingerprint(
         context.user.user_id,
@@ -3505,7 +3511,7 @@ def submit_research(
         ):
             raise HTTPException(status_code=409, detail="idempotent resource is unavailable")
         response.status_code = status.HTTP_200_OK
-        return RunResponse.model_validate(existing_run)
+        return _research_run_response(db, existing_run)
     requested_date = payload.trading_date
     submitted_at = datetime.now(SHANGHAI)
     actual_research_date = _manual_research_date(requested_date, submitted_at)
@@ -3589,7 +3595,7 @@ def submit_research(
             "DATA_READINESS_WAITING",
         }:
             response.status_code = 200
-            return RunResponse.model_validate(existing)
+            return _research_run_response(db, existing)
         existing.active_research_key = None
         db.commit()
     try:
@@ -3628,6 +3634,7 @@ def submit_research(
         "research_scope": payload.scope,
         "target_symbols": target_symbols,
         "research_budget": research_budget,
+        "supreme_mode": payload.supreme_mode,
         "portfolio_requested": portfolio_requested,
         "research_only_reason": (
             None
@@ -3653,6 +3660,7 @@ def submit_research(
             "actual_research_date": actual_research_date.isoformat(),
             "research_scope": payload.scope,
             "target_symbol_count": len(target_symbols),
+            "supreme_mode": payload.supreme_mode,
             "portfolio_requested": portfolio_requested,
             "input_hash": run.input_hash,
         },
@@ -3679,7 +3687,7 @@ def submit_research(
             winner_run = db.get(JobRun, replay.resource_id)
             if winner_run is not None and _owns(winner_run, context):
                 response.status_code = status.HTTP_200_OK
-                return RunResponse.model_validate(winner_run)
+                return _research_run_response(db, winner_run)
         winner = db.scalar(select(JobRun).where(JobRun.active_research_key == active_key))
         orphan = db.get(JobRun, run_id)
         if orphan is not None and (winner is None or orphan.run_id != winner.run_id):
@@ -3698,7 +3706,7 @@ def submit_research(
         if winner is None:
             raise HTTPException(status_code=409, detail="research submission conflicted") from exc
         response.status_code = 200
-        return RunResponse.model_validate(winner)
+        return _research_run_response(db, winner)
     try:
         if readiness_wait is not None:
             enqueue_research_at(
@@ -3731,17 +3739,7 @@ def submit_research(
         )
         db.commit()
         raise HTTPException(status_code=503, detail="research queue unavailable") from exc
-    return RunResponse.model_validate(
-        {
-            **{column.name: getattr(run, column.name) for column in run.__table__.columns},
-            "data_readiness_state": (
-                "WAITING_FOR_BENCHMARKS" if run.status == "DATA_READINESS_WAITING" else None
-            ),
-            "next_retry_at": (dict(run.manifest).get("data_readiness_wait") or {}).get(
-                "next_retry_at"
-            ),
-        }
-    )
+    return _research_run_response(db, run)
 
 
 @app.get("/api/v1/research/settings", response_model=ResearchSettingsResponse)

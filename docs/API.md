@@ -367,7 +367,9 @@ AI 对话线程和消息均按当前用户保存。消息正文中的 `@名称`�
 | `completed_at` | datetime/null | 完成或失败时间 |
 | `error_message` | string/null | 已脱敏的失败原因 |
 
-`ResearchRunResponse` 继承 `RunResponse`，并增加：`phase`、`progress`（0–100）、`report_id`、`report_type`、`report_created_at`、`research_scope`、`target_symbols`、`total_budget`、`per_symbol_budget`、`max_stock_price`、`portfolio_requested`、`portfolio_generated`、`reason_code`、`reason_message`、`formal_eligible_count`、`excluded_symbol_count`、`portfolio_reason_code`、`portfolio_reason_message`、`trigger_source`（`AUTO|MANUAL`）、`automatic_report_slot`（自动任务为 `A|B`，手动任务为 null）和 `requested_date`。
+`ResearchRunResponse` 继承 `RunResponse`，并增加：`phase`、`progress`（0–100）、`report_id`、`report_type`、`report_created_at`、`research_scope`、`target_symbols`、`total_budget`、`per_symbol_budget`、`max_stock_price`、`portfolio_requested`、`portfolio_generated`、`reason_code`、`reason_message`、`formal_eligible_count`、`excluded_symbol_count`、`portfolio_reason_code`、`portfolio_reason_message`、`trigger_source`（`AUTO|MANUAL`）、`automatic_report_slot`（自动任务为 `A|B`，手动任务为 null）、`requested_date`、`supreme_mode` 和可空的 `execution_profile`。
+
+`execution_profile` 仅在 Worker 开始数据同步后出现，字段为 `policy_version`、`mode=STANDARD|SUPREME`、`data_fetch_workers`、`model_agent_max_concurrency`、固定为 `false` 的 `model_concurrency_changed`、`resource_scope=HOST|CONTAINER`、`logical_cores`、`cpu_percent`、`available_memory_bytes`、可空 `memory_limit_bytes`/`active_memory_bytes`、`memory_budget_bytes`、`resource_level=NORMAL|WARNING|CRITICAL` 和 `reason_codes[]`。它是已固化的本次采集档案，不应用作修改运行中任务的控制通道；`model_agent_max_concurrency` 只是观测值，至高模式不会提升它。
 
 `BacktestRequest`：
 
@@ -393,6 +395,7 @@ AI 对话线程和消息均按当前用户保存。消息正文中的 `@名称`�
 | `total_budget` | decimal/null | 大于 0且不超过 100,000,000,000 |
 | `per_symbol_budget` | decimal/null | 大于 0且不超过 100,000,000,000，不能大于总预算 |
 | `max_stock_price` | decimal/null | 大于 0且不超过 10,000,000 |
+| `supreme_mode` | boolean | 默认 `false`；仅为本次数据采集请求自适应并行，绝不提高模型并发 |
 
 `WATCHLIST` 的 `symbols` 可以省略，表示当前用户全部自选股与模拟持仓；如果显式传入，所有代码必须属于当前用户的自选股或持仓。`CUSTOM` 必须至少包含一只代码。非交易日会解析为可用的最近完成交易日；若数据未就绪返回 `409`。
 
@@ -586,14 +589,14 @@ docker compose -p ashare-ai-src -f compose.yaml --profile dual-research up -d --
 
 ### `POST /api/v1/research/runs`
 
-提交 `ResearchRequest`，成功返回 `202 RunResponse`。响应中的 `run_id` 用于轮询：
+提交 `ResearchRequest`，成功返回 `202 ResearchRunResponse`。响应中的 `run_id` 用于轮询：
 
 ```bash
 curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
   -H "Authorization: Bearer <ACCESS_TOKEN>"
 ```
 
-提交相同的用户、日期、范围、标的和预算且已有进行中任务时返回既有运行，状态码为 `200`，其中包括 `DATA_READINESS_WAITING`。队列不可用返回 `503`；交易时段、未来日期或不安全的历史实时重建返回 `409`。收盘后若股票日线已到而任一策略基准（CSI300、CSI500、CSI1000）尚未覆盖目标日，仍创建 `202` 任务，状态为 `DATA_READINESS_WAITING`；轮询研究详情会返回“等待基准数据同步”以及新增的 `next_retry_at`。系统在冻结的原始范围、预算、价格上限、幂等键和活动键不变的前提下按固定间隔重试；在权威交易日历确定的下一交易日 09:25（上海时间）前仍不完整时以脱敏操作性原因终止，且绝不回退到下一交易时段的上一日实时快照。实时 AKShare 模式只允许冻结当日已就绪数据，或在下一交易日安全截止前/非交易日冻结最近已完成交易日；冻结文件模式仍可按文件覆盖日期运行历史研究。
+提交相同的用户、日期、范围、标的和预算且已有进行中任务时返回既有运行，状态码为 `200`，其中包括 `DATA_READINESS_WAITING`；`supreme_mode` 不会使同一份活动研究重复执行。队列不可用返回 `503`；交易时段、未来日期或不安全的历史实时重建返回 `409`。收盘后若股票日线已到而任一策略基准（CSI300、CSI500、CSI1000）尚未覆盖目标日，仍创建 `202` 任务，状态为 `DATA_READINESS_WAITING`；轮询研究详情会返回“等待基准数据同步”以及新增的 `next_retry_at`。系统在冻结的原始范围、预算、价格上限、幂等键和活动键不变的前提下按固定间隔重试；在权威交易日历确定的下一交易日 09:25（上海时间）前仍不完整时以脱敏操作性原因终止，且绝不回退到下一交易时段的上一日实时快照。实时 AKShare 模式只允许冻结当日已就绪数据，或在下一交易日安全截止前/非交易日冻结最近已完成交易日；冻结文件模式仍可按文件覆盖日期运行历史研究。
 
 交易日开盘后提交目标为上一交易日的研究时，实时 AKShare 模式只允许复用当前用户已有的该日不可变 bundle；这也覆盖原任务已完成数据采集、但在 Agent 或模型网关阶段失败的情况。服务端会校验源运行归属、目标交易日和 bundle SHA-256，禁止用盘中实时快照重构历史数据。没有可复用 bundle 时返回 `409`，应在收盘后重新采集；冻结文件模式仍可按文件内容运行历史研究。
 
@@ -612,7 +615,7 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 
 ### `GET /api/v1/research/runs/{run_id}`
 
-返回单个 `ResearchRunResponse`，包含 `phase` 和 0–100 的 `progress`，供 Web 与手机客户端按 ID 轮询。普通用户只能读取自己的研究任务；不存在、非研究任务或无权限资源均返回 `404`。
+返回单个 `ResearchRunResponse`，包含 `phase`、0–100 的 `progress` 和 Worker 已解析时的 `execution_profile`，供 Web 与手机客户端按 ID 轮询。普通用户只能读取自己的研究任务；不存在、非研究任务或无权限资源均返回 `404`。
 
 ### `PUT /api/v1/research/settings`
 

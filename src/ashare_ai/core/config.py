@@ -73,6 +73,7 @@ class Settings(BaseSettings):
     akshare_fetch_max_attempts: int = Field(default=2, ge=1, le=5)
     akshare_fetch_backoff_seconds: float = Field(default=1.0, ge=0, le=60)
     worker_lease_seconds: int = Field(default=900, ge=30, le=7200)
+    supreme_mode_config_path: Path = runtime_resource_path("configs/supreme_mode.v1.json")
     ashare_pipeline_factory: str | None = None
     ashare_stage_backend_factory: str | None = None
     ashare_backtest_executor_factory: str | None = None

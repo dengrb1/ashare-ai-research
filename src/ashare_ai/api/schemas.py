@@ -983,6 +983,7 @@ class ResearchRequest(BaseModel):
     total_budget: Decimal | None = Field(default=None, gt=0, le=Decimal("100000000000"))
     per_symbol_budget: Decimal | None = Field(default=None, gt=0, le=Decimal("100000000000"))
     max_stock_price: Decimal | None = Field(default=None, gt=0, le=Decimal("10000000"))
+    supreme_mode: bool = False
 
     @field_validator("scope", mode="before")
     @classmethod
@@ -1021,6 +1022,23 @@ class ResearchRequest(BaseModel):
         ):
             raise ValueError("per-symbol budget cannot exceed total budget")
         return self
+
+
+class ResearchExecutionProfileResponse(BaseModel):
+    policy_version: str
+    mode: Literal["STANDARD", "SUPREME"]
+    data_fetch_workers: int = Field(ge=1, le=16)
+    model_agent_max_concurrency: int = Field(ge=1, le=16)
+    model_concurrency_changed: Literal[False] = False
+    resource_scope: Literal["HOST", "CONTAINER"]
+    logical_cores: int = Field(ge=1)
+    cpu_percent: float = Field(ge=0)
+    available_memory_bytes: int = Field(ge=0)
+    memory_limit_bytes: int | None = Field(default=None, ge=0)
+    active_memory_bytes: int | None = Field(default=None, ge=0)
+    memory_budget_bytes: int = Field(ge=0)
+    resource_level: Literal["NORMAL", "WARNING", "CRITICAL"]
+    reason_codes: list[str] = Field(default_factory=list)
 
 
 class AutomaticResearchReportSettings(BaseModel):
@@ -1203,6 +1221,8 @@ class ResearchRunResponse(RunResponse):
     trigger_source: Literal["AUTO", "MANUAL"] = "MANUAL"
     automatic_report_slot: Literal["A", "B"] | None = None
     requested_date: date | None = None
+    supreme_mode: bool = False
+    execution_profile: ResearchExecutionProfileResponse | None = None
 
 
 class AuditEventResponse(OrmResponse):
