@@ -2,6 +2,13 @@ export type Role = 'admin' | 'researcher' | 'user'
 
 export type ResearchExecutionMode = 'SERIAL' | 'DUAL'
 
+export interface HealthStatus {
+  status: string
+  version: string
+  database: string
+  git_sha: string
+}
+
 export interface WorkerHealth {
   worker_id: string
   role: string

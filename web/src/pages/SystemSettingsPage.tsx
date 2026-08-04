@@ -45,6 +45,13 @@ const RESEARCH_FIELDS: Field[] = [
   { key: 'minimum_median_amount', label: '最低成交额', kind: 'number' },
   { key: 'allow_demo_data', label: '允许演示数据', kind: 'checkbox' },
 ]
+const EDGE_FIELDS: Field[] = [
+  { key: 'edge_domain', label: '公网域名', kind: 'text', hint: 'EDGE_DOMAIN。DNS 须已指向本服务器，不带协议与路径。' },
+  { key: 'edge_acme_email', label: 'ACME 账号邮箱', kind: 'text', hint: 'EDGE_ACME_EMAIL。用于证书申请与账号恢复通知。' },
+  { key: 'edge_acme_ca_server', label: 'ACME CA 服务器', kind: 'text', hint: 'EDGE_ACME_CA_SERVER，默认 letsencrypt；测试可用 letsencrypt_test。' },
+  { key: 'edge_frpc_enabled', label: '启用 FRP 客户端', kind: 'checkbox', hint: 'EDGE_FRPC_ENABLED。连接外部 frps 时开启。' },
+  { key: 'edge_frpc_config_file', label: 'FRP 配置文件路径', kind: 'text', hint: 'EDGE_FRPC_CONFIG_FILE。宿主机未跟踪的 frpc.toml 路径，拓扑控制器启动前校验存在。' },
+]
 
 const bytes = (value?: number | null) => {
   if (value === undefined || value === null) return '—'
@@ -295,6 +302,7 @@ export function SystemSettingsPage() {
       <form className="run-form" onSubmit={save}>
         <details open><summary><span>数据存储与凭据</span><small>对象存储、数据源密钥</small></summary><div className="advanced-fields">{renderFields(STORAGE_FIELDS)}<label>Tushare Token<input disabled={!unlocked || busy} type="password" value={secrets.tushare_token || ''} placeholder={current?.secret_configured.tushare_token ? '已配置；留空不修改' : '未配置'} onChange={(event) => setSecrets((previous) => ({ ...previous, tushare_token: event.target.value }))} /></label><label>对象存储 Access Key<input disabled={!unlocked || busy} type="password" value={secrets.object_store_access_key || ''} placeholder={current?.secret_configured.object_store_access_key ? '已配置；留空不修改' : '未配置'} onChange={(event) => setSecrets((previous) => ({ ...previous, object_store_access_key: event.target.value }))} /></label><label>对象存储 Secret Key<input disabled={!unlocked || busy} type="password" value={secrets.object_store_secret_key || ''} placeholder={current?.secret_configured.object_store_secret_key ? '已配置；留空不修改' : '未配置'} onChange={(event) => setSecrets((previous) => ({ ...previous, object_store_secret_key: event.target.value }))} /></label><button type="button" className="secondary" disabled={!unlocked || busy} onClick={() => void restore('object_store_endpoint')}>恢复 Endpoint 环境值</button></div></details>
         <details><summary><span>搜索与行情</span><small>缓存、并发、超时</small></summary><div className="advanced-fields">{renderFields(SEARCH_MARKET_FIELDS)}</div></details>
+        <details><summary><span>公网边缘网关</span><small>域名、ACME、FRP 客户端</small></summary><div className="advanced-fields">{renderFields(EDGE_FIELDS)}<button type="button" className="secondary" disabled={!unlocked || busy} onClick={() => void restore('edge_domain')}>恢复域名环境值</button></div></details>
         <details><summary><span>研究采集</span><small>计划、供应商、数据门槛</small></summary><div className="advanced-fields">{renderFields(RESEARCH_FIELDS)}<label>数据包模式<select disabled={!unlocked || busy} value={String(form.canonical_bundle_mode || 'akshare')} onChange={(event) => update('canonical_bundle_mode', event.target.value)}><option value="akshare">AKShare</option><option value="file">文件</option><option value="demo">演示数据</option></select></label></div></details>
         <footer className="advanced-actions"><div><Link to="/admin/models">前往模型设置</Link><small>部署基线仍由环境变量与 Compose 管理</small></div><div className="row-actions"><button type="button" className="danger-button" disabled={!unlocked || busy} onClick={() => { if (window.confirm('恢复全部系统设置为环境变量值？')) void restore() }}>恢复全部覆盖</button><button className="primary" disabled={!unlocked || busy}>{busy ? '保存中…' : '保存高级配置'}</button></div></footer>
       </form>

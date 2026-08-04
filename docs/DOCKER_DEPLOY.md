@@ -107,13 +107,16 @@ docker compose -p ashare-ai-src -f compose.yaml exec -T api \
 
 启用前，完成下列前提：
 
-- `EDGE_DOMAIN` 的 DNS A/AAAA 记录已指向此服务器；
-- `.env` 中设置 `EDGE_DOMAIN` 与用于 ACME 账号恢复通知的 `EDGE_ACME_EMAIL`。
+- 边缘网关域名（`edge_domain` / `EDGE_DOMAIN`）的 DNS A/AAAA 记录已指向此服务器；
+- 准备好用于 ACME 账号恢复通知的邮箱（`edge_acme_email` / `EDGE_ACME_EMAIL`）。
+
+网关配置由系统设置中心管理：管理员解锁后，在「系统设置 → 高级配置 → 公网边缘网关」填写域名、ACME 邮箱、CA 服务器（默认 `letsencrypt`）、FRP 开关与 FRP 配置文件路径，并在「执行模式」中开启「公网边缘网关（FRP）」总开关。启用总开关时必须同时提供域名与邮箱，启用 FRP 时必须提供非空配置文件路径，否则保存返回 `422`。安装本机拓扑控制器后，控制器会在下次轮询时把持久化值注入 `docker compose up edge-gateway` 的子进程环境，并据此启动或重建网关；无需手工编辑 `.env`。`.env` 中的同名 `EDGE_*` 变量仍保留为部署基线，供未安装控制器的部署手动启动：
 
 ```env
-EDGE_DOMAIN=research.example.com
-EDGE_ACME_EMAIL=ops@example.com
+EDGE_DOMAIN=
+EDGE_ACME_EMAIL=
 EDGE_FRPC_ENABLED=false
+EDGE_FRPC_CONFIG_FILE=./docker/edge-gateway/frpc.disabled.toml
 ```
 
 首次启动会以 ACME HTTP-01 自动申请 ECDSA P-256 证书，证书和 ACME 账号保存在 Compose 的 `edge-certificates`、`edge-acme-data` 卷中：
@@ -130,14 +133,9 @@ docker compose -p ashare-ai-src -f compose.yaml --profile edge logs --tail 100 e
 
 ### 可选 frpc 客户端
 
-网关不部署 frps。若服务器需要通过已有外部 frps 暴露，复制 `docker/edge-gateway/frpc.toml.example` 到未跟踪的私有路径，填入真实 frps 地址、token 和域名；该配置中的两个代理必须分别指向同容器的 `127.0.0.1:80` 与 `127.0.0.1:443`。外部 frps 必须配置 `vhostHTTPPort=80` 与 `vhostHTTPSPort=443`，以便 HTTP-01 和 TLS 透传均能到达网关。
+网关不部署 frps。若服务器需要通过已有外部 frps 暴露，复制 `docker/edge-gateway/frpc.toml.example` 到未跟踪的私有路径，填入真实 frps 地址、token 和域名；该配置中的两个代理必须分别指向同容器的 `127.0.0.1:80` 与 `127.0.0.1:443`。外部 frps 必须配置 `vhostHTTPPort=80` 与 `vhostHTTPSPort=443`，以便 HTTP-01 和 TLS 透传均能到达网关。随后在系统设置「公网边缘网关」中开启 `edge_frpc_enabled`，并把 `edge_frpc_config_file` 指向该文件（例如 `./.secrets/edge-frpc.toml`）；拓扑控制器启动网关前会校验该文件存在。
 
-```env
-EDGE_FRPC_ENABLED=true
-EDGE_FRPC_CONFIG_FILE=./.secrets/edge-frpc.toml
-```
-
-`frpc.toml` 包含 token，绝不能提交、打印或放入 `*.example`。启用 `frpc` 前确认它只能声明你授权暴露的代理。关闭隧道只需设回 `EDGE_FRPC_ENABLED=false` 并重建 `edge-gateway`；不会删除证书卷。
+`frpc.toml` 包含 token，绝不能提交、打印或放入 `*.example`。启用 `frpc` 前确认它只能声明你授权暴露的代理。关闭隧道只需在系统设置关闭 `edge_frpc_enabled` 并保存；控制器会重建 `edge-gateway`，不会删除证书卷。
 
 ### 本机拓扑控制器（Windows、Linux、macOS）
 

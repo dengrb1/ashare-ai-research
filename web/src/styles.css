@@ -161,7 +161,8 @@ code, pre, .eyebrow, .kicker { font-family: 'Cascadia Mono', 'SFMono-Regular', C
 .toast-icon { display: grid; place-items: center; width: 22px; height: 22px; color: var(--on-accent); background: var(--accent); border-radius: 50%; font-weight: 700; font-size: 13px; }.toast-success .toast-icon { background: var(--down); }.toast-warning .toast-icon { background: var(--warning); }.toast-error .toast-icon { background: var(--danger); }
 .toast p { margin: 1px 0; overflow-wrap: anywhere; font-size: var(--font-sm); line-height: 1.45; }.toast button { width: 28px; min-height: 28px; padding: 0; color: var(--muted); background: transparent; border: 0; font-size: 20px; line-height: 1; }.toast button:hover { color: var(--text-strong); }
 .content { flex: 1; padding: 25px 28px 35px; }
-.disclaimer { padding: 15px 30px; color: #43575d; border-top: 1px solid var(--line); font-size: 11px; text-align: center; letter-spacing: .05em; }
+.disclaimer { position: relative; padding: 15px max(30px, calc(30px + env(safe-area-inset-right))) 15px 30px; color: #43575d; border-top: 1px solid var(--line); font-size: 11px; text-align: center; letter-spacing: .05em; }
+.app-version { position: absolute; right: max(14px, env(safe-area-inset-right)); bottom: max(10px, env(safe-area-inset-bottom)); padding: 3px 6px; color: var(--muted-2); background: var(--surface-2); border: 1px solid var(--line); border-radius: 4px; font: 10px 'Cascadia Mono', 'SFMono-Regular', Consolas, monospace; letter-spacing: 0; white-space: nowrap; }
 
 .page-stack { display: flex; flex-direction: column; gap: 18px; }
 .panel { padding: 20px; background: linear-gradient(145deg, rgba(15,29,38,.92), rgba(10,21,29,.94)); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 12px 36px rgba(0,0,0,.1); overflow: hidden; }
@@ -234,6 +235,12 @@ label { display: grid; gap: 7px; color: #84999f; font-size: 11px; }
 .about-stack > div { display: grid; grid-template-columns: 105px 1fr; align-items: center; gap: 14px; padding: 14px; background: var(--surface-2); }
 .about-stack span { color: var(--muted); font-size: 11px; }
 .about-stack strong { color: var(--text); font: 11px 'Cascadia Mono', Consolas, monospace; line-height: 1.6; }
+.about-stack a { color: var(--accent); text-decoration: none; }
+.about-stack a:hover { text-decoration: underline; }
+.about-releases { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.about-releases strong { flex-basis: 100%; color: var(--muted); font-size: 11px; font-weight: 500; }
+.about-releases a { padding: 6px 12px; color: var(--accent); background: var(--accent-soft); border-radius: 6px; text-decoration: none; font: 11px 'Cascadia Mono', Consolas, monospace; }
+.about-releases a:hover { color: var(--on-accent); background: var(--accent); }
 .about-footnote { margin: 14px 0 0; color: var(--muted); font-size: 11px; line-height: 1.7; }
 .about-boundary { display: flex; align-items: flex-start; gap: 14px; padding: 18px 20px; color: var(--text); background: color-mix(in srgb, var(--gold) 8%, var(--surface)); border: 1px solid color-mix(in srgb, var(--gold) 28%, var(--line)); border-radius: 8px; }
 .about-boundary > span { display: grid; flex: 0 0 28px; height: 28px; place-items: center; color: var(--gold); border: 1px solid var(--gold); border-radius: 50%; font: 600 12px 'Cascadia Mono', Consolas, monospace; }
@@ -941,6 +948,7 @@ small, .eyebrow, .kicker, label, th, td, .nav-group, .topbar p, .disclaimer { fo
   .refresh-button::first-letter { font-size: 20px; }
   .user-menu button { min-width: 44px; min-height: 44px; }
   .content { padding: 14px 12px 26px; }
+  .disclaimer { padding-right: max(70px, calc(70px + env(safe-area-inset-right))); padding-left: 12px; }
   .panel { padding: 15px; }
   .panel-header, .instrument-head, .research-run-head, .research-run-meta, .filter-actions, .task-actions { align-items: flex-start; flex-direction: column; }
   .research-run-head { flex-direction: row; }

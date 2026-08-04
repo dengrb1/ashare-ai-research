@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -43,6 +44,12 @@ def _service() -> tuple[Session, SystemConfigurationService]:
         model_settings_encryption_keys=Fernet.generate_key().decode(),
         tushare_token="environment-tushare",
         market_cache_seconds=15,
+        edge_gateway_enabled=False,
+        edge_domain=None,
+        edge_acme_email=None,
+        edge_acme_ca_server="letsencrypt",
+        edge_frpc_enabled=False,
+        edge_frpc_config_file="./docker/edge-gateway/frpc.disabled.toml",
     )
     return session, SystemConfigurationService(settings)
 
@@ -119,12 +126,109 @@ def test_system_settings_keeps_edge_gateway_disabled_by_default() -> None:
     assert service.resolve(session).settings.edge_gateway_enabled is False
     saved = service.save(
         session,
-        public_updates={"edge_gateway_enabled": True},
+        public_updates={
+            "edge_gateway_enabled": True,
+            "edge_domain": "research.example.com",
+            "edge_acme_email": "ops@example.com",
+        },
         secret_updates={},
         user_id=None,
     )
     assert saved.settings.edge_gateway_enabled is True
     assert service.public_view(session)["sources"]["edge_gateway_enabled"] == "database"
+
+
+def test_edge_gateway_config_is_versioned_and_restorable() -> None:
+    session, service = _service()
+    saved = service.save(
+        session,
+        public_updates={
+            "edge_gateway_enabled": True,
+            "edge_domain": "research.example.com",
+            "edge_acme_email": "ops@example.com",
+            "edge_acme_ca_server": "zerossl",
+            "edge_frpc_enabled": False,
+            "edge_frpc_config_file": "./.secrets/edge-frpc.toml",
+        },
+        secret_updates={},
+        user_id=None,
+    )
+    session.commit()
+    assert saved.settings.edge_domain == "research.example.com"
+    assert saved.settings.edge_acme_email == "ops@example.com"
+    assert saved.settings.edge_acme_ca_server == "zerossl"
+    assert saved.settings.edge_frpc_config_file == "./.secrets/edge-frpc.toml"
+    view = service.public_view(session)
+    assert view["values"]["edge_domain"] == "research.example.com"
+    assert view["sources"]["edge_domain"] == "database"
+    assert view["sources"]["edge_frpc_config_file"] == "database"
+
+    # Restoring a required field while the gateway stays enabled fails closed,
+    # because the container could no longer boot without a public domain.
+    with pytest.raises(SystemSettingsError, match="edge gateway"):
+        service.restore_field(session, field="edge_domain", user_id=None)
+    session.rollback()
+
+    restored = service.restore_field(session, field="edge_acme_ca_server", user_id=None)
+    session.commit()
+    assert restored.settings.edge_acme_ca_server == "letsencrypt"
+    assert service.public_view(session)["sources"]["edge_acme_ca_server"] == "environment"
+
+    disabled = service.save(
+        session,
+        public_updates={"edge_gateway_enabled": False},
+        secret_updates={},
+        user_id=None,
+    )
+    session.commit()
+    assert disabled.settings.edge_gateway_enabled is False
+    restored = service.restore_field(session, field="edge_domain", user_id=None)
+    session.commit()
+    assert restored.settings.edge_domain is None
+    assert service.public_view(session)["sources"]["edge_domain"] == "environment"
+
+
+def test_edge_gateway_enable_requires_domain_and_acme_email() -> None:
+    session, service = _service()
+    for update in (
+        {"edge_gateway_enabled": True},
+        {"edge_gateway_enabled": True, "edge_domain": "research.example.com"},
+    ):
+        try:
+            service.save(session, public_updates=update, secret_updates={}, user_id=None)
+        except SystemSettingsError as error:
+            assert "edge gateway" in str(error)
+        else:
+            raise AssertionError("enabling the edge gateway without required values must fail")
+
+    with pytest.raises(SystemSettingsError, match="DNS host name"):
+        service.save(
+            session,
+            public_updates={
+                "edge_gateway_enabled": True,
+                "edge_domain": "https://research.example.com",
+                "edge_acme_email": "ops@example.com",
+            },
+            secret_updates={},
+            user_id=None,
+        )
+
+
+def test_edge_gateway_frpc_enable_requires_config_file_path() -> None:
+    session, service = _service()
+    with pytest.raises(SystemSettingsError, match="frpc"):
+        service.save(
+            session,
+            public_updates={
+                "edge_gateway_enabled": True,
+                "edge_domain": "research.example.com",
+                "edge_acme_email": "ops@example.com",
+                "edge_frpc_enabled": True,
+                "edge_frpc_config_file": "",
+            },
+            secret_updates={},
+            user_id=None,
+        )
 
 
 def test_topology_controller_endpoint_requires_its_private_capability(monkeypatch) -> None:
@@ -133,7 +237,15 @@ def test_topology_controller_endpoint_requires_its_private_capability(monkeypatc
     )
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
-    settings = Settings(topology_controller_token="x" * 32)
+    settings = Settings(
+        topology_controller_token="x" * 32,
+        edge_gateway_enabled=False,
+        edge_domain=None,
+        edge_acme_email=None,
+        edge_acme_ca_server="letsencrypt",
+        edge_frpc_enabled=False,
+        edge_frpc_config_file="./docker/edge-gateway/frpc.disabled.toml",
+    )
     monkeypatch.setattr("ashare_ai.api.app.get_settings", lambda: settings)
     monkeypatch.setattr("ashare_ai.core.system_settings.get_settings", lambda: settings)
     monkeypatch.setattr(
@@ -155,9 +267,70 @@ def test_topology_controller_endpoint_requires_its_private_capability(monkeypatc
         body = response.json()
         assert body["research_execution_mode"] == "SERIAL"
         assert body["edge_gateway_enabled"] is False
+        assert body["edge_domain"] is None
+        assert body["edge_acme_email"] is None
+        assert body["edge_acme_ca_server"] == "letsencrypt"
+        assert body["edge_frpc_enabled"] is False
+        assert body["edge_frpc_config_file"] == "./docker/edge-gateway/frpc.disabled.toml"
         assert body["auto_restart_enabled"] is False
         assert body["restart_required"] is False
         assert isinstance(body["topology_sha256"], str) and body["topology_sha256"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_topology_controller_endpoint_returns_persisted_edge_config(monkeypatch) -> None:
+    engine = create_engine(
+        "sqlite+pysqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    settings = Settings(
+        topology_controller_token="x" * 32,
+        edge_gateway_enabled=False,
+        edge_domain=None,
+        edge_acme_email=None,
+        edge_acme_ca_server="letsencrypt",
+        edge_frpc_enabled=False,
+        edge_frpc_config_file="./docker/edge-gateway/frpc.disabled.toml",
+    )
+    monkeypatch.setattr("ashare_ai.api.app.get_settings", lambda: settings)
+    monkeypatch.setattr("ashare_ai.core.system_settings.get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "ashare_ai.api.app._system_worker_snapshot", lambda _hash: ("SERIAL", False, [], {})
+    )
+    with factory() as session:
+        SystemConfigurationService(settings).save(
+            session,
+            public_updates={
+                "edge_gateway_enabled": True,
+                "edge_domain": "research.example.com",
+                "edge_acme_email": "ops@example.com",
+                "edge_frpc_enabled": True,
+                "edge_frpc_config_file": "./.secrets/edge-frpc.toml",
+            },
+            secret_updates={},
+            user_id=None,
+        )
+        session.commit()
+
+    def override_db():
+        with factory() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        client = TestClient(app)
+        response = client.get(
+            "/api/internal/topology-desired", headers={"X-Topology-Controller-Token": "x" * 32}
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["edge_gateway_enabled"] is True
+        assert body["edge_domain"] == "research.example.com"
+        assert body["edge_acme_email"] == "ops@example.com"
+        assert body["edge_frpc_enabled"] is True
+        assert body["edge_frpc_config_file"] == "./.secrets/edge-frpc.toml"
     finally:
         app.dependency_overrides.clear()
 

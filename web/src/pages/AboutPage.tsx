@@ -1,5 +1,16 @@
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
+import { api } from '../api'
 import { Panel } from '../components/Ui'
+
+const PROJECT_REPO = 'https://github.com/dengrb1/ashare-ai-research'
+const LICENSE_URL = 'https://www.apache.org/licenses/LICENSE-2.0'
+
+const RELEASES = [
+  ['v2.0.3', 'docs/releases/v2.0.3.zh-CN.md'],
+  ['v2.0.0', 'docs/releases/v2.0.0.zh-CN.md'],
+  ['v1.0.0', 'docs/releases/v1.0.0.zh-CN.md'],
+]
 
 const PIPELINE = [
   ['01', '冻结数据', '按交易日与决策时点冻结供应商数据，生成不可变快照和 Manifest。'],
@@ -24,6 +35,19 @@ const STACK = [
 ]
 
 export function AboutPage() {
+  const [build, setBuild] = useState<{ version: string; gitSha: string }>({ version: '', gitSha: '' })
+
+  useEffect(() => {
+    let cancelled = false
+    void api.health()
+      .then((health) => { if (!cancelled) setBuild({ version: health.version, gitSha: health.git_sha }) })
+      .catch(() => { /* health is best-effort; the About page still renders without it */ })
+    return () => { cancelled = true }
+  }, [])
+
+  const version = build.version ? `v${build.version}` : '—'
+  const gitSha = build.gitSha && build.gitSha !== 'UNVERSIONED' ? build.gitSha.slice(0, 12) : 'UNVERSIONED'
+
   return <div className="page-stack about-page">
     <section className="about-hero">
       <div className="about-mark" aria-hidden="true">霁</div>
@@ -68,6 +92,19 @@ export function AboutPage() {
         <p className="about-footnote">分析只读取已提交的不可变 Manifest；控制面、数据湖与对象存储各自保留版本和审计信息。</p>
       </Panel>
     </div>
+
+    <Panel title="版本与项目信息" eyebrow="VERSION & LICENSE">
+      <div className="about-stack">
+        <div><span>系统版本</span><strong>{version}</strong></div>
+        <div><span>作者</span><strong>dengrb</strong></div>
+        <div><span>开源许可证</span><strong><a href={LICENSE_URL} target="_blank" rel="noopener noreferrer">Apache License 2.0</a></strong></div>
+        <div><span>构建标识</span><strong>{gitSha}</strong></div>
+      </div>
+      <div className="about-releases">
+        <strong>发布说明</strong>
+        {RELEASES.map(([tag, path]) => <a key={tag} href={`${PROJECT_REPO}/blob/main/${path}`} target="_blank" rel="noopener noreferrer">{tag}</a>)}
+      </div>
+    </Panel>
 
     <section className="about-boundary">
       <span aria-hidden="true">!</span>

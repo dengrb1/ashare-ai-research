@@ -34,13 +34,10 @@ def _token_and_env() -> None:
     lines = env_file.read_text(encoding="utf-8").splitlines() if env_file.exists() else []
     lines = [line for line in lines if not line.startswith("TOPOLOGY_CONTROLLER_TOKEN=")]
     lines.append(f"TOPOLOGY_CONTROLLER_TOKEN={token}")
-    for default in (
-        "EDGE_DOMAIN=ashare.dengrb.top",
-        "EDGE_FRPC_ENABLED=true",
-        "EDGE_FRPC_CONFIG_FILE=./.secrets/edge-frpc.toml",
-    ):
-        if not any(line.startswith(default.split("=", 1)[0] + "=") for line in lines):
-            lines.append(default)
+    # Edge-gateway configuration is administrator-managed in the system settings
+    # center (System Settings -> 高级配置 -> 公网边缘网关) and is injected by the
+    # controller from /api/internal/topology-desired, so the installer no longer
+    # seeds EDGE_* defaults into .env.
     env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

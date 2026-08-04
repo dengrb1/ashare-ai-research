@@ -34,6 +34,7 @@ class HealthResponse(BaseModel):
     status: str
     version: str
     database: str
+    git_sha: str = "UNVERSIONED"
 
 
 class LoginRequest(BaseModel):
@@ -171,6 +172,11 @@ class SystemSettingsRequest(BaseModel):
 
     research_execution_mode: Literal["SERIAL", "DUAL"] | None = None
     edge_gateway_enabled: bool | None = None
+    edge_domain: str | None = Field(default=None, max_length=253)
+    edge_acme_email: str | None = Field(default=None, max_length=320)
+    edge_acme_ca_server: str | None = Field(default=None, min_length=1, max_length=128)
+    edge_frpc_enabled: bool | None = None
+    edge_frpc_config_file: str | None = Field(default=None, min_length=1, max_length=1024)
     auto_restart_enabled: bool | None = None
     llm_agent_max_concurrency: int | None = Field(default=None, ge=1, le=4)
     object_store_endpoint: str | None = Field(default=None, max_length=2048)

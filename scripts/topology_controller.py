@@ -3,26 +3,20 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import subprocess
 import sys
 import urllib.request
 from pathlib import Path
+from typing import cast
 
 
 def _log(path: Path, message: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as stream:
         stream.write(message + "\n")
-
-
-def _env(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line and not line.startswith("#") and "=" in line:
-            key, value = line.split("=", 1)
-            values[key] = value
-    return values
 
 
 class Controller:
@@ -33,9 +27,17 @@ class Controller:
         self.state_path = self.secrets / "topology-controller.state"
         self.edge_state_path = self.secrets / "topology-controller.edge.state"
 
-    def _docker(self, *args: str) -> str:
+    def _docker(
+        self, *args: str, env_extra: dict[str, str] | None = None
+    ) -> str:
+        env = {**os.environ, **env_extra} if env_extra else None
         result = subprocess.run(
-            ["docker", *args], cwd=self.root, text=True, capture_output=True, check=False
+            ["docker", *args],
+            cwd=self.root,
+            text=True,
+            capture_output=True,
+            check=False,
+            env=env,
         )
         for output in (result.stdout, result.stderr):
             if output:
@@ -65,21 +67,39 @@ class Controller:
             headers={"X-Topology-Controller-Token": token},
         )
         with urllib.request.urlopen(request, timeout=10) as response:
-            return json.load(response)
+            payload = json.load(response)
+        if not isinstance(payload, dict):
+            raise RuntimeError("topology controller response is not an object")
+        return cast(dict[str, object], payload)
 
-    def _validate_edge(self) -> None:
-        env_file = self.root / ".env"
-        if not env_file.is_file():
-            raise RuntimeError("edge-gateway requires a local .env file")
-        values = _env(env_file)
-        for name in ("EDGE_DOMAIN", "EDGE_ACME_EMAIL", "EDGE_FRPC_CONFIG_FILE"):
-            if not values.get(name, "").strip():
-                raise RuntimeError(f"edge-gateway requires {name} in .env")
-        frpc = Path(values["EDGE_FRPC_CONFIG_FILE"])
-        if not frpc.is_absolute():
-            frpc = self.root / frpc
-        if not frpc.is_file():
-            raise RuntimeError("edge-gateway frpc config file is missing")
+    def _validate_edge(self, values: dict[str, str]) -> None:
+        if not values.get("EDGE_DOMAIN", "").strip():
+            raise RuntimeError("edge-gateway requires a public domain")
+        if not values.get("EDGE_ACME_EMAIL", "").strip():
+            raise RuntimeError("edge-gateway requires an ACME account email")
+        if values.get("EDGE_FRPC_ENABLED") == "true":
+            config_path = values.get("EDGE_FRPC_CONFIG_FILE", "").strip()
+            if not config_path:
+                raise RuntimeError("edge-gateway frpc requires a config file path")
+            path = Path(config_path)
+            if not path.is_absolute():
+                path = self.root / path
+            if not path.is_file():
+                raise RuntimeError("edge-gateway frpc config file is missing")
+
+    def _edge_values(self, desired: dict[str, object]) -> dict[str, str]:
+        return {
+            "EDGE_DOMAIN": str(desired.get("edge_domain") or ""),
+            "EDGE_ACME_EMAIL": str(desired.get("edge_acme_email") or ""),
+            "EDGE_ACME_CA_SERVER": str(
+                desired.get("edge_acme_ca_server") or "letsencrypt"
+            ),
+            "EDGE_FRPC_ENABLED": "true" if bool(desired.get("edge_frpc_enabled")) else "false",
+            "EDGE_FRPC_CONFIG_FILE": str(
+                desired.get("edge_frpc_config_file")
+                or "./docker/edge-gateway/frpc.disabled.toml"
+            ),
+        }
 
     def _apply_workers(self, base: tuple[str, ...], mode: str, force: bool) -> None:
         if mode == "DUAL":
@@ -124,13 +144,29 @@ class Controller:
         except Exception as exc:
             _log(self.log_path, f"ERROR {exc}")
             result = 1
-        edge_state = "1" if edge else "0"
+        # Edge config is administrator-overridable from the system settings
+        # center, so the desired values come from the API (not .env).  The
+        # digest lets a domain/ACME/frpc change recreate the gateway while the
+        # enabled-flag alone only starts or stops it.
+        edge_values = self._edge_values(desired)
+        edge_digest = hashlib.sha256(
+            json.dumps(edge_values, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        edge_state = f"{1 if edge else 0}:{edge_digest}"
         try:
             if self._read_state(self.edge_state_path) != edge_state:
                 if edge:
-                    self._validate_edge()
+                    self._validate_edge(edge_values)
                     self._docker(
-                        *base, "--profile", "edge", "up", "-d", "--no-build", "edge-gateway"
+                        *base,
+                        "--profile",
+                        "edge",
+                        "up",
+                        "-d",
+                        "--no-build",
+                        "--force-recreate",
+                        "edge-gateway",
+                        env_extra=edge_values,
                     )
                 else:
                     self._stop_if_running("edge", "edge-gateway")
