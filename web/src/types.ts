@@ -111,6 +111,7 @@ export interface EdgeGatewayConfiguration {
   apply_message?: string | null
   applied_at?: string | null
   applied_sha256?: string | null
+  source_sync?: boolean
 }
 
 export interface User {

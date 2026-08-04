@@ -124,6 +124,8 @@ class Settings(BaseSettings):
     model_settings_encryption_keys: str | None = None
     edge_gateway_encryption_keys: str | None = None
     edge_gateway_config_dir: Path = Path(".secrets/edge-gateway")
+    edge_gateway_source_dir: Path = Path("docker/edge-gateway")
+    edge_gateway_host_source_dir: Path = Path("docker/edge-gateway")
     edge_proxy_target_allowlist: str = "web"
     personal_data_encryption_keys: str | None = None
     mipush_app_secret: str | None = None

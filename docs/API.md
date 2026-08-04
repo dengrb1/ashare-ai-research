@@ -467,7 +467,7 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 
 ### Edge Gateway 配置中心
 
-`GET /api/v1/admin/edge-gateway` 返回当前版本、结构化代理主机、配置哈希和应用状态；未携带有效 `X-System-Settings-Unlock` 时不返回 FRP 明文。`PUT` 使用当前管理员解锁令牌保存最多 32 个代理主机和 64 KiB FRP TOML，FRP 内容使用 `EDGE_GATEWAY_ENCRYPTION_KEYS` 加密，提交按 `Idempotency-Key` 去重。代理目标必须匹配 `EDGE_PROXY_TARGET_ALLOWLIST`（默认 `web`）或私有/回环 IP，禁止自定义 Nginx 指令。
+`GET /api/v1/admin/edge-gateway` 返回当前版本、结构化代理主机、配置哈希、应用状态和 `source_sync`；未携带有效 `X-System-Settings-Unlock` 时不返回 FRP 明文。服务端每次读取都会检查部署配置目录中的 `frpc.toml`/`managed.conf`，外部变更会导入新的不可变版本。`PUT` 使用当前管理员解锁令牌保存最多 32 个代理主机和 64 KiB FRP TOML，FRP 内容使用 `EDGE_GATEWAY_ENCRYPTION_KEYS` 加密，提交按 `Idempotency-Key` 去重。代理目标必须匹配 `EDGE_PROXY_TARGET_ALLOWLIST`（默认 `web`）或私有/回环 IP，禁止自定义 Nginx 指令。
 
 本机拓扑控制器使用 `GET /api/internal/edge-gateway-config` 读取已校验配置，原子写入未跟踪的 `EDGE_GATEWAY_CONFIG_DIR`，并通过 `POST /api/internal/edge-gateway-applied` 回报应用结果；两个接口只接受 `TOPOLOGY_CONTROLLER_TOKEN`，API 不访问 Docker socket。
 

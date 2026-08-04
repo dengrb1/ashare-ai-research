@@ -6,6 +6,7 @@ import json
 import re
 import tomllib
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -155,23 +156,87 @@ def render_nginx(hosts: list[dict[str, Any]], settings: Settings | None = None) 
 class EdgeGatewayConfigurationService:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
+        self._syncing = False
 
     def _row(self, db: Session) -> EdgeGatewayConfigurationVersion | None:
         pointer = db.get(ActiveEdgeGatewayConfiguration, "default")
         return db.get(EdgeGatewayConfigurationVersion, pointer.configuration_id) if pointer else None
 
     def public_view(self, db: Session, *, reveal: bool = False) -> dict[str, Any]:
+        self.sync_from_files(db)
         row = self._row(db)
         if row is None:
-            return {"version": 0, "enabled": False, "proxy_hosts": [], "frpc_toml": "", "config_sha256": None, "apply_status": "UNCONFIGURED"}
+            return {"version": 0, "enabled": False, "proxy_hosts": [], "frpc_toml": "", "config_sha256": None, "apply_status": "UNCONFIGURED", "source_sync": False}
         cipher, _ = _cipher(self.settings)
         try:
             toml = cipher.decrypt(row.encrypted_frpc_toml.encode()).decode() if reveal else ""
         except InvalidToken as exc:
             raise EdgeGatewayError("edge gateway configuration cannot be decrypted") from exc
-        return {"configuration_id": row.configuration_id, "version": row.version, "enabled": row.enabled, "proxy_hosts": row.proxy_hosts, "frpc_toml": toml, "config_sha256": row.config_sha256, "apply_status": row.apply_status, "apply_message": row.apply_message, "applied_at": row.applied_at, "applied_sha256": row.applied_sha256}
+        return {"configuration_id": row.configuration_id, "version": row.version, "enabled": row.enabled, "proxy_hosts": row.proxy_hosts, "frpc_toml": toml, "config_sha256": row.config_sha256, "apply_status": row.apply_status, "apply_message": row.apply_message, "applied_at": row.applied_at, "applied_sha256": row.applied_sha256, "source_sync": True}
 
-    def save(self, db: Session, *, enabled: bool, proxy_hosts: list[dict[str, Any]], frpc_toml: str, user_id: str | None) -> dict[str, Any]:
+    def _source_dir(self) -> Path:
+        path = self.settings.edge_gateway_source_dir
+        return path if path.is_absolute() else Path.cwd() / path
+
+    def _read_external(self) -> tuple[str | None, list[dict[str, Any]] | None]:
+        directory = self._source_dir()
+        frpc_path = directory / "frpc.toml"
+        managed_path = directory / "managed.conf"
+        frpc = frpc_path.read_text(encoding="utf-8") if frpc_path.is_file() else None
+        hosts: list[dict[str, Any]] | None = None
+        if managed_path.is_file():
+            text = managed_path.read_text(encoding="utf-8")
+            blocks = re.findall(r"server\\s*\\{(.*?)\\}", text, re.DOTALL)
+            parsed: list[dict[str, Any]] = []
+            for block in blocks:
+                names = re.search(r"server_name\\s+([^;]+);", block)
+                proxy = re.search(r"proxy_pass\\s+(https?)://([^:;]+):(\\d+);", block)
+                if not names or not proxy:
+                    continue
+                domains = names.group(1).split()
+                parsed.append({
+                    "name": domains[0], "domains": domains,
+                    "forward_scheme": proxy.group(1), "forward_host": proxy.group(2),
+                    "forward_port": int(proxy.group(3)),
+                    "ssl_enabled": "listen 443 ssl" in block,
+                    "websocket_support": "Upgrade" in block, "enabled": True, "notes": "",
+                })
+            if parsed:
+                hosts = validate_proxy_hosts(parsed, self.settings)
+        return frpc, hosts
+
+    def sync_from_files(self, db: Session) -> None:
+        if self._syncing:
+            return
+        frpc, external_hosts = self._read_external()
+        if frpc is None and external_hosts is None:
+            return
+        row = self._row(db)
+        if row is None:
+            if frpc is None:
+                return
+            hosts = external_hosts or []
+            try:
+                self._syncing = True
+                self.save(db, enabled=False, proxy_hosts=hosts, frpc_toml=frpc, user_id=None, write_files=False)
+                db.commit()
+            finally:
+                self._syncing = False
+            return
+        cipher, _ = _cipher(self.settings)
+        current_frpc = cipher.decrypt(row.encrypted_frpc_toml.encode()).decode()
+        next_frpc = frpc if frpc is not None else current_frpc
+        next_hosts = external_hosts if external_hosts is not None else row.proxy_hosts
+        if next_frpc == current_frpc and next_hosts == row.proxy_hosts:
+            return
+        try:
+            self._syncing = True
+            self.save(db, enabled=row.enabled, proxy_hosts=next_hosts, frpc_toml=next_frpc, user_id=None, write_files=False)
+            db.commit()
+        finally:
+            self._syncing = False
+
+    def save(self, db: Session, *, enabled: bool, proxy_hosts: list[dict[str, Any]], frpc_toml: str, user_id: str | None, write_files: bool = True) -> dict[str, Any]:
         hosts = validate_proxy_hosts(proxy_hosts, self.settings)
         validate_frpc_toml(frpc_toml, self.settings)
         cipher, key_id = _cipher(self.settings)
@@ -190,7 +255,23 @@ class EdgeGatewayConfigurationService:
             pointer.activated_by = user_id
             pointer.activated_at = datetime.now(UTC)
         db.flush()
+        if write_files:
+            self._write_files(hosts, frpc_toml)
         return self.public_view(db, reveal=True)
+
+    def _write_files(self, hosts: list[dict[str, Any]], frpc_toml: str) -> None:
+        directory = self._source_dir()
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            for name, content in (("frpc.toml", frpc_toml), ("managed.conf", render_nginx(hosts, self.settings))):
+                target = directory / name
+                temporary = target.with_suffix(target.suffix + ".tmp")
+                temporary.write_text(content, encoding="utf-8")
+                temporary.replace(target)
+        except OSError:
+            # The host controller remains the authoritative writer when the
+            # container mount is read-only; the database version is retained.
+            return
 
     def internal_payload(self, db: Session) -> dict[str, Any]:
         view = self.public_view(db, reveal=True)

@@ -50,7 +50,7 @@ export function EdgeGatewayPage() {
   if (!isAdmin) return <Navigate to="/" replace />
   return <div className="page-stack edge-gateway-page">
     <section className="hero-strip"><div><span className="eyebrow">EDGE GATEWAY CONTROL</span><h2>公网边缘网关</h2><p>集中管理 FRP 隧道与受限 Nginx 代理主机。保存后由本机控制器校验并应用。</p></div><div className="hero-stat"><span>配置版本</span><strong>{config?.version || 0}</strong><small>{config?.config_sha256 ? config.config_sha256.slice(0, 12) : '尚未配置'}</small></div><div className="hero-stat"><span>应用状态</span><strong><StatusPill status={config?.apply_status === 'APPLIED' ? 'ACTIVE' : config?.apply_status === 'FAILED' ? 'ERROR' : 'PENDING'} /></strong><small>{config?.applied_at || '等待控制器'}</small></div></section>
-    <ErrorNotice message={error} />{message && <div className="snapshot-isolation">{message}</div>}
+    <ErrorNotice message={error} />{message && <div className="snapshot-isolation">{message}</div>}{config?.source_sync && <div className="snapshot-isolation">已读取配置目录中的最新文件；文件外部修改会在下一次控制器轮询时导入。</div>}
     <form onSubmit={save} className="edge-gateway-layout">
       <Panel title="FRP 客户端 TOML" eyebrow="FRPC CONFIGURATION" action={<div className="row-actions"><button type="button" className="secondary" onClick={() => void validate()} disabled={busy}>校验</button><button type="submit" className="primary" disabled={busy}>{busy ? '保存中…' : '保存配置'}</button></div>}>
         <div className="editor-toolbar"><span>frpc.toml</span><span>{unlockToken ? '已解锁 · 服务端加密保存' : '锁定 · 点击解锁后编辑'}</span></div>

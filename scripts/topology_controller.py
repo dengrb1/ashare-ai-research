@@ -97,6 +97,8 @@ class Controller:
             ),
             "EDGE_FRPC_ENABLED": "true" if bool(desired.get("edge_frpc_enabled")) else "false",
             "EDGE_GATEWAY_CONFIG_DIR": config_dir,
+            "EDGE_GATEWAY_SOURCE_DIR": str(desired.get("edge_gateway_source_dir") or "./docker/edge-gateway"),
+            "EDGE_GATEWAY_CONFIG_SHA256": str(desired.get("edge_gateway_config_sha256") or ""),
             "EDGE_GATEWAY_CONFIG_FILE": f"{config_dir}/managed.conf",
             "EDGE_FRPC_CONFIG_FILE": f"{config_dir}/frpc.toml",
         }
@@ -113,17 +115,19 @@ class Controller:
         return cast(dict[str, object], payload)
 
     def _write_edge_config(self, values: dict[str, str], config: dict[str, object]) -> None:
-        directory = Path(values["EDGE_GATEWAY_CONFIG_DIR"])
-        if not directory.is_absolute():
-            directory = self.root / directory
-        directory.mkdir(parents=True, exist_ok=True)
-        for filename, content in (("frpc.toml", config.get("frpc_toml")), ("managed.conf", config.get("nginx_conf"))):
-            if not isinstance(content, str):
-                raise RuntimeError(f"edge-gateway {filename} is missing")
-            target = directory / filename
-            temporary = target.with_suffix(target.suffix + ".tmp")
-            temporary.write_text(content, encoding="utf-8")
-            temporary.replace(target)
+        directories = [values["EDGE_GATEWAY_CONFIG_DIR"], values["EDGE_GATEWAY_SOURCE_DIR"]]
+        for raw_directory in dict.fromkeys(directories):
+            directory = Path(raw_directory)
+            if not directory.is_absolute():
+                directory = self.root / directory
+            directory.mkdir(parents=True, exist_ok=True)
+            for filename, content in (("frpc.toml", config.get("frpc_toml")), ("managed.conf", config.get("nginx_conf"))):
+                if not isinstance(content, str):
+                    raise RuntimeError(f"edge-gateway {filename} is missing")
+                target = directory / filename
+                temporary = target.with_suffix(target.suffix + ".tmp")
+                temporary.write_text(content, encoding="utf-8")
+                temporary.replace(target)
 
     def _apply_workers(self, base: tuple[str, ...], mode: str, force: bool) -> None:
         if mode == "DUAL":

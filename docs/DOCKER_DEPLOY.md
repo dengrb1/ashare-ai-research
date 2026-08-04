@@ -112,6 +112,8 @@ docker compose -p ashare-ai-src -f compose.yaml exec -T api \
 
 网关配置由「管理 → Edge Gateway」专用页面管理：管理员解锁后编辑 FRP TOML，并用结构化代理主机表维护 Nginx。FRP 内容服务端加密保存，控制器只在配置哈希变化时原子写入并重建网关；无需手工编辑 `.env`。首次启用前设置以下环境变量：
 
+管理员也可以直接编辑 `docker/edge-gateway/frpc.toml` 和 `docker/edge-gateway/managed.conf`（这两个文件默认被 Git 忽略）。管理页面和本机控制器会在读取/轮询时检测文件哈希并导入版本；下一次应用会先校验再覆盖，外部修改不会被静默忽略。
+
 ```env
 EDGE_DOMAIN=
 EDGE_ACME_EMAIL=

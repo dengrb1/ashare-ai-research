@@ -341,6 +341,9 @@ class Controller:
                 "POSTGRES_PASSWORD": postgres_password,
                 "REDIS_PASSWORD": redis_password,
                 "ASHARE_NATIVE_WEB_ROOT": str(self.root / "web"),
+                "EDGE_GATEWAY_SOURCE_DIR": str(self.config / "edge-gateway"),
+                "EDGE_GATEWAY_HOST_SOURCE_DIR": str(self.config / "edge-gateway"),
+                "EDGE_GATEWAY_CONFIG_DIR": str(self.config / "edge-gateway"),
             }
         )
         atomic_write(
@@ -442,6 +445,10 @@ class Controller:
             str(self.source_root / "src") + os.pathsep + environment.get("PYTHONPATH", "")
         )
         environment["ASHARE_NATIVE_WEB_ROOT"] = str(self.root / "web")
+        environment["EDGE_GATEWAY_SOURCE_DIR"] = str(self.config / "edge-gateway")
+        environment["EDGE_GATEWAY_HOST_SOURCE_DIR"] = str(self.config / "edge-gateway")
+        environment["EDGE_GATEWAY_CONFIG_DIR"] = str(self.config / "edge-gateway")
+        (self.config / "edge-gateway").mkdir(parents=True, exist_ok=True)
         services: list[dict[str, object]] = []
         self.set_desired_state("RUNNING")
         try:

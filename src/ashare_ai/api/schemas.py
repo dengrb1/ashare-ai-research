@@ -266,6 +266,7 @@ class EdgeGatewayConfigurationResponse(BaseModel):
     apply_message: str | None = None
     applied_at: datetime | None = None
     applied_sha256: str | None = None
+    source_sync: bool = False
 
 
 class EdgeGatewayValidationResponse(BaseModel):

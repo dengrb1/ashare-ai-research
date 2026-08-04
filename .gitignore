@@ -9,6 +9,8 @@ htmlcov/
 .env
 .env.docker
 .secrets/
+docker/edge-gateway/frpc.toml
+docker/edge-gateway/managed.conf
 .codex/config.toml
 data/
 artifacts/

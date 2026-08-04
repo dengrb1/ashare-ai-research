@@ -96,3 +96,5 @@ ashare-native-linux.sh doctor --json
 执行中的实际管理命令才会暂时锁定同组按钮，避免重复提交。
 
 GUI 不承载服务语义，只调用控制器并渲染状态、日志和命令输出。
+
+Edge Gateway 与 Docker 版使用相同的 API、校验、版本和回滚契约。Linux 原生版的 FRP/Nginx 文件位于 `<runtime>/config/edge-gateway`，管理页面可读取直接编辑的 `frpc.toml` 和 `managed.conf`，保存也会通过原生运行组写回该目录。
