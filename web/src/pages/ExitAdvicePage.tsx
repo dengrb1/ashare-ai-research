@@ -18,6 +18,7 @@ function alertLabel(types?: string[]) {
 export function ExitAdvicePage() {
   const [assets, setAssets] = useState<AssetState | null>(null)
   const [rows, setRows] = useState<TradeAdviceMonitor[]>([])
+  const [names, setNames] = useState<Map<string, string>>(new Map())
   const [drafts, setDrafts] = useState<Record<string, { buy: string; sell: string }>>({})
   const [selected, setSelected] = useState('')
   const [loading, setLoading] = useState(true)
@@ -27,9 +28,18 @@ export function ExitAdvicePage() {
     let active = true
     const load = async () => {
       try {
-        const [nextAssets, monitors] = await Promise.all([api.assets(), api.tradeAdviceMonitors()])
+        const nextAssets = await api.assets()
+        const symbols = nextAssets?.watchlist || []
+        // 名称是尽力而为：行情不可用时退回仅显示代码，不阻塞页面。
+        const [monitors, quotes] = await Promise.all([
+          api.tradeAdviceMonitors(),
+          symbols.length ? api.quotes(symbols).catch(() => []) : Promise.resolve([])
+        ])
         if (!active) return
         setAssets(nextAssets); setRows(monitors)
+        const nameMap = new Map<string, string>()
+        quotes.forEach(q => { if (q.name) nameMap.set(q.symbol, q.name) })
+        setNames(nameMap)
         setDrafts(Object.fromEntries(monitors.map(item => [item.symbol, { buy: item.manual_buy_price?.toString() || '', sell: item.manual_sell_price?.toString() || '' }])))
         setSelected(current => monitors.some(item => item.symbol === current) ? current : (monitors[0]?.symbol || nextAssets?.watchlist[0] || ''))
         setError('')
@@ -46,6 +56,8 @@ export function ExitAdvicePage() {
   const row = bySymbol.get(symbol)
   const enabled = row?.enabled || false
   const draft = drafts[symbol] || { buy: '', sell: '' }
+  const nameFor = (code: string) => names.get(code) || code
+  const detailTitle = (code: string) => names.get(code) ? `${names.get(code)} ${code}` : code
 
   async function save(symbol: string, enabled: boolean, useAi = false) {
     const current = bySymbol.get(symbol)
@@ -68,7 +80,7 @@ export function ExitAdvicePage() {
           {watchlist.map(item => {
             const itemRow = bySymbol.get(item)
             return <button key={item} className={selected === item ? 'active' : ''} onClick={() => setSelected(item)}>
-              <div><strong>{item}</strong><small>{itemRow?.enabled ? `AI 买入 ${numberValue(itemRow.ai_buy_price)} · 卖出 ${numberValue(itemRow.ai_sell_price)}` : '未开启自动建议'}</small></div>
+              <div><strong>{nameFor(item)}</strong><small>{item}{itemRow?.enabled ? ` · AI 买入 ${numberValue(itemRow.ai_buy_price)} · 卖出 ${numberValue(itemRow.ai_sell_price)}` : ' · 未开启自动建议'}</small></div>
               <span className={`monitor-state ${itemRow?.enabled ? 'enabled' : ''}`}><i />{itemRow?.enabled ? '监控中' : '已暂停'}</span>
             </button>
           })}
@@ -79,7 +91,7 @@ export function ExitAdvicePage() {
           !symbol ? <Empty title="未选择标的" /> :
             <div className="page-stack">
               <div className="split-row">
-                <div><strong>提醒设置</strong><p className="form-hint">{symbol}{row?.generated_at ? ` · 当日建议：${formatTime(row.generated_at)}` : ' · 开启后将在下一个交易日 09:30 后生成建议'}</p></div>
+                <div><strong>{detailTitle(symbol)}</strong><p className="form-hint">{symbol}{row?.generated_at ? ` · 当日建议：${formatTime(row.generated_at)}` : ' · 开启后将在下一个交易日 09:30 后生成建议'}</p></div>
                 <label className="automatic-switch"><input type="checkbox" checked={enabled} onChange={event => void save(symbol, event.target.checked)} /><i aria-hidden="true" /><span>开启自动建议</span></label>
               </div>
               {enabled && <div className="summary-grid compact">

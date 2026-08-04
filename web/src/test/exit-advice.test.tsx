@@ -26,6 +26,7 @@ describe('trade advice page', () => {
     const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
       if (url.endsWith('/assets')) return jsonResponse({ watchlist: ['600519.SH'], positions: [] })
+      if (url.includes('/market/quotes')) return jsonResponse([{ symbol: '600519.SH', name: '贵州茅台', price: 1500, change_pct: 1.2 }])
       if (url.endsWith('/trade-advice-monitors') && init?.method === 'PUT') {
         const body = JSON.parse(String(init.body))
         savedBodies.push(body)
@@ -40,7 +41,8 @@ describe('trade advice page', () => {
 
     render(<ExitAdvicePage />)
 
-    expect(await screen.findByText('600519.SH')).toBeInTheDocument()
+    expect(await screen.findByText('贵州茅台')).toBeInTheDocument()
+    expect(screen.getAllByText(/600519\.SH/).length).toBeGreaterThan(0)
     expect(screen.getByText('AI 买入目标')).toBeInTheDocument()
     expect(screen.getByText('基于最新研究生成的模拟交易建议。')).toBeInTheDocument()
 
