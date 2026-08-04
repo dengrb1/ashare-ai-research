@@ -662,8 +662,17 @@ td small { font-size: 11px; }
 .advice-list > button, .chat-thread-list > button { display:flex; justify-content:space-between; gap:12px; text-align:left; padding:12px; border:1px solid var(--line); background:var(--surface-soft); border-radius:10px; color:var(--text); }
 .advice-list > button.active, .chat-thread-list > button.active { border-color:var(--accent); background:var(--accent-soft); }
 .advice-list > button > div { display:flex; flex-direction:column; gap:4px; align-items:flex-start; }
+.advice-list > button { align-items:center; }
 .advice-summary { padding:14px; border:1px solid var(--line); border-radius:10px; background:var(--surface-soft); }
-.advice-summary p { margin:8px 0 0; line-height:1.7; }
+.advice-summary > strong { display:block; font-size:12px; }
+.advice-summary p { margin:6px 0 0; line-height:1.7; }
+.split-row { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; }
+.split-row > div:first-child { min-width:0; }
+.split-row p { margin:4px 0 0; }
+.form-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px; }
+.form-grid label { margin:0; }
+.summary-grid.compact > div { padding:12px 14px; }
+.summary-grid.compact strong { min-height:22px; font-size:15px; }
 .chat-controls { display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-bottom:14px; }
 .chat-controls label { display:flex; flex-direction:column; gap:5px; }
 .chat-controls .toggle-line { flex-direction:row; align-items:center; min-height:44px; }
@@ -791,6 +800,8 @@ small, .eyebrow, .kicker, label, th, td, .nav-group, .topbar p, .disclaimer { fo
   .notification-panel { position:fixed; top:72px; right:12px; left:12px; width:auto; max-height:calc(100vh - 88px); }
   .chat-stage-strip { gap:5px; }
   .chat-stage { font-size:10px; }
+  .split-row { flex-direction:column; }
+  .form-grid { grid-template-columns:1fr; }
 }
 
 @media (max-width: 1180px) {
