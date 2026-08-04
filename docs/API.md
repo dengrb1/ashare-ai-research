@@ -124,6 +124,8 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 通知 | GET | `/api/v1/notifications/{notification_id}` | 登录、资源归属 |
 | 通知 | POST | `/api/v1/notifications/read` | 写入、幂等 |
 | 通知 | POST | `/api/v1/notifications/read-all` | 写入、幂等 |
+| 通知 | DELETE | `/api/v1/notifications/{notification_id}` | 写入、资源归属 |
+| 通知 | POST | `/api/v1/notifications/clear` | 写入、幂等 |
 | 推送设备 | POST | `/api/v1/devices` | App Bearer、注册或更新设备 |
 | 推送设备 | DELETE | `/api/v1/devices/{device_id}` | App Bearer、资源归属 |
 | 推送回执 | POST | `/api/v1/devices/{device_id}/deliveries` | App Bearer、资源归属 |
@@ -176,6 +178,8 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 通用运行 | GET | `/api/v1/runs/activity` | 登录、cursor 分页 |
 | 通用运行 | GET | `/api/v1/runs/{run_id}` | 登录 |
 | 通用运行 | GET | `/api/v1/runs/{run_id}/audit` | 登录 |
+| 通用运行 | DELETE | `/api/v1/runs/{run_id}` | 写入、资源归属 |
+| 通用运行 | POST | `/api/v1/runs/clear-completed` | 管理员、幂等 |
 | 回测 | POST | `/api/v1/backtests` | 写入 |
 | 回测 | GET | `/api/v1/backtests` | 登录 |
 | 回测 | GET | `/api/v1/backtests/{backtest_id}` | 登录 |
@@ -314,7 +318,7 @@ Web 登录。请求体为 `LoginRequest`：
 
 `GET /api/v1/buy-entry-monitors` 按 `updated_at desc, monitor_id desc` 返回当前用户的监控资源；`PUT /api/v1/buy-entry-monitors` 请求 `{"symbol":"600519.SH","enabled":true}` 且要求 `Idempotency-Key`。启用时标的必须在用户自选中。系统仅把已完成正式研究、评分合格且 Trade Plan 结果为 `BUY` 的次交易日入场区间转为监控；首次进入区间时通知用户并关联模拟方案，不会买入。资产页会显示有效日、入场区间和触发/到期状态。
 
-通知接口全部按用户隔离。`GET /notifications` 使用稳定的 URL-safe `cursor`，`limit` 范围 1-200，支持 `unread_only=true`；响应为 `{items,next_cursor}`。`GET /notifications/summary` 只返回未读计数、高风险未读计数和最多 5 条未读摘要，适合可见页面轮询。两个已读写接口均要求 `Idempotency-Key`。已读通知保留 90 天，未读保留 180 天，由后台分批清理。
+通知接口全部按用户隔离。`GET /notifications` 使用稳定的 URL-safe `cursor`，`limit` 范围 1-200，支持 `unread_only=true`；响应为 `{items,next_cursor}`。`GET /notifications/summary` 只返回未读计数、高风险未读计数和最多 5 条未读摘要，适合可见页面轮询。已读/未读接口（`POST /notifications/read`、`POST /notifications/read-all`）均要求 `Idempotency-Key`。`DELETE /notifications/{notification_id}` 删除当前用户的一条通知并返回 `204`（不存在返回 `404`，天然幂等）；`POST /notifications/clear` 要求 `Idempotency-Key`，永久清空当前用户全部通知并返回最新 `NotificationSummaryResponse`，以便前端刷新角标。已读通知保留 90 天，未读保留 180 天，由后台分批清理。
 
 原生客户端使用 `POST /devices` 绑定小米推送 `regId`。请求包含稳定的 `installation_id`、`registration_id`、`provider=MIPUSH` 及可选设备版本信息；响应不回传 `registration_id`。服务端使用 `PERSONAL_DATA_ENCRYPTION_KEYS` 加密保存注册 ID，并由维护任务消费事务投递表。注销使用 `DELETE /devices/{device_id}`。客户端收到或打开通知后，可向 `/devices/{device_id}/deliveries` 提交 `{notification_id,status}`，其中 `status` 为 `DELIVERED` 或 `OPENED`。所有设备与回执操作均校验当前用户归属。
 
@@ -462,7 +466,7 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 
 `PUT /api/v1/admin/system-settings` 接收 `SystemSettingsRequest` 的任意非空子集，支持 `Idempotency-Key`。每次成功保存均创建一个新的不可变 PostgreSQL 版本；同一个键与同一请求体重试不会创建第二个版本，同键不同请求体返回 `409`。可编辑公开字段包括：
 
-- `research_execution_mode=SERIAL|DUAL`、`llm_agent_max_concurrency=1..4` 与 `edge_gateway_enabled`；
+- `research_execution_mode=SERIAL|DUAL`、`llm_agent_max_concurrency=1..4`、`edge_gateway_enabled` 与 `auto_restart_enabled`；
 - 对象存储 endpoint/bucket/TLS，SearXNG 地址/超时/结果数；
 - 行情、金融检索缓存与并发/限流；
 - 每日研究启动与重试间隔、旧版重试窗口兼容值、Worker lease、AKShare 参数、数据包模式、演示数据开关、最低上市日和成交额；旧版窗口仅保持读取/写入兼容，自动补数统一在权威交易日历确定的下一交易日 09:25（上海时间）截止；
@@ -479,6 +483,8 @@ docker compose -p ashare-ai-src -f compose.yaml --profile dual-research up -d --
 ```
 
 其他系统设置会在下一次 API 请求、Worker 轮询或任务启动时加载。默认不会创建 `edge-gateway`。安装本机拓扑控制器后，保存 `research_execution_mode` 或 `edge_gateway_enabled` 会由该受限的本机计划任务自动同步对应的 Compose profile；API 仍不拥有 Docker socket。
+
+`auto_restart_enabled` 默认关闭：此时执行拓扑变化仍需管理员手动运行页面返回的重启命令。开启后，本机拓扑控制器会在检测到“已保存执行拓扑 ≠ Worker 实际加载拓扑”（`restart_required=true`）时自动 `--force-recreate` 重建 `job-worker` 与 DUAL 模式下的两个 `research-worker`，使新拓扑在启动时生效，无需手动重启；`edge-gateway` 只按开关启停、不强制重建。控制器状态文件记录最近一次“已强制应用”的拓扑哈希，因此同一拓扑只强制重建一次，不会因 Worker 心跳延迟或手动 `docker stop` 反复重建。未安装拓扑控制器时该开关不产生效果，页面提示需先安装。内部接口 `GET /api/internal/topology-desired` 除 `research_execution_mode` 与 `edge_gateway_enabled` 外，返回 `auto_restart_enabled`、`restart_required` 与 `topology_sha256` 供控制器决策，仅限持有 `TOPOLOGY_CONTROLLER_TOKEN` 的本机任务访问。
 
 ## 7. 研究结果、报告和 Trade Plan
 
@@ -622,6 +628,14 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 ### `GET /api/v1/runs/{run_id}/audit`
 
 返回 `AuditEventResponse[]`，每项包含 `event_id`、`run_id`、`event_type`、`severity`、`message`、`details` 和 `created_at`。审计数据只按需读取，不应写入普通移动端缓存。
+
+### `DELETE /api/v1/runs/{run_id}`
+
+删除一条运行记录及其全部衍生数据，返回 `204`。运行必须处于终态（`SUCCEEDED|FAILED|CANCELLED|FUSED|UNAVAILABLE`），活动运行返回 `409`；当前用户必须是运行归属者或管理员，否则返回 `404`。级联删除范围：审计事件、Agent 调用、证据、评分、候选、组合、研究报告、买入方案、其买入区间监控与关联通知、卖出建议；数据湖中的不可变快照清单与回测记录只清除 `run_id` 引用而保留其对象内容。重复删除返回 `404`（幂等）。
+
+### `POST /api/v1/runs/clear-completed`
+
+管理员批量清理终态运行，要求 `Idempotency-Key`。请求体可选 `{"before":"YYYY-MM-DD"}`，省略时清理全部终态运行；提供时只删除 `started_at` 早于该日期的运行。级联范围与单条删除一致，活动运行永不清理。成功返回 `{"deleted":n,"before":...}`；相同键重放返回 `200` 且不再重复删除。
 
 ## 9. 快照和回测
 

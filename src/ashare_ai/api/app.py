@@ -68,6 +68,8 @@ from ashare_ai.api.auth import (
     rotate_refresh_token,
 )
 from ashare_ai.api.dependencies import get_auth_context, get_db, get_write_context
+from ashare_ai.api.run_cleanup import TERMINAL_RUN_STATUSES
+from ashare_ai.api.run_cleanup import delete_run as cascade_delete_run
 from ashare_ai.api.schemas import (
     MAX_RESEARCH_SYMBOLS,
     MAX_TRADE_PLAN_SYMBOLS,
@@ -134,6 +136,8 @@ from ashare_ai.api.schemas import (
     ResearchSettingsResponse,
     RunActivityItem,
     RunActivityResponse,
+    RunCleanupResponse,
+    RunClearRequest,
     RunListResponse,
     RunResponse,
     ScoreResponse,
@@ -1458,6 +1462,57 @@ def mark_all_notifications_read(
     )
 
 
+@app.delete("/api/v1/notifications/{notification_id}", status_code=204)
+def delete_notification(
+    notification_id: str, db: DbSession, context: Writer
+) -> Response:
+    from ashare_ai.storage.models import NotificationRow
+
+    row = db.scalar(
+        select(NotificationRow).where(
+            NotificationRow.notification_id == notification_id,
+            NotificationRow.user_id == context.user.user_id,
+        )
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="notification not found")
+    db.delete(row)
+    db.commit()
+    return Response(status_code=204)
+
+
+@app.post("/api/v1/notifications/clear", response_model=NotificationSummaryResponse)
+def clear_notifications(
+    db: DbSession,
+    context: Writer,
+    idempotency_key: IdempotencyKey = None,
+) -> NotificationSummaryResponse:
+    if idempotency_key is None:
+        raise HTTPException(status_code=400, detail="Idempotency-Key is required")
+    route = "/api/v1/notifications/clear"
+    fingerprint = _idempotency_fingerprint(context.user.user_id, route, idempotency_key, {})
+    replay = _find_idempotency(
+        db, user_id=context.user.user_id, route=route, fingerprint=fingerprint
+    )
+    if replay is None:
+        NotificationService(db).clear_all(context.user.user_id)
+        _remember_idempotency(
+            db,
+            user_id=context.user.user_id,
+            route=route,
+            fingerprint=fingerprint,
+            resource_type="NOTIFICATION_CLEAR",
+            resource_id=context.user.user_id,
+        )
+        db.commit()
+    summary = NotificationService(db).summary(context.user.user_id)
+    return NotificationSummaryResponse(
+        unread_count=summary["unread_count"],
+        high_risk_unread_count=summary["high_risk_unread_count"],
+        latest=[NotificationResponse.model_validate(item) for item in summary["latest"]],
+    )
+
+
 @app.get("/api/v1/ai/models", response_model=AIModelOptionsResponse)
 def ai_model_options(db: DbSession, _: Current) -> AIModelOptionsResponse:
     runtime = ModelConfigurationService().resolve(db)
@@ -2400,9 +2455,13 @@ def topology_desired(request: Request, db: DbSession) -> dict[str, str | bool]:
     if not hmac.compare_digest(received, expected):
         raise HTTPException(status_code=403, detail="topology controller is not authorized")
     runtime = SystemConfigurationService().resolve(db)
+    _, restart_required, _, _ = _system_worker_snapshot(str(runtime.topology_sha256))
     return {
         "research_execution_mode": runtime.settings.research_execution_mode,
         "edge_gateway_enabled": runtime.settings.edge_gateway_enabled,
+        "auto_restart_enabled": runtime.settings.auto_restart_enabled,
+        "restart_required": restart_required,
+        "topology_sha256": runtime.topology_sha256,
     }
 
 
@@ -3758,6 +3817,59 @@ def run_audit(run_id: str, db: DbSession, context: Current) -> list[AuditEventRe
     if row is None or not _owns(row, context):
         raise HTTPException(status_code=404, detail="run not found")
     return [AuditEventResponse.model_validate(item) for item in repository.audit(run_id)]
+
+
+@app.delete("/api/v1/runs/{run_id}", status_code=204)
+def delete_run(run_id: str, db: DbSession, context: Writer) -> Response:
+    row = db.scalar(select(JobRun).where(JobRun.run_id == run_id))
+    if row is None or not _owns(row, context):
+        raise HTTPException(status_code=404, detail="run not found")
+    if row.status not in TERMINAL_RUN_STATUSES:
+        raise HTTPException(status_code=409, detail="active runs cannot be deleted")
+    cascade_delete_run(db, row)
+    db.commit()
+    return Response(status_code=204)
+
+
+@app.post("/api/v1/runs/clear-completed", response_model=RunCleanupResponse)
+def clear_completed_runs(
+    payload: RunClearRequest,
+    db: DbSession,
+    context: Writer,
+    idempotency_key: IdempotencyKey = None,
+) -> RunCleanupResponse:
+    _admin(context)
+    if idempotency_key is None:
+        raise HTTPException(status_code=400, detail="Idempotency-Key is required")
+    request = payload or RunClearRequest()
+    route = "/api/v1/runs/clear-completed"
+    fingerprint = _idempotency_fingerprint(
+        context.user.user_id,
+        route,
+        idempotency_key,
+        request.model_dump(mode="json"),
+    )
+    replay = _find_idempotency(
+        db, user_id=context.user.user_id, route=route, fingerprint=fingerprint
+    )
+    if replay is not None:
+        return RunCleanupResponse(deleted=0, before=request.before)
+    statement = select(JobRun).where(JobRun.status.in_(TERMINAL_RUN_STATUSES))
+    if request.before is not None:
+        statement = statement.where(JobRun.started_at < request.before)
+    runs = list(db.scalars(statement).all())
+    for run in runs:
+        cascade_delete_run(db, run)
+    _remember_idempotency(
+        db,
+        user_id=context.user.user_id,
+        route=route,
+        fingerprint=fingerprint,
+        resource_type="RUN_CLEANUP",
+        resource_id=str(request.before or "all"),
+    )
+    db.commit()
+    return RunCleanupResponse(deleted=len(runs), before=request.before)
 
 
 @app.post(

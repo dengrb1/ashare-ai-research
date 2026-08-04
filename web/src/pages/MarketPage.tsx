@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { CandlestickChart } from '../components/CandlestickChart'
 import { MarketClosedNotice } from '../components/MarketClosedNotice'
-import { ErrorNotice, formatAmount, formatNumber, Loading, Panel } from '../components/Ui'
+import { Empty, ErrorNotice, formatAmount, formatNumber, Loading, Panel } from '../components/Ui'
 import { usePageRefresh } from '../context/RefreshContext'
 import { useMarket, useQuoteSubscription, type KlineCacheEntry } from '../context/MarketContext'
 import { getKlineChunkWindow, getKlineRangePlan, klineCoverage, KLINE_PERIODS, KLINE_RANGES, loadedRangeLabel, trimBarsToRange } from '../marketKlines'
@@ -13,7 +13,7 @@ const INTRADAY_REFRESH_MS = 30 * 1000
 
 export function MarketPage() {
   const { watchlist, quotes, addWatch, removeWatch, source, delayed, updatedAt, refreshSymbol, refreshRemaining, getKline, loadKline } = useMarket()
-  const [symbol, setSymbol] = useState(watchlist[0] || '600519.SH')
+  const [symbol, setSymbol] = useState('')
   const [search, setSearch] = useState('')
   const [period, setPeriod] = useState('day')
   const [range, setRange] = useState<KlineRange>('1m')
@@ -24,6 +24,12 @@ export function MarketPage() {
   const [coverageMessage, setCoverageMessage] = useState('')
   const [error, setError] = useState('')
   const [rangeClock, setRangeClock] = useState(() => Date.now())
+  // The persisted watchlist arrives asynchronously after mount.  Adopt its first
+  // entry instead of a hardcoded fallback so a page refresh never silently
+  // switches the chart to an unrelated stock (e.g. 600519.SH).
+  useEffect(() => {
+    setSymbol((current) => current || watchlist[0] || '')
+  }, [watchlist])
   useQuoteSubscription([symbol])
   const quote = quotes[symbol]
   const isWatched = watchlist.includes(symbol)
@@ -42,6 +48,7 @@ export function MarketPage() {
   }), [loadKline, period, range, symbol])
 
   const forceRefresh = useCallback(async () => {
+    if (!symbol) return
     setLoading(true)
     setError('')
     try {
@@ -79,6 +86,14 @@ export function MarketPage() {
   }, [period])
 
   useEffect(() => {
+    if (!symbol) {
+      setEntry(undefined)
+      setError('')
+      setNoMoreEarlier(false)
+      setCoverageMessage('')
+      setLoading(false)
+      return
+    }
     let active = true
     const cached = getKline(symbol, period, { range })
     setEntry(cached)
@@ -129,7 +144,7 @@ export function MarketPage() {
   }, [getKline, initialChunk, loadWindow, period, plan, range, symbol])
 
   const loadEarlier = useCallback(async () => {
-    if (loadingEarlier || coverage.complete || noMoreEarlier) return
+    if (!symbol || loadingEarlier || coverage.complete || noMoreEarlier) return
     const earlier = getKlineChunkWindow(period, plan, entry?.requestedStart || initialChunk?.start)
     if (!earlier) {
       setNoMoreEarlier(true)
@@ -153,7 +168,7 @@ export function MarketPage() {
     } finally {
       setLoadingEarlier(false)
     }
-  }, [coverage.complete, entry?.bars.length, entry?.requestedStart, initialChunk?.start, loadWindow, loadingEarlier, noMoreEarlier, period, plan])
+  }, [coverage.complete, entry?.bars.length, entry?.requestedStart, initialChunk?.start, loadWindow, loadingEarlier, noMoreEarlier, period, plan, symbol])
 
   const stats = useMemo(() => {
     if (!quote) return []
@@ -192,9 +207,9 @@ export function MarketPage() {
     <div className="market-main">
       <Panel className="instrument-panel">
         <div className="instrument-head">
-          <div><span className="eyebrow">{symbol}</span><h2>{quote?.name || symbol}</h2></div>
-          <div className={`instrument-price ${(quote?.change_pct || 0) >= 0 ? 'price-up' : 'price-down'}`}><strong>{formatNumber(quote?.price)}</strong><span>{quote ? `${quote.change_pct >= 0 ? '+' : ''}${formatNumber(quote.change)}  ${quote.change_pct >= 0 ? '+' : ''}${formatNumber(quote.change_pct)}%` : '等待行情'}</span></div>
-          <button className={isWatched ? 'secondary active' : 'secondary'} onClick={() => { void (isWatched ? removeWatch(symbol) : addWatch(symbol)).catch(() => undefined) }}>{isWatched ? '★ 已自选' : '☆ 加自选'}</button>
+          <div><span className="eyebrow">{symbol || 'NO SYMBOL'}</span><h2>{symbol ? (quote?.name || symbol) : '未选择证券'}</h2></div>
+          {symbol && <div className={`instrument-price ${(quote?.change_pct || 0) >= 0 ? 'price-up' : 'price-down'}`}><strong>{formatNumber(quote?.price)}</strong><span>{quote ? `${quote.change_pct >= 0 ? '+' : ''}${formatNumber(quote.change)}  ${quote.change_pct >= 0 ? '+' : ''}${formatNumber(quote.change_pct)}%` : '等待行情'}</span></div>}
+          {symbol && <button className={isWatched ? 'secondary active' : 'secondary'} onClick={() => { void (isWatched ? removeWatch(symbol) : addWatch(symbol)).catch(() => undefined) }}>{isWatched ? '★ 已自选' : '☆ 加自选'}</button>}
         </div>
         <div className="quote-stats">{stats.map((item) => <div key={item.label}><span>{item.label}</span><strong>{item.amount ? formatAmount(item.value) : `${formatNumber(item.value)}${item.percent && item.value !== undefined ? '%' : ''}`}</strong></div>)}</div>
       </Panel>
@@ -212,7 +227,7 @@ export function MarketPage() {
         </div>
         <ErrorNotice message={error} />
         {coverageMessage && <div className="kline-coverage-warning" role="status">{coverageMessage}</div>}
-        {loading && !bars.length ? <Loading label="加载后复权序列" /> : <CandlestickChart key={`${symbol}:${period}:${range}`} bars={bars} period={period} hasEarlier={!coverage.complete && !noMoreEarlier} loadingEarlier={loadingEarlier} onLoadEarlier={loadEarlier} />}
+        {symbol ? (loading && !bars.length ? <Loading label="加载后复权序列" /> : <CandlestickChart key={`${symbol}:${period}:${range}`} bars={bars} period={period} hasEarlier={!coverage.complete && !noMoreEarlier} loadingEarlier={loadingEarlier} onLoadEarlier={loadEarlier} />) : <Empty title="尚未选择证券" description="在上方输入代码定位，或从自选行情中选择一支股票。" />}
       </Panel>
     </div>
   </div>

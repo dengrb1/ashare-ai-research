@@ -189,3 +189,96 @@ def test_manual_exit_replays_idempotently_and_notifications_stay_user_scoped(mon
     finally:
         app.dependency_overrides.clear()
         session.close()
+
+
+def test_notifications_delete_and_clear_are_owner_scoped_and_idempotent(monkeypatch) -> None:
+    session, now = _database()
+    alice = UserAccount(
+        user_id="alice-clear",
+        username="alice-clear",
+        password_hash="hash",
+        role="USER",
+        enabled=True,
+        session_version=1,
+        created_at=now,
+        updated_at=now,
+    )
+    bob = UserAccount(
+        user_id="bob-clear",
+        username="bob-clear",
+        password_hash="hash",
+        role="USER",
+        enabled=True,
+        session_version=1,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add_all((alice, bob))
+    session.commit()
+
+    contexts = [_context(alice)]
+
+    def override_db():
+        yield session
+
+    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_auth_context] = lambda: contexts[0]
+    app.dependency_overrides[get_write_context] = lambda: contexts[0]
+    try:
+        client = TestClient(app)
+        notices = NotificationService(session)
+        alice_a = notices.create(
+            user_id=alice.user_id,
+            notification_type="SYSTEM",
+            severity="INFO",
+            title="Alice 一",
+            body="first",
+            dedupe_key="alice-clear-1",
+            now=now,
+        )
+        notices.create(
+            user_id=alice.user_id,
+            notification_type="SYSTEM",
+            severity="WARNING",
+            title="Alice 二",
+            body="second",
+            dedupe_key="alice-clear-2",
+            now=now + timedelta(minutes=1),
+        )
+        bob_notice = notices.create(
+            user_id=bob.user_id,
+            notification_type="SYSTEM",
+            severity="INFO",
+            title="Bob 私有",
+            body="private",
+            dedupe_key="bob-clear-1",
+            now=now + timedelta(minutes=2),
+        )
+        session.commit()
+
+        # Alice cannot delete Bob's notification.
+        bob_delete = client.delete(f"/api/v1/notifications/{bob_notice.notification_id}")
+        assert bob_delete.status_code == 404
+        assert client.delete(f"/api/v1/notifications/{alice_a.notification_id}").status_code == 204
+        assert client.delete(f"/api/v1/notifications/{alice_a.notification_id}").status_code == 404
+        assert [item["title"] for item in client.get("/api/v1/notifications").json()["items"]] == [
+            "Alice 二"
+        ]
+
+        # Clear-all requires Idempotency-Key and replays once.
+        assert client.post("/api/v1/notifications/clear").status_code == 400
+        headers = {"Idempotency-Key": "alice-clear-once"}
+        cleared = client.post("/api/v1/notifications/clear", headers=headers)
+        assert cleared.status_code == 200
+        assert cleared.json()["unread_count"] == 0
+        assert client.post("/api/v1/notifications/clear", headers=headers).status_code == 200
+        assert client.get("/api/v1/notifications").json()["items"] == []
+        assert session.get(type(bob_notice), bob_notice.notification_id) is not None
+
+        contexts[0] = _context(bob)
+        assert [item["title"] for item in client.get("/api/v1/notifications").json()["items"]] == [
+            "Bob 私有"
+        ]
+    finally:
+        app.dependency_overrides.clear()
+        session.close()

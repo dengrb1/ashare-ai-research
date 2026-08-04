@@ -205,7 +205,10 @@ export function SystemSettingsPage() {
       if (!Object.keys(payload).length) { setMessage('没有需要保存的修改'); return }
       const settings = await api.saveSystemSettings(payload, unlockToken)
       setCurrent(settings); setForm({ ...settings.values }); setSecrets({})
-      setMessage(`系统配置 v${settings.version} 已保存。${settings.restart_required ? '执行拓扑待 Docker 重启后生效。' : '设置将在下一次请求或任务启动时生效。'}`)
+      const restartNote = settings.restart_required
+        ? (Boolean(settings.values.auto_restart_enabled) ? '已启用自动重启，本机拓扑控制器将自动重建 Worker。' : '执行拓扑待 Docker 重启后生效。')
+        : '设置将在下一次请求或任务启动时生效。'
+      setMessage(`系统配置 v${settings.version} 已保存。${restartNote}`)
     } catch (reason) {
       if (reason instanceof ApiError && reason.code === 'SYSTEM_SETTINGS_LOCKED') {
         lock(); setUnlockOpen(true)
@@ -275,9 +278,10 @@ export function SystemSettingsPage() {
         {loading ? <Loading /> : <form className="run-form" onSubmit={save}>
           <label>研究执行模式<select disabled={!unlocked || busy} value={String(form.research_execution_mode || 'SERIAL')} onChange={(event) => update('research_execution_mode', event.target.value)}><option value="SERIAL">SERIAL：job-worker 串行处理全部任务</option><option value="DUAL">DUAL：两个 research-worker 并行处理研究</option></select></label>
           <label className="system-checkbox">公网边缘网关（FRP）<input disabled={!unlocked || busy} type="checkbox" checked={Boolean(form.edge_gateway_enabled)} onChange={(event) => update('edge_gateway_enabled', event.target.checked)} /><small className="form-hint">默认关闭；本机拓扑控制器会在保存后启动或停止 edge-gateway。</small></label>
+          <label className="system-checkbox">保存后自动重启 Docker<input disabled={!unlocked || busy} type="checkbox" checked={Boolean(form.auto_restart_enabled)} onChange={(event) => update('auto_restart_enabled', event.target.checked)} /><small className="form-hint">启用后，本机拓扑控制器会在执行拓扑变化时自动重建 Worker，无需手动执行重启命令。需先安装拓扑控制器。</small></label>
           <label>每项研究 LLM Agent 并发（1–4）<input disabled={!unlocked || busy} type="number" min={1} max={4} value={Number(form.llm_agent_max_concurrency || 4)} onChange={(event) => update('llm_agent_max_concurrency', Number(event.target.value))} /></label>
           <div className="search-result-meta"><div><span>已保存模式</span><strong>{String(current?.values.research_execution_mode || 'SERIAL')}</strong></div><div><span>实际加载模式</span><strong>{current?.actual_loaded_mode || 'UNKNOWN'}</strong></div><div><span>双模式 LLM 上限</span><strong>{2 * Number(form.llm_agent_max_concurrency || 4)}</strong></div><div><span>网关容量</span><strong>{String(current?.read_only_environment.model_gateway_max_concurrency ?? '—')}</strong></div></div>
-          {current?.restart_required && <div className="snapshot-isolation">配置已保存，待 Docker 重启生效。<code>{current.compose_restart_command}</code></div>}
+          {current?.restart_required && <div className="snapshot-isolation">{Boolean(current.values.auto_restart_enabled) ? '配置已保存，自动重启已启用；本机拓扑控制器将自动重建 Worker 使新执行拓扑生效。' : <>配置已保存，待 Docker 重启生效。<code>{current.compose_restart_command}</code></>}</div>}
           <button className="primary" disabled={!unlocked || busy}>{busy ? '保存中…' : '保存执行设置'}</button>
         </form>}
       </Panel>

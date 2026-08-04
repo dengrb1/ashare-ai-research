@@ -171,6 +171,7 @@ class SystemSettingsRequest(BaseModel):
 
     research_execution_mode: Literal["SERIAL", "DUAL"] | None = None
     edge_gateway_enabled: bool | None = None
+    auto_restart_enabled: bool | None = None
     llm_agent_max_concurrency: int | None = Field(default=None, ge=1, le=4)
     object_store_endpoint: str | None = Field(default=None, max_length=2048)
     object_store_bucket: str | None = Field(default=None, min_length=1, max_length=255)
@@ -1086,6 +1087,15 @@ class RunActivityItem(RunResponse):
 class RunActivityResponse(BaseModel):
     items: list[RunActivityItem]
     next_cursor: str | None = None
+
+
+class RunClearRequest(BaseModel):
+    before: date | None = None
+
+
+class RunCleanupResponse(BaseModel):
+    deleted: int = Field(ge=0)
+    before: date | None = None
 
 
 class ResearchRunResponse(RunResponse):

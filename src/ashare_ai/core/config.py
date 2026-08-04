@@ -100,6 +100,10 @@ class Settings(BaseSettings):
     llm_agent_max_concurrency: int = Field(default=4, ge=1, le=16)
     research_execution_mode: Literal["SERIAL", "DUAL"] = "SERIAL"
     edge_gateway_enabled: bool = False
+    # When enabled, the host-side topology controller force-recreates the
+    # affected Compose services after a persisted topology change instead of
+    # leaving the operator to run the restart command shown in the UI.
+    auto_restart_enabled: bool = False
     # Deployment-only capability for the local host task which applies
     # Compose profiles.  It is never stored in system-configuration history.
     topology_controller_token: str | None = None
