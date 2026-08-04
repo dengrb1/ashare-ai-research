@@ -154,6 +154,7 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 模型设置 | GET/PUT | `/api/v1/admin/model-settings` | 管理员 |
 | 模型设置 | POST | `/api/v1/admin/model-settings/test` | 管理员、写入 |
 | 模型设置 | POST | `/api/v1/admin/model-settings/models` | 管理员、写入 |
+| 模型诊断日志 | GET | `/api/v1/admin/model-settings/logs` | 管理员；脱敏探测状态与错误 |
 | 系统设置 | GET/PUT/DELETE | `/api/v1/admin/system-settings` | 管理员；PUT 幂等、写入 |
 | 系统设置 | DELETE | `/api/v1/admin/system-settings/{field}` | 管理员、写入 |
 | 系统设置解锁 | POST | `/api/v1/admin/system-settings/unlock` | 管理员、写入；当前账户密码二次验证 |
@@ -462,6 +463,8 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 生产环境的 `base_url` 必须为 HTTPS，主机必须在 `MODEL_ALLOWED_HOSTS` 白名单中，不能携带账号、密码、查询字符串或片段。启用配置前服务端只执行一次有硬上限 8 秒的结构化输出探测，失败返回 `422` 且旧配置继续生效；保存不会串行执行流式探测。结构化探测失败时 `detail.code` 可为 `MODEL_PROBE_TIMEOUT`、`MODEL_RATE_LIMITED`、`MODEL_GATEWAY_ERROR` 或 `MODEL_INVALID_STRUCTURED_OUTPUT`。
 
 `POST /api/v1/admin/model-settings/test` 返回 `ModelProbeResponse`：`reachable`、`message`、`model`、`checked_at`、`structured_output_supported`、`streaming_supported`。该显式操作才会在结构化探测后追加一次 8 秒上限的流式能力检测并更新 `streaming_supported`。`POST /api/v1/admin/model-settings/models` 返回 `{"models":["..."]}`。
+
+`GET /api/v1/admin/model-settings/logs?limit=50` 返回最近模型探测日志，`limit` 范围为 1–200。每项包含 `model`、`purpose`、`protocol`、`endpoint_path`、`request_mode`、`outcome`、`http_status`、`error_code`、`message`、`duration_ms`、`header_presence` 和 `created_at`。日志不保存 API Key、Authorization 值、Prompt 或上游完整响应正文；`header_presence` 只表示必要请求头是否已生成。
 
 ### 系统设置中心
 

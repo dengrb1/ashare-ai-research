@@ -270,6 +270,98 @@ async def test_generate_structured_falls_back_to_json_object_for_compatible_gate
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_generate_structured_falls_back_to_chat_completions_when_responses_is_missing(
+) -> None:
+    responses_route = respx.post("http://llm.local/v1/responses").mock(
+        return_value=httpx.Response(404, json={"error": "not found"})
+    )
+    chat_route = respx.post("http://llm.local/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "model": "grok-test",
+                "choices": [{"message": {"content": '{"recommendation":"hold","confidence":0.6}'}}],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 3},
+            },
+        )
+    )
+    client = OpenAICompatibleStructuredLLMClient(
+        base_url="http://llm.local",
+        api_key="secret",
+        model="grok-test",
+        reasoning_effort="high",
+        max_retries=0,
+    )
+
+    generation = await client.generate_structured(
+        schema=_Result,
+        messages=(
+            {"role": "system", "content": "Return JSON."},
+            {"role": "user", "content": "Assess."},
+        ),
+        idempotency_key="chat-fallback",
+    )
+
+    assert responses_route.call_count == 1
+    assert chat_route.call_count == 1
+    request = json.loads(chat_route.calls.last.request.content)
+    assert request["model"] == "grok-test"
+    assert request["response_format"] == {"type": "json_object"}
+    assert request["messages"] == [
+        {"role": "system", "content": "Return JSON."},
+        {"role": "user", "content": "Assess."},
+    ]
+    assert generation.output == {"recommendation": "hold", "confidence": 0.6}
+    assert generation.metadata.input_tokens == 4
+    assert generation.metadata.output_tokens == 3
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_degraded_stream_falls_back_to_chat_completions() -> None:
+    responses_route = respx.post("http://llm.local/v1/responses").mock(
+        side_effect=[
+            httpx.Response(404, json={"error": "not found"}),
+            httpx.Response(404, json={"error": "not found"}),
+        ]
+    )
+    chat_route = respx.post("http://llm.local/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "model": "grok-test",
+                "choices": [{"message": {"content": '{"ok":true}'}}],
+            },
+        )
+    )
+    client = OpenAICompatibleStructuredLLMClient(
+        base_url="http://llm.local",
+        api_key="secret",
+        model="grok-test",
+        max_retries=0,
+    )
+
+    events = [
+        event
+        async for event in client.stream_text(
+            messages=({"role": "user", "content": "Return JSON."},),
+            idempotency_key="chat-stream-fallback",
+            allow_degraded=True,
+            json_object=True,
+        )
+    ]
+
+    assert responses_route.call_count == 2
+    assert chat_route.call_count == 1
+    request = json.loads(chat_route.calls.last.request.content)
+    assert request["response_format"] == {"type": "json_object"}
+    assert events[0] == {"type": "degraded", "reason_code": "STREAMING_UNSUPPORTED"}
+    assert events[1] == {"type": "delta", "delta": '{"ok":true}'}
+    assert events[2]["type"] == "completed"
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_stream_text_normalizes_response_deltas_and_usage() -> None:
     payload = (
         'data: {"type":"response.output_text.delta","delta":"你"}\n\n'

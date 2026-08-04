@@ -28,6 +28,7 @@ from ashare_ai.storage.models import (
     Base,
     JobRun,
     ModelConfigurationVersion,
+    ModelProbeLog,
     UserAccount,
 )
 
@@ -170,6 +171,104 @@ async def test_model_settings_probe_can_skip_stream_probe() -> None:
     assert route.call_count == 1
     assert result.structured_output_supported is True
     assert result.streaming_checked is False
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_model_probe_persists_sanitized_diagnostics() -> None:
+    route = respx.post("https://gateway.example/v1/responses").mock(
+        return_value=httpx.Response(200, json={"model": "gpt-test", "output_text": '{"ok": true}'})
+    )
+    session, _ = _database()
+    service = ModelConfigurationService(_settings(Fernet.generate_key().decode()))
+
+    result = await service.probe(
+        ModelSettingsDraft(
+            base_url="https://gateway.example",
+            api_key="probe-secret",
+            search_model="gpt-test",
+            research_model="gpt-test",
+        ),
+        session,
+    )
+    service.persist_probe_logs(session, result.diagnostics)
+    session.commit()
+
+    rows = session.query(ModelProbeLog).all()
+    row = rows[0]
+    assert route.call_count == 2
+    assert len(rows) == 2
+    assert row.outcome == "SUCCEEDED"
+    assert row.protocol == "RESPONSES"
+    assert row.endpoint_path == "/responses"
+    assert row.header_presence == {
+        "Authorization": True,
+        "Idempotency-Key": True,
+        "Content-Type": True,
+    }
+    assert "probe-secret" not in row.message
+
+
+def test_model_settings_logs_api_returns_only_sanitized_fields(monkeypatch) -> None:
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    now = datetime.now(UTC)
+    with factory() as session:
+        session.add(
+            UserAccount(
+                username="log-admin",
+                password_hash=hash_password("log-password"),
+                role="ADMIN",
+                enabled=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.add(
+            ModelProbeLog(
+                model="grok-test",
+                purpose="search",
+                protocol="CHAT_COMPLETIONS",
+                endpoint_path="/chat/completions",
+                request_mode="json_object",
+                outcome="FAILED",
+                http_status=400,
+                error_code="MODEL_RESPONSE_ERROR",
+                message="model endpoint rejected the structured-output probe",
+                duration_ms=81,
+                header_presence={"Authorization": True, "Idempotency-Key": True},
+                created_at=now,
+            )
+        )
+        session.commit()
+    settings = _settings(Fernet.generate_key().decode())
+    monkeypatch.setattr("ashare_ai.agents.model_settings.get_settings", lambda: settings)
+
+    def override_db():
+        with factory() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        client = TestClient(app)
+        assert client.post(
+            "/api/v1/auth/login",
+            json={"username": "log-admin", "password": "log-password"},
+        ).status_code == 200
+        response = client.get("/api/v1/admin/model-settings/logs?limit=10")
+        assert response.status_code == 200
+        body = response.json()
+        assert body[0]["protocol"] == "CHAT_COMPLETIONS"
+        assert body[0]["http_status"] == 400
+        assert "Authorization" in body[0]["header_presence"]
+        assert "api_key" not in response.text.lower()
+    finally:
+        app.dependency_overrides.clear()
 
 
 def test_research_manifest_pins_active_model_revision(monkeypatch, tmp_path) -> None:

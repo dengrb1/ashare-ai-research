@@ -163,6 +163,22 @@ class ModelProbeResponse(BaseModel):
     streaming_supported: bool = False
 
 
+class ModelProbeLogResponse(OrmResponse):
+    log_id: str
+    model: str
+    purpose: str
+    protocol: str
+    endpoint_path: str
+    request_mode: str
+    outcome: str
+    http_status: int | None = None
+    error_code: str | None = None
+    message: str
+    duration_ms: int
+    header_presence: dict[str, bool]
+    created_at: datetime
+
+
 class ModelListResponse(BaseModel):
     models: list[str]
 

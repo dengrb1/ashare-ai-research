@@ -235,6 +235,30 @@ class ActiveModelConfiguration(Base):
     configuration: Mapped[ModelConfigurationVersion] = relationship()
 
 
+class ModelProbeLog(Base):
+    """Sanitized health and error record for an administrator model probe."""
+
+    __tablename__ = "model_probe_logs"
+    __table_args__ = (
+        Index("ix_model_probe_logs_created", "created_at"),
+        Index("ix_model_probe_logs_model_created", "model", "created_at"),
+    )
+
+    log_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    model: Mapped[str] = mapped_column(String(128), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(32), nullable=False)
+    protocol: Mapped[str] = mapped_column(String(32), nullable=False)
+    endpoint_path: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(16), nullable=False)
+    http_status: Mapped[int | None] = mapped_column(Integer)
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    header_presence: Mapped[dict[str, bool]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class SystemConfigurationVersion(Base):
     """Immutable administrator-owned operational configuration revision.
 

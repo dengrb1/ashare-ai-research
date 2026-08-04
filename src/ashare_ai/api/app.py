@@ -83,11 +83,6 @@ from ashare_ai.api.schemas import (
     AIChatThreadPatchRequest,
     AIChatThreadRequest,
     AIChatThreadResponse,
-    EdgeGatewayAppliedRequest,
-    EdgeGatewayConfigurationRequest,
-    EdgeGatewayConfigurationResponse,
-    EdgeGatewayValidateRequest,
-    EdgeGatewayValidationResponse,
     AICostSummaryResponse,
     AIModelOptionsResponse,
     AppBootstrapResponse,
@@ -100,6 +95,11 @@ from ashare_ai.api.schemas import (
     BuyEntryMonitorRequest,
     BuyEntryMonitorResponse,
     CandidateResponse,
+    EdgeGatewayAppliedRequest,
+    EdgeGatewayConfigurationRequest,
+    EdgeGatewayConfigurationResponse,
+    EdgeGatewayValidateRequest,
+    EdgeGatewayValidationResponse,
     ExitAdviceResponse,
     ExitMonitorSettingsRequest,
     HealthResponse,
@@ -111,6 +111,7 @@ from ashare_ai.api.schemas import (
     MarketRefreshSettingsRequest,
     MarketSessionStatus,
     ModelListResponse,
+    ModelProbeLogResponse,
     ModelProbeResponse,
     ModelProfileSettings,
     ModelSettingsRequest,
@@ -166,7 +167,13 @@ from ashare_ai.api.schemas import (
 from ashare_ai.api.static_web import NativeSPAStaticFiles
 from ashare_ai.api.system_settings_unlock import issue_unlock, require_settings_unlock
 from ashare_ai.core.config import get_settings
-from ashare_ai.core.edge_gateway import EdgeGatewayConfigurationService, EdgeGatewayError, render_nginx, validate_frpc_toml, validate_proxy_hosts
+from ashare_ai.core.edge_gateway import (
+    EdgeGatewayConfigurationService,
+    EdgeGatewayError,
+    render_nginx,
+    validate_frpc_toml,
+    validate_proxy_hosts,
+)
 from ashare_ai.core.hashing import sha256_bytes, stable_hash
 from ashare_ai.core.security import safe_error_message
 from ashare_ai.core.system_settings import (
@@ -216,10 +223,9 @@ from ashare_ai.search.service import (
 )
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import (
+    ActiveEdgeGatewayConfiguration,
     ActiveModelConfiguration,
     ActiveSystemConfiguration,
-    ActiveEdgeGatewayConfiguration,
-    EdgeGatewayConfigurationVersion,
     AIChatMessage,
     AIChatThread,
     ApiIdempotencyKey,
@@ -227,9 +233,11 @@ from ashare_ai.storage.models import (
     BacktestRun,
     BuyEntryMonitorRow,
     CandidateRow,
+    EdgeGatewayConfigurationVersion,
     ExitAdviceRow,
     JobRun,
     ModelConfigurationVersion,
+    ModelProbeLog,
     PersonalArchiveJob,
     PortfolioRow,
     ReportRow,
@@ -2634,10 +2642,14 @@ async def put_model_settings(
     try:
         probe = await service.probe(draft, db) if draft.enabled else None
         service.save_and_activate(db, draft, user_id=context.user.user_id, probe=probe)
+        if probe is not None:
+            service.persist_probe_logs(db, probe.diagnostics)
         db.commit()
         return _model_settings_response(db)
     except ModelSettingsError as exc:
         db.rollback()
+        service.persist_probe_logs(db, exc.diagnostics)
+        db.commit()
         raise HTTPException(
             status_code=422, detail={"code": exc.code, "message": str(exc)}
         ) from exc
@@ -2648,15 +2660,37 @@ async def test_model_settings(
     payload: ModelSettingsRequest, db: DbSession, context: Writer
 ) -> ModelProbeResponse:
     _admin(context)
+    service = ModelConfigurationService()
     try:
-        result = await ModelConfigurationService().probe(
+        result = await service.probe(
             _model_draft(payload), db, include_streaming=True
         )
+        service.persist_probe_logs(db, result.diagnostics)
+        db.commit()
         return ModelProbeResponse(**result.__dict__)
     except ModelSettingsError as exc:
+        db.rollback()
+        service.persist_probe_logs(db, exc.diagnostics)
+        db.commit()
         raise HTTPException(
             status_code=422, detail={"code": exc.code, "message": str(exc)}
         ) from exc
+
+
+@app.get(
+    "/api/v1/admin/model-settings/logs",
+    response_model=list[ModelProbeLogResponse],
+)
+def model_settings_logs(
+    db: DbSession,
+    context: Current,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[ModelProbeLogResponse]:
+    _admin(context)
+    rows = db.scalars(
+        select(ModelProbeLog).order_by(ModelProbeLog.created_at.desc()).limit(limit)
+    ).all()
+    return [ModelProbeLogResponse.model_validate(row) for row in rows]
 
 
 @app.post("/api/v1/admin/model-settings/models", response_model=ModelListResponse)

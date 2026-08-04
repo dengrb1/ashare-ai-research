@@ -437,6 +437,22 @@ export interface ModelSettingsDraft {
   enabled: boolean
 }
 
+export interface ModelProbeLog {
+  log_id: string
+  model: string
+  purpose: string
+  protocol: string
+  endpoint_path: string
+  request_mode: string
+  outcome: string
+  http_status?: number | null
+  error_code?: string | null
+  message: string
+  duration_ms: number
+  header_presence: Record<string, boolean>
+  created_at: string
+}
+
 export interface ModelProfile {
   model: string
   cache_policy: 'GROK' | 'OPENAI' | 'COMPATIBLE'

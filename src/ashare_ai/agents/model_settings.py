@@ -20,16 +20,43 @@ from ashare_ai.agents.openai_compatible import (
 )
 from ashare_ai.core.config import Settings, get_settings
 from ashare_ai.core.hashing import stable_hash
-from ashare_ai.storage.models import ActiveModelConfiguration, ModelConfigurationVersion
+from ashare_ai.storage.models import (
+    ActiveModelConfiguration,
+    ModelConfigurationVersion,
+    ModelProbeLog,
+)
 
 Purpose = Literal["search", "research"]
 CachePolicy = Literal["GROK", "OPENAI", "COMPATIBLE"]
 
 
+@dataclass(frozen=True)
+class ModelProbeDiagnostic:
+    model: str
+    purpose: str
+    protocol: str
+    endpoint_path: str
+    request_mode: str
+    outcome: Literal["SUCCEEDED", "FAILED"]
+    http_status: int | None
+    error_code: str | None
+    message: str
+    duration_ms: int
+    header_presence: dict[str, bool]
+    created_at: datetime
+
+
 class ModelSettingsError(RuntimeError):
-    def __init__(self, message: str, *, code: str = "MODEL_SETTINGS_ERROR") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "MODEL_SETTINGS_ERROR",
+        diagnostics: tuple[ModelProbeDiagnostic, ...] = (),
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.diagnostics = diagnostics
 
 
 class ModelConnectionProbe(BaseModel):
@@ -138,6 +165,7 @@ class ModelProbeResult:
     structured_output_supported: bool = True
     streaming_supported: bool = False
     streaming_checked: bool = False
+    diagnostics: tuple[ModelProbeDiagnostic, ...] = ()
 
 
 class ModelConfigurationService:
@@ -317,9 +345,16 @@ class ModelConfigurationService:
             (draft.search_model.strip(), draft.search_reasoning_effort),
             (draft.research_model.strip(), draft.research_reasoning_effort),
         )
+        purposes: dict[str, list[str]] = {}
+        for purpose, (model, _effort) in zip(
+            ("search", "research"), configured_models, strict=True
+        ):
+            purposes.setdefault(model, []).append(purpose)
         clients: list[OpenAICompatibleStructuredLLMClient] = []
+        diagnostics: list[ModelProbeDiagnostic] = []
         checked_at = datetime.now(UTC)
         for model, effort in dict.fromkeys(configured_models):
+            started = asyncio.get_running_loop().time()
             client = OpenAICompatibleStructuredLLMClient(
                 base_url=base_url,
                 api_key=api_key,
@@ -352,24 +387,125 @@ class ModelConfigurationService:
                         code="MODEL_INVALID_STRUCTURED_OUTPUT",
                     )
             except TimeoutError as exc:
+                diagnostics.append(
+                    _probe_diagnostic(
+                        client=client,
+                        model=model,
+                        purpose="/".join(purposes.get(model, ("unknown",))),
+                        outcome="FAILED",
+                        error_code="MODEL_PROBE_TIMEOUT",
+                        message=f"模型 {model} 探测超时",
+                        started=started,
+                        checked_at=checked_at,
+                    )
+                )
                 raise ModelSettingsError(
-                    f"模型 {model} 探测超时", code="MODEL_PROBE_TIMEOUT"
+                    f"模型 {model} 探测超时",
+                    code="MODEL_PROBE_TIMEOUT",
+                    diagnostics=tuple(diagnostics),
+                ) from exc
+            except ModelSettingsError as exc:
+                diagnostics.append(
+                    _probe_diagnostic(
+                        client=client,
+                        model=model,
+                        purpose="/".join(purposes.get(model, ("unknown",))),
+                        outcome="FAILED",
+                        error_code=exc.code,
+                        message=str(exc),
+                        started=started,
+                        checked_at=checked_at,
+                    )
+                )
+                raise ModelSettingsError(
+                    str(exc), code=exc.code, diagnostics=tuple(diagnostics)
                 ) from exc
             except (OpenAICompatibleError, httpx.HTTPError) as exc:
-                raise ModelSettingsError(_safe_error(exc), code=_safe_error_code(exc)) from exc
+                error_code = _safe_error_code(exc)
+                diagnostics.append(
+                    _probe_diagnostic(
+                        client=client,
+                        model=model,
+                        purpose="/".join(purposes.get(model, ("unknown",))),
+                        outcome="FAILED",
+                        error_code=error_code,
+                        message=_safe_error(exc),
+                        started=started,
+                        checked_at=checked_at,
+                    )
+                )
+                raise ModelSettingsError(
+                    _safe_error(exc),
+                    code=error_code,
+                    diagnostics=tuple(diagnostics),
+                ) from exc
+            diagnostics.append(
+                _probe_diagnostic(
+                    client=client,
+                    model=model,
+                    purpose="/".join(purposes.get(model, ("unknown",))),
+                    outcome="SUCCEEDED",
+                    error_code=None,
+                    message="结构化探测成功",
+                    started=started,
+                    checked_at=checked_at,
+                )
+            )
             clients.append(client)
         streaming_supported = False
         if include_streaming:
+            stream_started = asyncio.get_running_loop().time()
+            stream_client = clients[0]
             try:
                 streaming_supported = await asyncio.wait_for(
-                    clients[0].probe_stream(), timeout=8.0
+                    stream_client.probe_stream(), timeout=8.0
+                )
+                diagnostics.append(
+                    _probe_diagnostic(
+                        client=stream_client,
+                        model=draft.search_model.strip(),
+                        purpose="search",
+                        outcome="SUCCEEDED" if streaming_supported else "FAILED",
+                        error_code=None if streaming_supported else "MODEL_STREAMING_UNSUPPORTED",
+                        message=(
+                            "流式探测成功"
+                            if streaming_supported
+                            else "流式探测未完成，将使用非流式降级"
+                        ),
+                        started=stream_started,
+                        checked_at=checked_at,
+                    )
                 )
             except TimeoutError:
                 streaming_supported = False
-            except (OpenAICompatibleError, httpx.HTTPError):
+                diagnostics.append(
+                    _probe_diagnostic(
+                        client=stream_client,
+                        model=draft.search_model.strip(),
+                        purpose="search",
+                        outcome="FAILED",
+                        error_code="MODEL_STREAM_PROBE_TIMEOUT",
+                        message="流式探测超时，将使用非流式降级",
+                        started=stream_started,
+                        checked_at=checked_at,
+                    )
+                )
+            except (OpenAICompatibleError, httpx.HTTPError) as exc:
                 # A compatible one-shot Responses gateway remains usable for chat;
                 # the persisted capability makes the eventual degradation visible.
                 streaming_supported = False
+                diagnostics.append(
+                    _probe_diagnostic(
+                        client=stream_client,
+                        model=draft.search_model.strip(),
+                        purpose="search",
+                        outcome="FAILED",
+                        error_code=_safe_error_code(exc),
+                        message="流式探测失败，将使用非流式降级",
+                        started=stream_started,
+                        checked_at=checked_at,
+                    )
+                )
         return ModelProbeResult(
             reachable=True,
             message=(
@@ -382,7 +518,31 @@ class ModelConfigurationService:
             structured_output_supported=True,
             streaming_supported=streaming_supported,
             streaming_checked=include_streaming,
+            diagnostics=tuple(diagnostics),
         )
+
+    def persist_probe_logs(
+        self, session: Session, diagnostics: tuple[ModelProbeDiagnostic, ...]
+    ) -> None:
+        for diagnostic in diagnostics:
+            session.add(
+                ModelProbeLog(
+                    model=diagnostic.model,
+                    purpose=diagnostic.purpose,
+                    protocol=diagnostic.protocol,
+                    endpoint_path=diagnostic.endpoint_path,
+                    request_mode=diagnostic.request_mode,
+                    outcome=diagnostic.outcome,
+                    http_status=diagnostic.http_status,
+                    error_code=diagnostic.error_code,
+                    message=diagnostic.message,
+                    duration_ms=diagnostic.duration_ms,
+                    header_presence=diagnostic.header_presence,
+                    created_at=diagnostic.created_at,
+                )
+            )
+        if diagnostics:
+            session.flush()
 
     async def list_models(self, draft: ModelSettingsDraft, session: Session) -> list[str]:
         base_url = normalize_base_url(draft.base_url, self.settings)
@@ -512,6 +672,38 @@ class ModelConfigurationService:
             ) from exc
         key_id = hashlib.sha256(keys[0]).hexdigest()[:16]
         return MultiFernet(fernets), key_id
+
+
+def _probe_diagnostic(
+    *,
+    client: OpenAICompatibleStructuredLLMClient,
+    model: str,
+    purpose: str,
+    outcome: Literal["SUCCEEDED", "FAILED"],
+    error_code: str | None,
+    message: str,
+    started: float,
+    checked_at: datetime,
+) -> ModelProbeDiagnostic:
+    elapsed_ms = max(0, int((asyncio.get_running_loop().time() - started) * 1000))
+    return ModelProbeDiagnostic(
+        model=model,
+        purpose=purpose,
+        protocol=str(getattr(client, "last_protocol", "RESPONSES")),
+        endpoint_path=str(getattr(client, "last_endpoint_path", "/responses")),
+        request_mode=str(getattr(client, "last_request_mode", "json_schema")),
+        outcome=outcome,
+        http_status=getattr(client, "last_status_code", None),
+        error_code=error_code,
+        message=message,
+        duration_ms=elapsed_ms,
+        header_presence={
+            "Authorization": True,
+            "Idempotency-Key": True,
+            "Content-Type": True,
+        },
+        created_at=checked_at,
+    )
 
 
 def normalize_base_url(value: str, settings: Settings | None = None) -> str:
