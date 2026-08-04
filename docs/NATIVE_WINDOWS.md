@@ -132,4 +132,9 @@ assets are all under `<runtime>`.
 The native lock is intentionally kept in Git at
 `scripts/native/dependencies.lock.json`. Downloaded archives, generated
 configuration, credentials, databases, logs and build output are not repository
-artifacts.
+artifacts, with one exception: the pre-built `web/dist` SPA is intentionally
+committed so native consumers (the Linux controller copies it directly) always
+get a current frontend. Keep it in sync with the source — the pre-commit hook
+(`.githooks/pre-commit`, `core.hooksPath` configured) rebuilds and stages
+`web/dist` automatically whenever `web/src/` changes; if you bypass hooks, run
+`cd web && npm run build` and commit `web/dist` yourself.

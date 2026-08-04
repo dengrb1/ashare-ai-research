@@ -62,7 +62,8 @@
 - 本地完整链路：基础依赖由 `docker compose -p ashare-ai-src -f compose.yaml up -d postgres redis` 提供；当前默认低内存栈不再捆绑 MinIO，使用 `object-data` 卷或外部 HTTPS S3。随后运行 `ashare-ai doctor`、`ashare-ai migrate`，再启动 API 和串行 `job-worker`；不要在 Docker 基础服务启动后又在容器内重复启动 API/Worker。
 - Docker 故障恢复必须先检查同一 Compose 项目的依赖：`docker compose -p ashare-ai-src -f compose.yaml ps -a`、`docker compose ls --all` 和 `docker ps -a`。若 API 日志出现 `failed to resolve host 'postgres'`，或 Worker 日志出现 `failed to resolve host 'redis'`，先启动对应的 `postgres`、`redis` 并等待其 healthcheck 通过，再启动 API/Worker；不得通过反复重启应用容器掩盖依赖未运行。`Exited (0)` 且日志含 `SIGTERM` 表示容器被正常停止，不等同于 OOM 或应用崩溃；恢复时不得删除数据库、Redis、lake 或 object 数据卷。
 - 前端开发使用 `cd web; npm ci; npm run dev`，默认访问 `http://localhost:5173`，并把 `/api` 代理到 `http://127.0.0.1:8000`。完整 Docker 栈由 Nginx 在 `http://localhost` 暴露网页。
-- Python 修改至少运行受影响的 `pytest` 用例；跨层、数据或交易语义修改运行完整 `\.venv\Scripts\python -m pytest`（环境允许时）。前端修改至少运行 `cd web; npm test -- --run`，并在交付前运行 `npm run build`。
+- Python 修改至少运行受影响的 `pytest` 用例；跨层、数据或交易语义修改运行完整 `\.venv\Scripts\python -m pytest`（环境允许时）。前端修改至少运行 `cd web; npm test -- --run`。
+- `web/dist` 是**有意入库**的前端构建产物（Linux 原生管理器等直接复用），不是无关生成物。改动 `web/src/` 或 `web/` 构建配置时，pre-commit 钩子（`.githooks/pre-commit`，`core.hooksPath` 已配置）会自动重建并暂存 `web/dist`；如用 `--no-verify` 跳过钩子，提交前必须手动执行 `cd web && npm run build` 并一并提交 `web/dist`，否则 Linux 原生版等会拿到过期前端。
 - 提交前执行相应范围的 Ruff 与 mypy；不能运行的集成检查需说明原因，不能以跳过测试替代验证。
-- 不把真实密码、Token、API Key、cookie、个人数据或生产数据写入 Git、日志、测试夹具、截图或任何 `*.example` 文件。真实凭据仅位于未跟踪的 `.env`；提交前检查差异中没有凭据和无关生成物。
+- 不把真实密码、Token、API Key、cookie、个人数据或生产数据写入 Git、日志、测试夹具、截图或任何 `*.example` 文件。真实凭据仅位于未跟踪的 `.env`；提交前检查差异中没有凭据和无关生成物（`web/dist` 是有意入库的构建产物，除外）。
 - 避免破坏现有工作区改动；不要使用破坏性 Git 命令或清理数据目录。涉及删除数据、迁移生产库、触发任务或外部供应商调用时，先确认用户授权。

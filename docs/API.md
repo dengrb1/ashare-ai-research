@@ -800,3 +800,5 @@ curl -sS "$BASE_URL/api/v1/search/financial?q=%E8%B4%B5%E5%B7%9E%E8%8C%85%E5%8F%
 
 - `GET /api/v1/trade-advice-monitors`：返回当前用户的自选股买入、卖出和止损监控，按启用状态与股票代码稳定排序。
 - `PUT /api/v1/trade-advice-monitors`：创建或更新一只自选股的监控；需要 `Idempotency-Key`。请求为 `symbol`、`enabled`、可选 `manual_buy_price` 与 `manual_sell_price`。启用不属于自选股的代码返回 `422 SYMBOL_NOT_IN_WATCHLIST`。
+
+监控在交易日 09:30 后为每只自选股生成 AI 买入/卖出目标与止损价，命中目标时每 5 分钟重复提醒；客户端“卖出建议”页按自选股展示这些目标、提醒状态与自定义价格，股票名称由 `/market/quotes` 提供，行情不可用时仅显示代码。
