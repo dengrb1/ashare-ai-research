@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
-import { barTimeMs, barTimestamp } from '../marketKlines'
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import { barTimeMs, barTimestamp, mergeKlineBars } from '../marketKlines'
 import { calculateMarketIndicators, type OptionalNumber } from '../marketIndicators'
 import type { KlineBar } from '../types'
 import { formatAmount, formatNumber } from './Ui'
@@ -55,37 +55,39 @@ export function CandlestickChart({ bars, period, hasEarlier = false, loadingEarl
   const [visibleCount, setVisibleCount] = useState(DEFAULT_VISIBLE)
   const [offset, setOffset] = useState(0)
   const [hover, setHover] = useState<{ index: number; x: number; y: number } | null>(null)
+  const series = useMemo(() => mergeKlineBars([], bars), [bars])
+  const clipId = useId().replaceAll(':', '')
   const svgRef = useRef<SVGSVGElement | null>(null)
   const drag = useRef<{ x: number; offset: number; moved: boolean } | null>(null)
-  const previousSeries = useRef({ length: bars.length, last: bars.at(-1) ? barTimestamp(bars.at(-1)!) : '' })
+  const previousSeries = useRef({ length: series.length, last: series.at(-1) ? barTimestamp(series.at(-1)!) : '' })
   const nearStartRequested = useRef(false)
-  const indicators = useMemo(() => calculateMarketIndicators(bars), [bars])
+  const indicators = useMemo(() => calculateMarketIndicators(series), [series])
 
   useEffect(() => {
     const previous = previousSeries.current
-    const added = bars.length - previous.length
-    const last = bars.at(-1) ? barTimestamp(bars.at(-1)!) : ''
+    const added = series.length - previous.length
+    const last = series.at(-1) ? barTimestamp(series.at(-1)!) : ''
     // 前插历史分段时 offset 到最新端的距离天然不变；仅在最新端追加新柱时保持旧视口锚点。
     if (added > 0 && offset > 0 && last !== previous.last) {
-      setOffset((value) => Math.min(Math.max(0, bars.length - MIN_VISIBLE), value + added))
+      setOffset((value) => Math.min(Math.max(0, series.length - MIN_VISIBLE), value + added))
     }
-    previousSeries.current = { length: bars.length, last }
-  }, [bars.length, offset])
+    previousSeries.current = { length: series.length, last }
+  }, [offset, series])
 
-  const count = Math.max(1, Math.min(visibleCount, bars.length || visibleCount))
-  const maxOffset = Math.max(0, bars.length - count)
+  const count = Math.max(1, Math.min(visibleCount, series.length || visibleCount))
+  const maxOffset = Math.max(0, series.length - count)
   const safeOffset = Math.min(offset, maxOffset)
-  const end = Math.max(0, bars.length - safeOffset)
+  const end = Math.max(0, series.length - safeOffset)
   const start = Math.max(0, end - count)
-  const visible = bars.slice(start, end)
+  const visible = series.slice(start, end)
   const indexes = visible.map((_, index) => start + index)
   const plotWidth = WIDTH - LEFT - RIGHT
   const xStep = plotWidth / Math.max(1, visible.length)
   const x = (position: number) => LEFT + xStep * position + xStep / 2
 
   const zoom = useCallback((direction: number) => {
-    setVisibleCount((current) => Math.max(MIN_VISIBLE, Math.min(Math.max(MIN_VISIBLE, bars.length), current + direction * 20)))
-  }, [bars.length])
+    setVisibleCount((current) => Math.max(MIN_VISIBLE, Math.min(Math.max(MIN_VISIBLE, series.length), current + direction * 20)))
+  }, [series.length])
 
   useEffect(() => {
     const svg = svgRef.current
@@ -142,8 +144,8 @@ export function CandlestickChart({ bars, period, hasEarlier = false, loadingEarl
 
   const resolvedActive = hover !== null && hover.index >= start && hover.index < end ? hover.index : end - 1
   const activePosition = resolvedActive - start
-  const active = bars[resolvedActive]
-  const previous = bars[resolvedActive - 1]
+  const active = series[resolvedActive]
+  const previous = series[resolvedActive - 1]
   const changePercent = previous?.close ? ((active.close / previous.close) - 1) * 100 : null
   function pointerPosition(event: ReactPointerEvent<SVGSVGElement>) {
     const rect = event.currentTarget.getBoundingClientRect()
@@ -211,7 +213,7 @@ export function CandlestickChart({ bars, period, hasEarlier = false, loadingEarl
       </div>
       <div className="chart-actions">
         <button onClick={() => zoom(-1)} aria-label="放大图表" disabled={count <= MIN_VISIBLE}>＋</button>
-        <button onClick={() => zoom(1)} aria-label="缩小图表" disabled={count >= bars.length}>－</button>
+        <button onClick={() => zoom(1)} aria-label="缩小图表" disabled={count >= series.length}>－</button>
         <button onClick={() => { setOffset(0); setHover(null) }} disabled={safeOffset === 0}>回到最新</button>
         <button onClick={requestEarlier} disabled={!hasEarlier || loadingEarlier}>{loadingEarlier ? '加载中…' : '加载更早'}</button>
       </div>
@@ -222,7 +224,11 @@ export function CandlestickChart({ bars, period, hasEarlier = false, loadingEarl
       <span className="ma20">MA20 {optional(indicators.ma20[resolvedActive])}</span>
       <span>{secondary === 'volume' ? '成交量（涨跌着色）' : secondary === 'macd' ? 'MACD 12/26/9' : 'KDJ 9/3/3 · 初始 K/D=50'}</span>
     </div>
-    <svg ref={svgRef} className="candle-chart" viewBox={`0 0 ${WIDTH} ${HEIGHT}`} role="img" aria-label="后复权价格、均线和技术指标图" onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={() => { drag.current = null; setHover(null) }} onPointerLeave={() => { if (!drag.current) setHover(null) }}>
+    <svg ref={svgRef} className="candle-chart" viewBox={`0 0 ${WIDTH} ${HEIGHT}`} role="img" aria-label="价格、均线和技术指标图" onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={() => { drag.current = null; setHover(null) }} onPointerLeave={() => { if (!drag.current) setHover(null) }}>
+      <defs>
+        <clipPath id={clipId + '-price'}><rect x={LEFT} y={MAIN_TOP} width={plotWidth} height={MAIN_BOTTOM - MAIN_TOP} /></clipPath>
+        <clipPath id={clipId + '-secondary'}><rect x={LEFT} y={SUB_TOP} width={plotWidth} height={SUB_BOTTOM - SUB_TOP} /></clipPath>
+      </defs>
       {[0, 1, 2, 3, 4].map((line) => {
         const y = MAIN_TOP + line * ((MAIN_BOTTOM - MAIN_TOP) / 4)
         const value = priceMax - line * (priceRange / 4)
@@ -233,6 +239,7 @@ export function CandlestickChart({ bars, period, hasEarlier = false, loadingEarl
       <text x={4} y={SUB_TOP + 4} className="chart-label">{secondary === 'volume' ? formatAmount(secondaryMax) : formatNumber(secondaryMax)}</text>
       <text x={4} y={SUB_BOTTOM + 4} className="chart-label">{secondary === 'volume' ? '0' : formatNumber(secondaryMin)}</text>
 
+      <g clipPath={'url(#' + clipId + '-price)'}>
       <polyline points={points(indicators.ma5, indexes, x, priceY)} className="indicator-line ma5-line" fill="none" />
       <polyline points={points(indicators.ma10, indexes, x, priceY)} className="indicator-line ma10-line" fill="none" />
       <polyline points={points(indicators.ma20, indexes, x, priceY)} className="indicator-line ma20-line" fill="none" />
@@ -246,7 +253,9 @@ export function CandlestickChart({ bars, period, hasEarlier = false, loadingEarl
           <rect x={candleX - Math.max(1.2, xStep * .28)} y={bodyTop} width={Math.max(2.4, xStep * .56)} height={bodyHeight} />
         </g>
       })}
+      </g>
 
+      <g clipPath={'url(#' + clipId + '-secondary)'}>
       {secondary === 'volume' && visible.map((bar, position) => {
         if (!Number.isFinite(bar.volume)) return null
         const up = bar.close >= bar.open
@@ -270,6 +279,7 @@ export function CandlestickChart({ bars, period, hasEarlier = false, loadingEarl
         <polyline points={points(indicators.kdj.map((point) => point.d), indexes, x, secondaryY)} className="indicator-line d-line" fill="none" />
         <polyline points={points(indicators.kdj.map((point) => point.j), indexes, x, secondaryY)} className="indicator-line j-line" fill="none" />
       </>}
+      </g>
 
       {tickPositions.map((position) => <g key={`time-${position}`}><line x1={x(position)} y1={SUB_BOTTOM} x2={x(position)} y2={SUB_BOTTOM + 5} className="chart-grid" /><text x={x(position)} y={AXIS_Y} textAnchor="middle" className="chart-label">{timeLabel(visible[position], period)}</text></g>)}
       {hover && <>

@@ -208,17 +208,17 @@ export function MarketPage() {
       <Panel className="instrument-panel">
         <div className="instrument-head">
           <div><span className="eyebrow">{symbol || 'NO SYMBOL'}</span><h2>{symbol ? (quote?.name || symbol) : '未选择证券'}</h2></div>
-          {symbol && <div className={`instrument-price ${(quote?.change_pct || 0) >= 0 ? 'price-up' : 'price-down'}`}><strong>{formatNumber(quote?.price)}</strong><span>{quote ? `${quote.change_pct >= 0 ? '+' : ''}${formatNumber(quote.change)}  ${quote.change_pct >= 0 ? '+' : ''}${formatNumber(quote.change_pct)}%` : '等待行情'}</span></div>}
+          {symbol && <div className={`instrument-price ${(quote?.change_pct || 0) >= 0 ? 'price-up' : 'price-down'}`}><strong>{formatNumber(quote?.price)}</strong><span>{quote ? `${quote.change_pct >= 0 ? '+' : ''}${formatNumber(quote.change)}  ${quote.change_pct >= 0 ? '+' : ''}${formatNumber(quote.change_pct)}% · 未复权` : '等待行情'}</span></div>}
           {symbol && <button className={isWatched ? 'secondary active' : 'secondary'} onClick={() => { void (isWatched ? removeWatch(symbol) : addWatch(symbol)).catch(() => undefined) }}>{isWatched ? '★ 已自选' : '☆ 加自选'}</button>}
         </div>
         <div className="quote-stats">{stats.map((item) => <div key={item.label}><span>{item.label}</span><strong>{item.amount ? formatAmount(item.value) : `${formatNumber(item.value)}${item.percent && item.value !== undefined ? '%' : ''}`}</strong></div>)}</div>
       </Panel>
-      <Panel title="价格与技术指标" eyebrow="ADJUSTED KLINE">
+      <Panel title="价格与技术指标" eyebrow="LIVE PRICE KLINE">
         <div className="kline-selectors">
           <div><span>采样周期</span><div className="period-tabs">{KLINE_PERIODS.map((item) => <button key={item.value} className={period === item.value ? 'active' : ''} onClick={() => setPeriod(item.value)}>{item.label}</button>)}</div></div>
           <div><span>查看区间</span><div className="period-tabs range-tabs">{KLINE_RANGES.map((item) => <button key={item.value} className={range === item.value ? 'active' : ''} onClick={() => setRange(item.value)}>{item.label}</button>)}</div></div>
         </div>
-        <div className="data-meta"><span><i className={(entry?.status?.delayed ?? delayed) ? 'warn' : ''} />{entry?.status?.source || source}{(entry?.status?.delayed ?? delayed) ? ' · 非实时缓存' : ' · 实时'}</span><span>后复权</span><span>采集 {entry?.status?.collected_at || updatedAt ? new Date(entry?.status?.collected_at || updatedAt!).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '—'}</span></div>
+        <div className="data-meta"><span><i className={(entry?.status?.delayed ?? delayed) ? 'warn' : ''} />{entry?.status?.source || source}{(entry?.status?.delayed ?? delayed) ? ' · 非实时缓存' : ' · 实时'}</span><span>{entry?.adjustment === 'hfq' ? '后复权' : '未复权 · 与实时价一致'}</span><span>采集 {entry?.status?.collected_at || updatedAt ? new Date(entry?.status?.collected_at || updatedAt!).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '—'}</span></div>
         <div className="coverage-status">
           <div><span>目标区间</span><strong>{plan.label}{plan.tradingDays ? `（${plan.tradingDays} 个有数据交易日）` : `（${targetDates}）`}</strong></div>
           <div><span>已加载区间</span><strong>{loadedRangeLabel(bars, period)}</strong></div>
@@ -227,7 +227,7 @@ export function MarketPage() {
         </div>
         <ErrorNotice message={error} />
         {coverageMessage && <div className="kline-coverage-warning" role="status">{coverageMessage}</div>}
-        {symbol ? (loading && !bars.length ? <Loading label="加载后复权序列" /> : <CandlestickChart key={`${symbol}:${period}:${range}`} bars={bars} period={period} hasEarlier={!coverage.complete && !noMoreEarlier} loadingEarlier={loadingEarlier} onLoadEarlier={loadEarlier} />) : <Empty title="尚未选择证券" description="在上方输入代码定位，或从自选行情中选择一支股票。" />}
+        {symbol ? (loading && !bars.length ? <Loading label="加载未复权序列" /> : <CandlestickChart key={`${symbol}:${period}:${range}`} bars={bars} period={period} hasEarlier={!coverage.complete && !noMoreEarlier} loadingEarlier={loadingEarlier} onLoadEarlier={loadEarlier} />) : <Empty title="尚未选择证券" description="在上方输入代码定位，或从自选行情中选择一支股票。" />}
       </Panel>
     </div>
   </div>

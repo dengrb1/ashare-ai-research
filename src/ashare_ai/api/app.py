@@ -184,7 +184,11 @@ from ashare_ai.core.system_settings import (
     get_effective_settings,
 )
 from ashare_ai.core.time import SHANGHAI, market_session
-from ashare_ai.market.service import get_market_data_service, reset_market_data_service
+from ashare_ai.market.service import (
+    get_market_data_service,
+    normalize_adjustment,
+    reset_market_data_service,
+)
 from ashare_ai.notifications.push import PushConfigurationError, PushDeviceService
 from ashare_ai.notifications.service import InvalidNotificationCursor, NotificationService
 from ashare_ai.observability.audit import AuditLogger
@@ -4378,22 +4382,33 @@ def market_klines(
     _: Current,
     period: str = "day",
     limit: int = Query(default=300, ge=1, le=5000),
-    adjust: str = "hfq",
+    adjust: str = "raw",
     start: datetime | None = None,
     end: datetime | None = None,
     refresh: bool = False,
 ) -> KlineResponse:
-    if adjust.casefold() != "hfq":
-        raise HTTPException(status_code=422, detail="only hfq adjustment is supported")
     try:
+        normalized_adjustment = normalize_adjustment(adjust)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422, detail="adjust must be raw or hfq"
+        ) from exc
+    try:
+        kwargs: dict[str, Any] = {
+            "limit": limit,
+            "start": start,
+            "end": end,
+            "force_refresh": refresh,
+        }
+        # Keep the legacy hfq call shape compatible with lightweight custom
+        # providers while making the public default explicitly raw.
+        if normalized_adjustment != "hfq":
+            kwargs["adjustment"] = normalized_adjustment
         return KlineResponse.model_validate(
             get_market_data_service().klines(
                 symbol,
                 period,
-                limit=limit,
-                start=start,
-                end=end,
-                force_refresh=refresh,
+                **kwargs,
             )
         )
     except ValueError as exc:

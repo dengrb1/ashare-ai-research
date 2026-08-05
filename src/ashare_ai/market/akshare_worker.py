@@ -63,6 +63,7 @@ def handle_request(
             _optional_datetime(payload.get("start")),
             _optional_datetime(payload.get("end")),
             limit,
+            str(payload.get("adjustment", "hfq")),
         )
     raise ValueError("unsupported operation")
 

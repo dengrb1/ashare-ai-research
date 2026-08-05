@@ -1313,6 +1313,7 @@ class QuoteResponse(BaseModel):
     previous_close: float | None = None
     volume: float | None = None
     amount: float | None = None
+    price_basis: str = "raw"
     status: MarketDataStatus
 
 

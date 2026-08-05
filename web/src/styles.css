@@ -1142,3 +1142,16 @@ small, .eyebrow, .kicker, label, th, td, .nav-group, .topbar p, .disclaimer { fo
   .report-analysis-panel { padding: 14px; }
   .report-analysis-header { align-items: start; flex-direction: column; }
 }
+
+/* Keep the symbol picker usable when a high-density desktop leaves the fixed rail visually undersized. */
+@media (min-width: 1600px), (min-resolution: 1.5dppx) and (min-width: 1280px) {
+  .market-layout { grid-template-columns: clamp(290px, 17vw, 360px) minmax(0, 1fr); gap: 22px; }
+  .watch-panel { padding: 18px 16px; }
+  .symbol-search { gap: 8px; margin-bottom: 12px; }
+  .symbol-search input { height: 40px; font-size: 13px; }
+  .symbol-search button { min-width: 54px; min-height: 40px; font-size: 12px; }
+  .watch-list { gap: 5px; }
+  .watch-list > button { min-height: 54px; padding: 13px 12px; }
+  .watch-list strong { font-size: 13px; }
+  .watch-list small { font-size: 12px; }
+}

@@ -154,6 +154,8 @@ export interface Quote {
   prev_close?: number
   volume?: number
   amount?: number
+  /** Live quotes are provider-native, unadjusted prices. */
+  price_basis?: 'raw' | string
   source?: string
   collected_at?: string
   cached_at?: string

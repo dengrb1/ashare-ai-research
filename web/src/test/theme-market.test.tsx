@@ -313,7 +313,7 @@ describe('market prefetch and client cache', () => {
             symbol: '600519.SH', period: '1m', adjustment: 'hfq',
             bars: [
               { timestamp: '2026-07-10T01:31:00Z', open: 10, high: 10, low: 10, close: 10, volume: 1 },
-              { timestamp: '2026-07-11T01:31:00Z', open: 11, high: 11, low: 11, close: latestCalls > 1 ? 99 : 11, volume: 1 },
+              { timestamp: '2026-07-11T01:31:00Z', open: 11, high: latestCalls > 1 ? 99 : 11, low: 11, close: latestCalls > 1 ? 99 : 11, volume: 1 },
             ],
             status: { source: 'fixture', collected_at: '2026-07-17T00:00:00Z', cached_at: '2026-07-17T00:00:00Z', delayed: false },
           })
@@ -355,7 +355,7 @@ describe('market prefetch and client cache', () => {
         klineCalls += 1
         return jsonResponse({
           symbol: '600519.SH', period: '1m', adjustment: 'hfq',
-          bars: [{ timestamp: '2026-07-20T07:00:00Z', open: 10, high: 10, low: 10, close: klineCalls, volume: 1 }],
+          bars: [{ timestamp: '2026-07-20T07:00:00Z', open: 10, high: 10, low: klineCalls, close: klineCalls, volume: 1 }],
           status: { source: 'fixture', collected_at: '2026-07-20T07:30:00Z', cached_at: '2026-07-20T07:30:00Z', delayed: false },
         })
       }

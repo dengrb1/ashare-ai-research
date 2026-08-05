@@ -64,7 +64,7 @@ type RawQuote = Quote & {
 function normalizeQuote(row: RawQuote): Quote {
   return {
     ...row,
-    price: row.price ?? 0,
+      price: row.price ?? 0,
     change_pct: row.change_pct ?? row.change_percent ?? 0,
     prev_close: row.prev_close ?? row.previous_close,
     source: row.source || row.status?.source,
@@ -133,7 +133,7 @@ export const api = {
     const payload = await request<DataEnvelope<KlineBar[]> & { bars: KlineBar[] }>(`/market/klines/${encodeURIComponent(symbol)}${params({
       period,
       limit,
-      adjust: 'hfq',
+      adjust: 'raw',
       start: query.start,
       end: query.end,
       refresh: query.refresh ? 'true' : undefined,

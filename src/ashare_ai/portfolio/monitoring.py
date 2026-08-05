@@ -182,7 +182,13 @@ class StopLossMonitorService:
                 bars: list[dict[str, Any]] = []
                 if position.get("stop_loss_price") in (None, ""):
                     try:
-                        payload = self.market.klines(symbol, "day", limit=21, end=current)
+                        payload = self.market.klines(
+                            symbol,
+                            "day",
+                            limit=21,
+                            end=current,
+                            adjustment="hfq",
+                        )
                         raw_bars = payload.get("bars", []) if isinstance(payload, dict) else []
                         bars = raw_bars if isinstance(raw_bars, list) else []
                     except Exception:

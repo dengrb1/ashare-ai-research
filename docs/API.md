@@ -709,11 +709,11 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 
 ### `GET /api/v1/market/quotes/{symbol}`
 
-返回一个 `QuoteResponse`。可选 `refresh=true|false` 强制刷新；该端点优先使用能按标的定向请求的实时供应商，并使用独立的短缓存。它适合当前选中证券，不会等待全市场批量快照。无效代码返回 `422`，所有上游和可用缓存均失败时返回 `503`。
+返回一个 `QuoteResponse`。报价字段是供应商原始未复权价，响应新增 `price_basis: "raw"`；可选 `refresh=true|false` 强制刷新。该端点优先使用能按标的定向请求的实时供应商，并使用独立的短缓存。它适合当前选中证券，不会等待全市场批量快照。无效代码返回 `422`，所有上游和可用缓存均失败时返回 `503`。
 
 ### `GET /api/v1/market/quotes`
 
-必填查询参数 `symbols`，使用逗号分隔，例如 `600519.SH,000001.SZ`；可选 `refresh=true|false` 强制刷新。返回 `QuoteResponse[]`，每项包含 `symbol`、`name`、`price`、`change`、`change_percent`、`open`、`high`、`low`、`previous_close`、`volume`、`amount` 和 `status`。单个数值可能为 `null`。它适合后台批量刷新；Web 会先调用单标的端点，再在后台调用此端点补全其余证券。
+必填查询参数 `symbols`，使用逗号分隔，例如 `600519.SH,000001.SZ`；可选 `refresh=true|false` 强制刷新。返回 `QuoteResponse[]`，每项包含 `symbol`、`name`、`price`、`change`、`change_percent`、`open`、`high`、`low`、`previous_close`、`volume`、`amount`、`price_basis` 和 `status`。报价字段均为未复权口径，单个数值可能为 `null`。它适合后台批量刷新；Web 会先调用单标的端点，再在后台调用此端点补全其余证券。
 
 ### `GET /api/v1/market/klines/{symbol}`
 
@@ -723,12 +723,12 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 |---|---|---|
 | `period` | `day` | `1m`、`5m`、`15m`、`30m`、`60m`、`day`/`daily` |
 | `limit` | 300 | 1–5000 |
-| `adjust` | `hfq` | 当前只支持后复权 `hfq` |
+| `adjust` | `raw` | `raw` 未复权（与实时行情一致）或 `hfq` 后复权 |
 | `start` | 无 | 带时区 datetime |
 | `end` | 无 | 带时区 datetime |
 | `refresh` | false | 是否绕过新鲜缓存 |
 
-返回 `KlineResponse`：`symbol`、`period`、`adjustment`、`bars`、`status`。每个 `bar` 包含 `timestamp`、`open`、`high`、`low`、`close`、`volume`、`amount` 和 `turnover_rate`。
+返回 `KlineResponse`：`symbol`、`period`、`adjustment`、`bars`、`status`。默认 `raw` 日线与实时行情使用同一未复权口径；需要后复权技术序列时显式传 `adjust=hfq`。每个 `bar` 包含 `timestamp`、`open`、`high`、`low`、`close`、`volume`、`amount` 和 `turnover_rate`。
 
 不支持的周期或复权方式返回 `422`；所有上游和可用缓存都失败时返回 `503`。
 
@@ -744,7 +744,7 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 
 ### `GET /api/v1/market/status`
 
-返回当前行情服务状态对象，主要字段包括 `primary`、`fallback`、`fallbacks`、`cache_seconds`、`kline_cache_seconds`、`prefetch_max_workers`、`prefetch_max_symbols`、`stale_seconds`、`adjustment`、`live_data_isolated_from_snapshots` 和可选 `quotes` 缓存状态。兼容新增的 `provider_process_mode`、`provider_process_state`、`provider_process_degraded` 与 `hedge_delay_seconds` 用于观察可复用 AKShare 隔离进程和日线延迟竞速；这些字段不暴露 PID、命令行、环境变量或内部错误。
+返回当前行情服务状态对象，主要字段包括 `primary`、`fallback`、`fallbacks`、`cache_seconds`、`kline_cache_seconds`、`prefetch_max_workers`、`prefetch_max_symbols`、`stale_seconds`、`adjustment`、`live_quote_price_basis`、`live_kline_default_adjustment`、`supported_adjustments`、`live_data_isolated_from_snapshots` 和可选 `quotes` 缓存状态。`live_quote_price_basis` 固定为 `raw`，Web 默认日 K 为 `raw`；兼容字段 `adjustment` 仍保留旧的 `hfq` 内部技术口径。兼容新增的 `provider_process_mode`、`provider_process_state`、`provider_process_degraded` 与 `hedge_delay_seconds` 用于观察可复用 AKShare 隔离进程和日线延迟竞速；这些字段不暴露 PID、命令行、环境变量或内部错误。
 
 `market_session` 为兼容性新增对象，用于界面标注实时行情是否已收盘：`state` 取值为 `OPEN`、`PRE_OPEN`、`BREAK`、`CLOSED` 或 `UNKNOWN`；并返回上海时区的 `as_of`、`trading_date`、`is_trading_day` 和原因码 `reason`。交易日 15:00 起及非交易日返回 `CLOSED`；午间休市返回 `BREAK`。交易日历暂不可用时返回 `UNKNOWN`，客户端不得将其视为已收盘。旧客户端可忽略该新增字段。
 

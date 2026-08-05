@@ -128,10 +128,19 @@ class _Market:
             for symbol in symbols
         ]
 
-    def klines(self, symbol: str, period: str, *, limit: int, end: datetime) -> dict[str, object]:
+    def klines(
+        self,
+        symbol: str,
+        period: str,
+        *,
+        limit: int,
+        end: datetime,
+        adjustment: str = "hfq",
+    ) -> dict[str, object]:
         assert period == "day"
         assert limit == 30
         assert end.tzinfo is not None
+        assert adjustment == "raw"
         self.kline_calls += 1
         return {
             "bars": [
