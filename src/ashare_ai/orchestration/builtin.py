@@ -2573,8 +2573,9 @@ def _run_async(coroutine: Coroutine[Any, Any, T]) -> T:
 
 def _is_degradable_llm_error(error: Exception) -> bool:
     from ashare_ai.agents.openai_compatible import OpenAICompatibleError
+    from ashare_ai.agents.validation import InvalidComponentEvidenceError
 
-    if isinstance(error, (OpenAICompatibleError, OSError)):
+    if isinstance(error, (InvalidComponentEvidenceError, OpenAICompatibleError, OSError)):
         return True
     return isinstance(error, RuntimeError) and str(error).strip() == "can't start new thread"
 

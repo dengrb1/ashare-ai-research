@@ -29,6 +29,10 @@ _FORBIDDEN_MANAGER_TEXT = re.compile(
 )
 
 
+class InvalidComponentEvidenceError(ValueError):
+    """A model cited evidence outside the immutable request payload."""
+
+
 class ComponentAnalysis(FrozenModel):
     """The model-owned portion of a component analysis.
 
@@ -93,9 +97,13 @@ def validate_component_payload(
         identity = (evidence.source, evidence.source_record_id, evidence.payload_sha256)
         expected = allowed_evidence.get(identity)
         if expected is None:
-            raise ValueError("agent returned evidence that was not present in its request")
+            raise InvalidComponentEvidenceError(
+                "agent returned evidence that was not present in its request"
+            )
         if evidence != expected:
-            raise ValueError("agent evidence must exactly match evidence from its request")
+            raise InvalidComponentEvidenceError(
+                "agent evidence must exactly match evidence from its request"
+            )
     return result
 
 

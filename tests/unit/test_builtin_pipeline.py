@@ -51,8 +51,11 @@ def _use_builtin_agents_in_tests(monkeypatch: pytest.MonkeyPatch):
 
 
 class FakeStructuredLLMClient:
-    def __init__(self, *, future_evidence: bool = False) -> None:
+    def __init__(
+        self, *, future_evidence: bool = False, foreign_evidence: bool = False
+    ) -> None:
         self.future_evidence = future_evidence
+        self.foreign_evidence = foreign_evidence
         self.requests: list[dict[str, Any]] = []
         self.messages: list[tuple[Mapping[str, str], ...]] = []
 
@@ -72,6 +75,9 @@ class FakeStructuredLLMClient:
             evidence["available_at"] = (
                 datetime.fromisoformat(request["decision_at"]) + timedelta(seconds=1)
             ).isoformat()
+        if self.foreign_evidence:
+            evidence["source_record_id"] = "foreign-evidence"
+            evidence["evidence_id"] = "foreign-evidence"
         scores = {"fundamental": 71.0, "technical": 62.0, "sentiment": 53.0}
         return StructuredGeneration(
             output={
@@ -791,6 +797,24 @@ def test_llm_unavailability_falls_back_to_deterministic_agents(tmp_path) -> None
                 AuditEvent.event_type == "LLM_AGENT_DEGRADED",
             )
         ) == "LLM_AGENT_DEGRADED"
+        calls = session.scalars(select(AgentCall).where(AgentCall.run_id == run_id)).all()
+        assert len(calls) == 60
+        assert {call.model_provider for call in calls} == {"builtin"}
+
+
+def test_invalid_llm_evidence_falls_back_to_deterministic_agents(tmp_path) -> None:
+    client = FakeStructuredLLMClient(foreign_evidence=True)
+    _, factory, pipeline, run_id, feature_snapshot_id = _prepared_llm_backend(tmp_path, client)
+
+    pipeline.run_research_agents(run_id, feature_snapshot_id)
+
+    with factory() as session:
+        run = session.get(JobRun, run_id)
+        assert run is not None
+        assert run.manifest["agent_backend_effective"] == "builtin-deterministic-fallback"
+        assert run.manifest["agent_backend_degradation"]["error_type"] == (
+            "InvalidComponentEvidenceError"
+        )
         calls = session.scalars(select(AgentCall).where(AgentCall.run_id == run_id)).all()
         assert len(calls) == 60
         assert {call.model_provider for call in calls} == {"builtin"}
