@@ -25,6 +25,7 @@ from ashare_ai.orchestration.production import ApplicationPipeline
 from ashare_ai.portfolio.events import ActiveEventRisk, EventSeverity
 from ashare_ai.storage.models import (
     AgentCall,
+    AIResponseCacheRow,
     AuditEvent,
     Base,
     CandidateRow,
@@ -33,6 +34,7 @@ from ashare_ai.storage.models import (
     ReportRow,
     ScoreRow,
     SnapshotManifestRow,
+    UserAccount,
 )
 from ashare_ai.universe.builder import UniverseResult
 
@@ -52,6 +54,7 @@ class FakeStructuredLLMClient:
     def __init__(self, *, future_evidence: bool = False) -> None:
         self.future_evidence = future_evidence
         self.requests: list[dict[str, Any]] = []
+        self.messages: list[tuple[Mapping[str, str], ...]] = []
 
     async def generate_structured(
         self,
@@ -61,6 +64,7 @@ class FakeStructuredLLMClient:
         idempotency_key: str,
     ) -> StructuredGeneration:
         assert schema is ComponentAnalysis
+        self.messages.append(messages)
         request = json.loads(messages[1]["content"])
         self.requests.append(request)
         evidence = dict(request["evidence"][0])
@@ -682,7 +686,46 @@ def test_llm_component_results_are_audited_with_transport_metadata(tmp_path) -> 
         assert {call.model_provider for call in calls} == {"fake-provider"}
         assert {call.model_name for call in calls} == {"fake-model"}
         assert {call.result["score"] for call in calls if call.component == "fundamental"} == {71.0}
-        assert all(call.result["prompt_version"] == "builtin-llm-v2" for call in calls)
+        assert all(call.result["prompt_version"] == "builtin-llm-v3" for call in calls)
+
+
+def test_llm_research_reuses_local_component_cache_and_shared_prefix(tmp_path) -> None:
+    client = FakeStructuredLLMClient()
+    backend, factory, pipeline, run_id, feature_snapshot_id = _prepared_llm_backend(
+        tmp_path, client
+    )
+    now = datetime.now(UTC)
+    with factory() as session:
+        session.add(
+            UserAccount(
+                user_id="cache-research-user",
+                username="cache-research-user",
+                password_hash="fixture",
+                role="USER",
+                enabled=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        run = session.get(JobRun, run_id)
+        assert run is not None
+        run.user_id = "cache-research-user"
+        session.commit()
+
+    backend._settings = backend._settings.model_copy(update={"llm_agent_max_concurrency": 1})
+    pipeline.run_research_agents(run_id, feature_snapshot_id)
+    with factory() as session:
+        assert session.query(AIResponseCacheRow).count() == 60
+    pipeline.run_research_agents(run_id, feature_snapshot_id)
+
+    assert len(client.requests) == 60
+    assert len(client.messages) == 60
+    assert len({messages[0]["content"] for messages in client.messages}) == 1
+    assert "FROZEN BATCH CONTEXT" in client.messages[0][0]["content"]
+    with factory() as session:
+        run = session.get(JobRun, run_id)
+        assert run is not None
+        assert run.manifest["agent_cache"]["layers"]["LOCAL"] == 60
 
 
 def test_llm_unavailability_falls_back_to_deterministic_agents(tmp_path) -> None:

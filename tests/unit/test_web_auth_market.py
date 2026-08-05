@@ -932,6 +932,7 @@ def test_raw_kline_contract_matches_unadjusted_live_quote_basis() -> None:
     service = MarketDataService(
         primary=provider,
         settings=Settings(market_timeout_seconds=1),
+        clock=lambda: datetime(2026, 7, 17, 7, 28, tzinfo=UTC),
         redis_client=None,
     )
 

@@ -53,6 +53,16 @@ def test_usage_parser_normalizes_openai_and_grok_cache_fields() -> None:
             "completion_tokens": 11,
         }
     )
+    gateway = _usage(
+        {
+            "usage": {
+                "prompt_cache_hit_tokens": 40,
+                "prompt_cache_miss_tokens": 50,
+                "cache_creation": {"ephemeral_5m_input_tokens": 12},
+                "completion_tokens": 11,
+            }
+        }
+    )
 
     assert (
         openai.input_tokens,
@@ -66,6 +76,12 @@ def test_usage_parser_normalizes_openai_and_grok_cache_fields() -> None:
         grok.cache_write_tokens,
         grok.output_tokens,
     ) == (90, 40, 30, 11)
+    assert (
+        gateway.input_tokens,
+        gateway.cached_input_tokens,
+        gateway.cache_write_tokens,
+        gateway.output_tokens,
+    ) == (90, 40, 12, 11)
 
 
 def test_implicit_gpt_profile_enables_openai_cache_and_response_chains() -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -8,7 +9,7 @@ from pathlib import Path
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from ashare_ai.agents.ai_cache import AICacheGeneration, AIResultCacheService
+from ashare_ai.agents.ai_cache import AICacheGeneration, AICacheResult, AIResultCacheService
 from ashare_ai.storage.models import AIResponseCacheRow, Base, UserAccount
 
 
@@ -99,6 +100,48 @@ def test_ai_cache_reuses_result_and_records_hit_count(tmp_path: Path) -> None:
         assert row is not None
         assert row.hit_count == 1
         assert row.last_singleflight_wait_ms == 0
+
+
+async def _async_generation() -> AICacheGeneration:
+    return AICacheGeneration(
+        response={"value": "async"},
+        model_name="fixture-model",
+        reasoning_effort="low",
+        input_tokens=12,
+        cached_input_tokens=8,
+        output_tokens=2,
+    )
+
+
+def test_async_ai_cache_reuses_result_and_reports_layers(tmp_path: Path) -> None:
+    factory = _factory(tmp_path)
+    service = AIResultCacheService(session_factory=factory, redis_client=_FakeRedis())
+
+    async def run() -> tuple[AICacheResult, AICacheResult]:
+        first = await service.get_or_generate_async(
+            user_id="cache-user",
+            purpose="CHAT_COMPACTION",
+            request_sha256="e" * 64,
+            prompt_version="fixture-v1",
+            ttl_seconds=60,
+            validate=lambda value: value["value"],
+            generate=_async_generation,
+        )
+        second = await service.get_or_generate_async(
+            user_id="cache-user",
+            purpose="CHAT_COMPACTION",
+            request_sha256="e" * 64,
+            prompt_version="fixture-v1",
+            ttl_seconds=60,
+            validate=lambda value: value["value"],
+            generate=_async_generation,
+        )
+        return first, second
+
+    first, second = asyncio.run(run())
+    assert first.cache_layer == "SUPPLIER_PROMPT"
+    assert second.cache_layer == "LOCAL"
+    assert second.cache_hit is True
 
 
 def test_ai_cache_single_flight_only_generates_once(tmp_path: Path) -> None:

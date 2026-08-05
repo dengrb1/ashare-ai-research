@@ -1066,6 +1066,7 @@ class AIChatCompaction(Base):
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cached_input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cache_layer: Mapped[str] = mapped_column(String(16), nullable=False, default="MISS")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 

@@ -46,7 +46,7 @@ def test_cli_migrate_bootstraps_empty_database_at_alembic_head(tmp_path, monkeyp
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar()
-                assert revision == "0030_edge_gateway_validation"
+                assert revision == "0031_compaction_cache_layer"
             assert {
                 "exit_advice",
                 "ai_response_cache",

@@ -77,6 +77,7 @@ def validate_component_payload(
             output_tokens=metadata.output_tokens,
             reasoning_tokens=metadata.reasoning_tokens,
             cache_policy=metadata.cache_policy,
+            cache_layer=("SUPPLIER_PROMPT" if metadata.cached_input_tokens > 0 else "MISS"),
             duration_ms=metadata.duration_ms,
             retry_count=metadata.retry_count,
         )
@@ -112,15 +113,19 @@ async def run_component_agent(
     request: AgentRequest,
     *,
     system_instruction: str,
+    stable_prefix: str | None = None,
 ) -> AgentComponentResult:
+    system_content = system_instruction
+    if stable_prefix:
+        system_content = f"{system_instruction}\n\n{stable_prefix}"
     messages = (
-        {"role": "system", "content": system_instruction},
+        {"role": "system", "content": system_content},
         {
             "role": "user",
             "content": canonical_json(request).decode("utf-8"),
         },
     )
-    idempotency_key = stable_hash({"request": request, "system": system_instruction})
+    idempotency_key = stable_hash({"request": request, "system": system_content})
     generation = await client.generate_structured(
         schema=ComponentAnalysis,
         messages=messages,

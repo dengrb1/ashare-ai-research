@@ -234,6 +234,10 @@ def chat_cost_summary(
             AgentCall.created_at < end,
         )
     ).all():
+        local_cache_hit = (
+            isinstance(agent_call.result, dict)
+            and agent_call.result.get("cache_layer") == "LOCAL"
+        )
         add(
             at=agent_call.created_at,
             model=agent_call.model_name or "unknown",
@@ -241,7 +245,7 @@ def chat_cost_summary(
             cached_input_tokens=agent_call.cached_input_tokens,
             cache_write_tokens=agent_call.cache_write_tokens,
             output_tokens=agent_call.output_tokens,
-            cache_hit=False,
+            cache_hit=local_cache_hit,
         )
 
     ordered_dates = sorted(buckets, reverse=True)

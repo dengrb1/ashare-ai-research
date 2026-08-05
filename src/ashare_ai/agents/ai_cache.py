@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import secrets
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -66,6 +67,14 @@ class AICacheResult:
     row: AIResponseCacheRow
     cache_hit: bool
     singleflight_wait_ms: int
+
+    @property
+    def cache_layer(self) -> str:
+        if self.cache_hit:
+            return "LOCAL"
+        if self.row.cached_input_tokens > 0:
+            return "SUPPLIER_PROMPT"
+        return "MISS"
 
 
 @dataclass
@@ -306,6 +315,53 @@ class AIResultCacheService:
             )
         finally:
             self._release(cache_key, owner)
+
+    async def get_or_generate_async(
+        self,
+        *,
+        user_id: str,
+        purpose: str,
+        request_sha256: str,
+        prompt_version: str,
+        ttl_seconds: int,
+        validate: Callable[[dict[str, Any]], Any],
+        generate: Callable[[], Awaitable[AICacheGeneration]],
+    ) -> AICacheResult:
+        """Async equivalent that keeps the model call on the caller's event loop.
+
+        Database and Redis coordination are synchronous in this service.  Only
+        those short operations run in a worker thread; the awaited model call is
+        never moved to a second event loop, which is important for shared HTTPX
+        clients used by the research worker.
+        """
+
+        cached, lease = await asyncio.to_thread(
+            self.acquire,
+            user_id=user_id,
+            purpose=purpose,
+            request_sha256=request_sha256,
+            validate=validate,
+        )
+        if cached is not None:
+            return cached
+        if lease is None:
+            raise RuntimeError("AI cache did not return a generation lease")
+        try:
+            generation = await generate()
+        except BaseException:
+            await asyncio.to_thread(lease.release)
+            raise
+        return await asyncio.to_thread(
+            self.store,
+            lease=lease,
+            user_id=user_id,
+            purpose=purpose,
+            request_sha256=request_sha256,
+            prompt_version=prompt_version,
+            ttl_seconds=ttl_seconds,
+            validate=validate,
+            generation=generation,
+        )
 
     def invalidate(self, *, user_id: str, purpose: str, request_sha256: str) -> None:
         with self.session_factory() as session:

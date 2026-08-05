@@ -172,7 +172,9 @@ class OpenAICompatibleStructuredLLMClient:
         }
         advanced_controls = self._cache_policy == "OPENAI"
         if advanced_controls:
-            request_body["prompt_cache_key"] = _structured_prompt_cache_key(messages, schema)
+            request_body["prompt_cache_key"] = _structured_prompt_cache_key(
+                messages, schema, model=self._model
+            )
         chat_request_body: dict[str, Any] | None = None
         started = perf_counter()
         attempts = 0
@@ -924,24 +926,64 @@ def _usage(response: Mapping[str, Any]) -> ModelUsage:
     output_details = usage.get("output_tokens_details", usage.get("completion_tokens_details", {}))
     input_details = input_details if isinstance(input_details, Mapping) else {}
     output_details = output_details if isinstance(output_details, Mapping) else {}
+    cache_creation_details = usage.get("cache_creation", {})
+    cache_creation_details = (
+        cache_creation_details if isinstance(cache_creation_details, Mapping) else {}
+    )
     cached_input = _first_usage_value(
         usage,
         input_details,
-        keys=("cached_tokens", "cache_read_tokens", "cache_read_input_tokens"),
+        keys=(
+            "cached_tokens",
+            "cache_read_tokens",
+            "cache_read_input_tokens",
+            "prompt_cache_hit_tokens",
+            "cache_hit_tokens",
+            "cached_input_tokens",
+        ),
     )
     cache_write = _first_usage_value(
         usage,
         input_details,
-        keys=("cache_write_tokens", "cache_creation_input_tokens", "cache_creation_tokens"),
+        keys=(
+            "cache_write_tokens",
+            "cache_creation_input_tokens",
+            "cache_creation_tokens",
+            "prompt_cache_write_tokens",
+        ),
+    )
+    cache_write = max(
+        cache_write,
+        _first_usage_value(
+            cache_creation_details,
+            {},
+            keys=(
+                "input_tokens",
+                "cache_creation_input_tokens",
+                "cache_creation_tokens",
+                "ephemeral_5m_input_tokens",
+                "ephemeral_1h_input_tokens",
+            ),
+        ),
     )
     reasoning = _first_usage_value(
         usage,
         output_details,
         keys=("reasoning_tokens",),
     )
+    input_count = _non_negative_int(input_tokens)
+    if input_count == 0:
+        cache_miss = _first_usage_value(
+            usage,
+            input_details,
+            keys=("prompt_cache_miss_tokens", "cache_miss_tokens"),
+        )
+        input_count = cached_input + cache_miss
+    if input_count and cached_input > input_count:
+        cached_input = input_count
     return ModelUsage(
         (
-            _non_negative_int(input_tokens),
+            input_count,
             cached_input,
             cache_write,
             _non_negative_int(output_tokens),
@@ -962,7 +1004,7 @@ def _first_usage_value(
 
 
 def _structured_prompt_cache_key(
-    messages: Sequence[Mapping[str, Any]], schema: type[BaseModel]
+    messages: Sequence[Mapping[str, Any]], schema: type[BaseModel], *, model: str | None = None
 ) -> str:
     """Route schema calls by their invariant instruction prefix, not the request body."""
 
@@ -975,7 +1017,7 @@ def _structured_prompt_cache_key(
         prefix.append(messages[0])
     canonical = json.dumps(
         {
-            "model": schema.__name__,
+            "model": model or schema.__name__,
             "schema": _strict_json_schema(schema.model_json_schema()),
             "instructions": _messages_to_input(prefix),
         },
