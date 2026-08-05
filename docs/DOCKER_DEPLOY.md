@@ -184,6 +184,19 @@ docker compose -p ashare-ai -f compose.yaml -f compose.ghcr.yaml ps
 
 默认拉取本仓库的 `latest` 镜像。Fork 部署可在 `.env` 中设置 `ASHARE_APP_IMAGE`、`ASHARE_WEB_IMAGE` 和 `ASHARE_POSTGRES_IMAGE`。私有 GHCR Package 需先执行 `docker login ghcr.io`。
 
+这组 GHCR 镜像与 `compose.yaml` 一起构成完整部署：应用镜像复用于 API 和全部 Worker，Web、PostgreSQL
+各有专用镜像，Redis 和 SearXNG 使用 Compose 中固定 digest 的上游镜像。`edge-gateway` 是单独发布的
+alpha 镜像，启用时设置 `ASHARE_EDGE_GATEWAY_IMAGE`（默认
+`ghcr.io/dengrb1/ashare-ai-research-edge-gateway:alpha`），并使用：
+
+```bash
+docker compose -p ashare-ai -f compose.yaml -f compose.ghcr.yaml --profile edge pull
+docker compose -p ashare-ai -f compose.yaml -f compose.ghcr.yaml --profile edge up -d
+```
+
+`latest` 和 `alpha` 只在 `main` 的发布工作流成功后推进。部署固定版本时，应用、Web、PostgreSQL 与
+网关都应设置为同一构建产生的 `sha-<commit-short-sha>` 标签，避免各组件来自不同源码提交。
+
 ## 8. 升级
 
 升级前先备份 PostgreSQL：

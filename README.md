@@ -227,6 +227,8 @@ npm run build
 - 将 Web 镜像发布为 `ghcr.io/<GitHub 用户名>/ashare-ai-research-web`；
 - 将 PostgreSQL 定制镜像发布为 `ghcr.io/<GitHub 用户名>/ashare-ai-research-postgres`。三类镜像的
   `main` 分支都会更新 `latest`，发布构建还会生成分支、版本或 `sha-<commit>` 标签；
+- 将可选的 alpha 网关镜像发布为 `ghcr.io/<GitHub 用户名>/ashare-ai-research-edge-gateway`。`main`
+  分支同时更新其 `alpha` 和 `sha-<commit>` 标签；
 - 使用 PyInstaller 生成 Linux x86_64 和 Windows x86_64 的独立 `ashare-ai` CLI，并将两个文件作为
   GitHub Actions 构建产物保存 14 天。
 
@@ -237,7 +239,7 @@ npm run build
 ### 直接使用 GHCR 镜像
 
 仓库提供 [compose.ghcr.yaml](compose.ghcr.yaml)，会移除本地 `build` 配置，改为直接
-拉取 GHCR 的 Web、应用和 PostgreSQL 镜像。先将 GHCR 对应的三个 Package 设置为 **Public**（否则需要
+拉取 GHCR 的 Web、应用、PostgreSQL 和可选 Edge Gateway 镜像。先将 GHCR 对应的四个 Package 设置为 **Public**（否则需要
 先执行 `docker login ghcr.io`），然后：
 
 ```powershell
@@ -249,8 +251,12 @@ docker compose -p ashare-ai -f compose.yaml -f compose.ghcr.yaml up -d
 ```
 
 默认镜像地址对应本仓库；如果是 Fork，运行前设置 `ASHARE_APP_IMAGE`、`ASHARE_WEB_IMAGE` 和
-`ASHARE_POSTGRES_IMAGE` 为自己的 GHCR 地址即可。该方式仍然是完整多服务栈，不把 PostgreSQL、Redis
+`ASHARE_POSTGRES_IMAGE` 为自己的 GHCR 地址即可。启用 alpha 网关时另设
+`ASHARE_EDGE_GATEWAY_IMAGE`，并在命令中加入 `--profile edge`。该方式仍然是完整多服务栈，不把 PostgreSQL、Redis
 和 API 强行塞进一个容器；访问入口仍为 Nginx WebGUI 的 `http://localhost`。
+
+`latest` 和 `alpha` 都是浮动标签，仅会在对应 `main` 构建成功后更新。需要可复现升级时，让四个自定义
+镜像使用同一成功构建生成的 `sha-<commit-short-sha>` 标签；Redis、SearXNG 仍由固定 digest 的 Compose 服务提供。
 
 ## API
 

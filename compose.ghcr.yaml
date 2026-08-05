@@ -41,3 +41,7 @@ services:
   postgres:
     image: ${ASHARE_POSTGRES_IMAGE:-ghcr.io/dengrb1/ashare-ai-research-postgres:latest}
     build: null
+
+  edge-gateway:
+    image: ${ASHARE_EDGE_GATEWAY_IMAGE:-ghcr.io/dengrb1/ashare-ai-research-edge-gateway:alpha}
+    build: null

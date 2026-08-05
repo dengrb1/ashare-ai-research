@@ -38,6 +38,10 @@ jobs:
             image_suffix: "-postgres"
             context: .
             file: docker/postgres.Dockerfile
+          - image_name: edge-gateway
+            image_suffix: "-edge-gateway"
+            context: .
+            file: docker/edge-gateway.Dockerfile
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -67,6 +71,7 @@ jobs:
             type=ref,event=branch
             type=ref,event=tag
             type=sha,prefix=sha-
+            type=raw,value=alpha,enable=${{ matrix.image_name == 'edge-gateway' && github.ref == 'refs/heads/main' }}
 
       - name: Build and publish Docker image
         uses: docker/build-push-action@v6

@@ -72,6 +72,24 @@ def test_optional_edge_gateway_is_isolated_and_memory_bounded() -> None:
     assert "/var/lib/acme-webroot:rw,noexec,nosuid,size=4m" in edge["tmpfs"]
 
 
+def test_ghcr_deployment_pulls_every_custom_image() -> None:
+    ghcr = yaml.safe_load((ROOT / "compose.ghcr.yaml").read_text(encoding="utf-8"))
+    services = ghcr["services"]
+    assert "ashare-ai-research:latest" in services["api"]["image"]
+    assert "ashare-ai-research-web:latest" in services["web"]["image"]
+    assert "ashare-ai-research-postgres:latest" in services["postgres"]["image"]
+    assert "ashare-ai-research-edge-gateway:alpha" in services["edge-gateway"]["image"]
+    for service in ("api", "web", "postgres", "edge-gateway"):
+        assert services[service]["build"] is None
+
+    workflow = (ROOT / ".github" / "workflows" / "build-and-publish.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "image_name: edge-gateway" in workflow
+    assert 'image_suffix: "-edge-gateway"' in workflow
+    assert "type=raw,value=alpha" in workflow
+
+
 def test_edge_gateway_pins_downloads_and_sanitizes_forwarded_headers() -> None:
     dockerfile = (ROOT / "docker" / "edge-gateway.Dockerfile").read_text(encoding="utf-8")
     nginx = (ROOT / "docker" / "edge-gateway" / "edge.conf.template").read_text(encoding="utf-8")
