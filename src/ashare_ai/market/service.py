@@ -18,6 +18,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from functools import lru_cache
 from importlib import import_module
+from inspect import Parameter, signature
 from typing import Any, ClassVar, Protocol, cast
 
 import httpx
@@ -36,6 +37,7 @@ PERIODS = {
     "day": "daily",
     "daily": "daily",
 }
+ADJUSTMENTS = {"raw": "raw", "unadjusted": "raw", "none": "raw", "hfq": "hfq"}
 MAX_PREFETCH_SYMBOLS = 50
 # Provider calls can outlive a timed-out request. Keep the process-wide pool
 # bounded so those residual calls cannot multiply across request-local pools.
@@ -82,11 +84,19 @@ class MarketProvider(Protocol):
         start: datetime | None,
         end: datetime | None,
         limit: int,
+        adjustment: str = "hfq",
     ) -> list[dict[str, Any]]: ...
 
 
 def normalize_symbol(value: str) -> str:
     return str(canonical_symbol(value))
+
+
+def normalize_adjustment(value: str) -> str:
+    adjustment = ADJUSTMENTS.get(str(value).casefold())
+    if adjustment is None:
+        raise ValueError(f"unsupported adjustment: {value}")
+    return adjustment
 
 
 def _number(value: Any) -> float | None:
@@ -97,6 +107,27 @@ def _number(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return result if math.isfinite(result) else None
+
+
+def _valid_ohlc(
+    open_price: float | None,
+    high: float | None,
+    low: float | None,
+    close: float | None,
+) -> bool:
+    """Reject incomplete or internally inconsistent supplier bars."""
+
+    if None in (open_price, high, low, close):
+        return False
+    assert open_price is not None and high is not None and low is not None and close is not None
+    return (
+        open_price > 0
+        and high > 0
+        and low > 0
+        and close > 0
+        and low <= min(open_price, close)
+        and high >= max(open_price, close)
+    )
 
 
 def _timestamp(value: Any) -> datetime:
@@ -144,7 +175,11 @@ def _intraday_series_is_stale(
 
 
 def _merge_adjusted_intraday(
-    hfq_bars: list[dict[str, Any]], raw_bars: list[dict[str, Any]], limit: int
+    hfq_bars: list[dict[str, Any]],
+    raw_bars: list[dict[str, Any]],
+    limit: int,
+    *,
+    adjustment: str = "hfq",
 ) -> list[dict[str, Any]] | None:
     hfq_by_time = {str(item.get("timestamp")): item for item in hfq_bars}
     overlap = next(
@@ -157,7 +192,11 @@ def _merge_adjusted_intraday(
     )
     if overlap is None:
         return None
-    factor = Decimal(str(overlap[0]["close"])) / Decimal(str(overlap[1]["close"]))
+    factor = (
+        Decimal("1")
+        if adjustment == "raw"
+        else Decimal(str(overlap[0]["close"])) / Decimal(str(overlap[1]["close"]))
+    )
     merged = {str(item["timestamp"]): dict(item) for item in hfq_bars}
     for raw in raw_bars:
         adjusted = dict(raw)
@@ -170,10 +209,15 @@ def _merge_adjusted_intraday(
 
 
 def _append_adjusted_daily_quote(
-    hfq_bars: list[dict[str, Any]], quote: dict[str, Any], now: datetime, limit: int
+    bars: list[dict[str, Any]],
+    quote: dict[str, Any],
+    now: datetime,
+    limit: int,
+    *,
+    adjustment: str = "hfq",
 ) -> list[dict[str, Any]] | None:
     trading_at = quote.get("_trading_at")
-    if not hfq_bars or trading_at is None:
+    if not bars or trading_at is None:
         return None
     quote_time = _timestamp(trading_at).astimezone(SHANGHAI)
     current = now.astimezone(SHANGHAI)
@@ -182,8 +226,12 @@ def _append_adjusted_daily_quote(
     previous_close = _number(quote.get("previous_close"))
     if previous_close is None or previous_close <= 0:
         return None
-    prior = max(hfq_bars, key=lambda item: _timestamp(item["timestamp"]))
-    factor = Decimal(str(prior["close"])) / Decimal(str(previous_close))
+    prior = max(bars, key=lambda item: _timestamp(item["timestamp"]))
+    factor = (
+        Decimal("1")
+        if adjustment == "raw"
+        else Decimal(str(prior["close"])) / Decimal(str(previous_close))
+    )
     adjusted: dict[str, Any] = {
         "timestamp": current.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),
         "volume": _number(quote.get("volume")) or 0.0,
@@ -200,7 +248,7 @@ def _append_adjusted_daily_quote(
         if raw is None:
             return None
         adjusted[target] = float((Decimal(str(raw)) * factor).quantize(Decimal("0.000001")))
-    merged = {str(item["timestamp"]): dict(item) for item in hfq_bars}
+    merged = {str(item["timestamp"]): dict(item) for item in bars}
     merged[str(adjusted["timestamp"])] = adjusted
     return sorted(merged.values(), key=lambda item: str(item["timestamp"]))[-limit:]
 
@@ -219,6 +267,7 @@ def _kline_cache_key(
     end: datetime | None,
     *,
     bucket_seconds: int,
+    adjustment: str = "hfq",
 ) -> str:
     """Match cache identity to supplier precision, not browser timestamp noise."""
 
@@ -237,7 +286,7 @@ def _kline_cache_key(
 
         start_key = bucket(start, "default")
         end_key = bucket(end, "latest")
-    return f"klines:{symbol}:{period}:{limit}:{start_key}:{end_key}:hfq"
+    return f"klines:{symbol}:{period}:{limit}:{start_key}:{end_key}:{adjustment}"
 
 
 def _canonical_kline_bounds(
@@ -328,10 +377,28 @@ def _validated_kline_bars(
             )
         if outside:
             raise RuntimeError("provider returned bars outside the requested range")
-        numeric_fields = ("open", "high", "low", "close", "volume")
-        if any(_number(raw.get(field)) is None for field in numeric_fields):
-            raise RuntimeError("provider returned non-finite bars")
-        validated.append(raw)
+        open_price = _number(raw.get("open"))
+        high = _number(raw.get("high"))
+        low = _number(raw.get("low"))
+        close = _number(raw.get("close"))
+        volume = _number(raw.get("volume"))
+        # A zero price is never a tradable A-share price. Providers sometimes
+        # use it for a missing intraday row; retaining it creates a full-height
+        # candle in clients and corrupts indicator ranges.
+        if not _valid_ohlc(open_price, high, low, close) or volume is None or volume < 0:
+            continue
+        validated.append(
+            {
+                **raw,
+                "open": open_price,
+                "high": high,
+                "low": low,
+                "close": close,
+                "volume": volume,
+            }
+        )
+    if not validated:
+        raise RuntimeError("provider returned no valid OHLC bars")
     return sorted(validated, key=lambda item: _timestamp(item["timestamp"]))[-limit:]
 
 
@@ -374,10 +441,12 @@ class _AKShareInProcessProvider:
         start: datetime | None,
         end: datetime | None,
         limit: int,
+        adjustment: str = "hfq",
     ) -> list[dict[str, Any]]:
         code = normalize_symbol(symbol).split(".", 1)[0]
         sdk = self._sdk()
         effective_end = end or datetime.now(SHANGHAI)
+        adjustment = normalize_adjustment(adjustment)
         if period == "daily":
             effective_start = start or effective_end - timedelta(days=max(limit * 2, 365))
             frame = sdk.stock_zh_a_hist(
@@ -385,7 +454,7 @@ class _AKShareInProcessProvider:
                 period="daily",
                 start_date=effective_start.strftime("%Y%m%d"),
                 end_date=effective_end.strftime("%Y%m%d"),
-                adjust="hfq",
+                adjust="hfq" if adjustment == "hfq" else "",
             )
         else:
             effective_start = start or effective_end - timedelta(days=max(5, limit // 20 + 1))
@@ -394,18 +463,25 @@ class _AKShareInProcessProvider:
                 period=period,
                 start_date=effective_start.strftime("%Y-%m-%d %H:%M:%S"),
                 end_date=effective_end.strftime("%Y-%m-%d %H:%M:%S"),
-                adjust="hfq",
+                adjust="hfq" if adjustment == "hfq" else "",
             )
         bars = []
         for item in frame.tail(limit).to_dict(orient="records"):
+            open_price = _number(item.get("开盘"))
+            high = _number(item.get("最高"))
+            low = _number(item.get("最低"))
+            close = _number(item.get("收盘"))
+            volume = _number(item.get("成交量"))
+            if not _valid_ohlc(open_price, high, low, close) or volume is None or volume < 0:
+                continue
             bars.append(
                 {
                     "timestamp": _timestamp(item.get("时间", item.get("日期"))).isoformat(),
-                    "open": _number(item.get("开盘")) or 0.0,
-                    "high": _number(item.get("最高")) or 0.0,
-                    "low": _number(item.get("最低")) or 0.0,
-                    "close": _number(item.get("收盘")) or 0.0,
-                    "volume": _number(item.get("成交量")) or 0.0,
+                    "open": open_price,
+                    "high": high,
+                    "low": low,
+                    "close": close,
+                    "volume": volume,
                     "amount": _number(item.get("成交额")),
                     "turnover_rate": _number(item.get("换手率")),
                 }
@@ -629,7 +705,9 @@ class AKShareMarketProvider:
         start: datetime | None,
         end: datetime | None,
         limit: int,
+        adjustment: str = "hfq",
     ) -> list[dict[str, Any]]:
+        adjustment = normalize_adjustment(adjustment)
         return self._request(
             {
                 "operation": "klines",
@@ -638,6 +716,7 @@ class AKShareMarketProvider:
                 "start": start.isoformat() if start is not None else None,
                 "end": end.isoformat() if end is not None else None,
                 "limit": limit,
+                "adjustment": adjustment,
             },
             maximum_items=limit,
         )
@@ -649,6 +728,7 @@ class AKShareMarketProvider:
         start: datetime | None,
         end: datetime | None,
         limit: int,
+        adjustment: str = "hfq",
     ) -> list[dict[str, Any]]:
         return self._request(
             {
@@ -658,6 +738,7 @@ class AKShareMarketProvider:
                 "start": start.isoformat() if start is not None else None,
                 "end": end.isoformat() if end is not None else None,
                 "limit": limit,
+                "adjustment": adjustment,
             },
             maximum_items=limit,
             background=True,
@@ -756,6 +837,7 @@ class SinaMarketProvider:
         start: datetime | None,
         end: datetime | None,
         limit: int,
+        adjustment: str = "hfq",
     ) -> list[dict[str, Any]]:
         scale = self._scales.get(period)
         if scale is None:
@@ -809,7 +891,7 @@ class SinaMarketProvider:
 
 
 class TencentHfqDailyMarketProvider:
-    """Public Tencent endpoint for post-adjusted daily bars without AKShare."""
+    """Public Tencent endpoint for daily bars with an explicit price basis."""
 
     source = "tencent"
     delayed = False
@@ -834,9 +916,11 @@ class TencentHfqDailyMarketProvider:
         start: datetime | None,
         end: datetime | None,
         limit: int,
+        adjustment: str = "hfq",
     ) -> list[dict[str, Any]]:
         if period != "daily":
             raise ValueError("Tencent fallback only supports daily K-lines")
+        adjustment = normalize_adjustment(adjustment)
         effective_end = _timestamp(end or datetime.now(SHANGHAI))
         effective_start = _timestamp(
             start or effective_end - timedelta(days=max(limit * 2, 365))
@@ -844,13 +928,13 @@ class TencentHfqDailyMarketProvider:
         provider_symbol = self._provider_symbol(symbol)
         bars_by_timestamp: dict[str, dict[str, Any]] = {}
         for year in range(effective_start.year, effective_end.year + 1):
-            variable = f"kline_dayhfq{year}"
+            variable = f"kline_day{'hfq' if adjustment == 'hfq' else ''}{year}"
             response = httpx.get(
                 self._kline_url,
                 params={
                     "_var": variable,
                     "param": (
-                        f"{provider_symbol},day,{year}-01-01,{year + 1}-12-31,640,hfq"
+                        f"{provider_symbol},day,{year}-01-01,{year + 1}-12-31,640,{adjustment}"
                     ),
                     "r": "0.8205512681390605",
                 },
@@ -866,10 +950,14 @@ class TencentHfqDailyMarketProvider:
             data = payload.get("data", {}).get(provider_symbol, {})
             # Tencent exposes post-adjusted rows as ``hfqday`` for equities,
             # but index symbols (including sh000300) use ``day`` despite the
-            # request's ``hfq`` adjustment parameter.  Both payloads have the
-            # same row layout.  Treating the latter as absent made otherwise
-            # valid index K-line queries fail closed.
-            rows = data.get("hfqday") or data.get("day", [])
+            # request's ``hfq`` adjustment parameter. Raw requests must use
+            # ``day`` only; falling back to ``hfqday`` there would recreate the
+            # dividend-induced price mismatch this adapter is meant to prevent.
+            rows = (
+                data.get("hfqday") or data.get("day", [])
+                if adjustment == "hfq"
+                else data.get("day", [])
+            )
             if not isinstance(rows, list):
                 continue
             for item in rows:
@@ -940,7 +1028,9 @@ class TushareMarketProvider:
         start: datetime | None,
         end: datetime | None,
         limit: int,
+        adjustment: str = "hfq",
     ) -> list[dict[str, Any]]:
+        adjustment = normalize_adjustment(adjustment)
         effective_end = end or datetime.now(SHANGHAI)
         if period == "daily":
             effective_start = start or effective_end - timedelta(days=max(limit * 2, 365))
@@ -959,7 +1049,7 @@ class TushareMarketProvider:
             ts_code=normalize_symbol(symbol),
             start_date=start_value,
             end_date=end_value,
-            adj="hfq",
+            adj="hfq" if adjustment == "hfq" else None,
             freq=frequency,
         )
         if frame is None or frame.empty:
@@ -1145,6 +1235,12 @@ class MarketDataService:
             while len(self._cache) > self.settings.market_cache_max_entries:
                 self._cache.popitem(last=False)
 
+    @staticmethod
+    def _normalize_quote(item: dict[str, Any]) -> dict[str, Any]:
+        """Quotes are provider-native, unadjusted prices by contract."""
+
+        return {**item, "price_basis": "raw"}
+
     def _submit_call(self, function: Any, *args: Any) -> Future[Any]:
         if not self._provider_slots.acquire(blocking=False):
             raise TimeoutError("market provider queue is saturated")
@@ -1171,6 +1267,33 @@ class MarketDataService:
             future.cancel()
             raise TimeoutError("market provider timeout") from exc
 
+    def _call_kline_provider(
+        self,
+        function: Any,
+        symbol: str,
+        period: str,
+        start: datetime | None,
+        end: datetime | None,
+        limit: int,
+        adjustment: str,
+    ) -> Any:
+        """Call legacy test/custom providers while passing the basis to built-ins."""
+
+        try:
+            parameters = signature(function).parameters.values()
+            supports_adjustment = any(
+                parameter.name == "adjustment"
+                or parameter.kind == Parameter.VAR_POSITIONAL
+                or parameter.kind == Parameter.VAR_KEYWORD
+                for parameter in parameters
+            )
+        except (TypeError, ValueError):
+            supports_adjustment = True
+        args = (symbol, period, start, end, limit)
+        if supports_adjustment:
+            return self._call(function, *args, adjustment)
+        return self._call(function, *args)
+
     def _hedged_daily_kline(
         self,
         tencent: TencentHfqDailyMarketProvider,
@@ -1180,6 +1303,7 @@ class MarketDataService:
         limit: int,
         *,
         background: bool,
+        adjustment: str,
     ) -> tuple[MarketProvider, list[dict[str, Any]], datetime]:
         """Start Tencent only when the warmed AKShare request misses its latency budget."""
 
@@ -1192,7 +1316,7 @@ class MarketDataService:
         deadline = started + self.settings.market_timeout_seconds
         primary_collected = self.clock()
         primary_future = self._submit_call(
-            primary_call, symbol, "daily", start, end, limit
+            primary_call, symbol, "daily", start, end, limit, adjustment
         )
         futures: dict[Future[Any], tuple[MarketProvider, datetime]] = {
             primary_future: (self.primary, primary_collected)
@@ -1222,7 +1346,7 @@ class MarketDataService:
         tencent_collected = self.clock()
         try:
             tencent_future = self._submit_call(
-                tencent.klines, symbol, "daily", start, end, limit
+                tencent.klines, symbol, "daily", start, end, limit, adjustment
             )
             futures[tencent_future] = (tencent, tencent_collected)
         except Exception as exc:
@@ -1299,7 +1423,12 @@ class MarketDataService:
                 if item["symbol"] not in requested:
                     continue
                 status = item.get("status") if isinstance(item.get("status"), dict) else {}
-                rows.append({**item, "status": {**status, "cache_hit": cache_hit}})
+                rows.append(
+                    {
+                        **self._normalize_quote(item),
+                        "status": {**status, "cache_hit": cache_hit},
+                    }
+                )
             return rows
 
         now = self.clock()
@@ -1366,7 +1495,10 @@ class MarketDataService:
                             item_symbol = item.get("symbol")
                             if not isinstance(item_symbol, str):
                                 continue
-                            refreshed[item_symbol] = {**item, "status": provider_status}
+                            refreshed[item_symbol] = {
+                                **self._normalize_quote(item),
+                                "status": provider_status,
+                            }
                             returned.add(item_symbol)
                         missing -= returned
                     except Exception as exc:
@@ -1421,7 +1553,7 @@ class MarketDataService:
         cached = self._get(key, now)
 
         def cached_item(record: dict[str, Any], *, cache_hit: bool = False) -> dict[str, Any]:
-            item = dict(record["item"])
+            item = self._normalize_quote(dict(record["item"]))
             status: dict[str, Any] = (
                 dict(item["status"]) if isinstance(item.get("status"), dict) else {}
             )
@@ -1461,7 +1593,7 @@ class MarketDataService:
                             raise RuntimeError("provider returned no requested quote")
                         cached_at = self.clock()
                         value = {
-                            **item,
+                            **self._normalize_quote(item),
                             "status": self._status(
                                 provider.source,
                                 collected.isoformat(),
@@ -1506,8 +1638,10 @@ class MarketDataService:
         end: datetime | None = None,
         force_refresh: bool = False,
         background: bool = False,
+        adjustment: str = "hfq",
     ) -> dict[str, Any]:
         normalized = normalize_symbol(symbol)
+        adjustment = normalize_adjustment(adjustment)
         provider_period = PERIODS.get(period.casefold())
         if provider_period is None:
             raise ValueError(f"unsupported period: {period}")
@@ -1518,6 +1652,7 @@ class MarketDataService:
             start,
             end,
             bucket_seconds=self.settings.market_cache_seconds,
+            adjustment=adjustment,
         )
         fetch_start, fetch_end = _canonical_kline_bounds(
             provider_period,
@@ -1579,6 +1714,7 @@ class MarketDataService:
                             fetch_end,
                             limit,
                             background=background,
+                            adjustment=adjustment,
                         )
                     except Exception as exc:
                         errors.append(f"daily hedge: {exc}")
@@ -1600,13 +1736,14 @@ class MarketDataService:
                                 if background and isinstance(provider, AKShareMarketProvider)
                                 else provider.klines
                             )
-                            bars = self._call(
+                            bars = self._call_kline_provider(
                                 provider_call,
                                 normalized,
                                 provider_period,
                                 fetch_start,
                                 fetch_end,
                                 limit,
+                                adjustment,
                             )
                             bars = _validated_kline_bars(
                                 bars, provider_period, fetch_start, fetch_end, limit
@@ -1624,9 +1761,16 @@ class MarketDataService:
                                 stale_primary_bars = bars
                             raise RuntimeError("provider returned a stale K-line series")
                         if stale_primary_bars is not None and provider_period != "daily":
-                            merged = _merge_adjusted_intraday(stale_primary_bars, bars, limit)
+                            merged = _merge_adjusted_intraday(
+                                stale_primary_bars,
+                                bars,
+                                limit,
+                                adjustment=adjustment,
+                            )
                             if merged is None:
-                                raise RuntimeError("fallback cannot be aligned to the hfq series")
+                                raise RuntimeError(
+                                    f"fallback cannot be aligned to the {adjustment} series"
+                                )
                             bars = merged
                             source = f"{self.primary.source}+{provider.source}"
                             status_message = "主数据源分钟线滞后，已用实时备用源对齐补齐"
@@ -1636,7 +1780,7 @@ class MarketDataService:
                             "period": (
                                 "day" if provider_period == "daily" else f"{provider_period}m"
                             ),
-                            "adjustment": "hfq",
+                            "adjustment": adjustment,
                             "bars": bars,
                             "status": self._status(
                                 source,
@@ -1678,21 +1822,29 @@ class MarketDataService:
                         try:
                             quote_rows = self._call(quote_provider.quotes, [normalized])
                             merged = _append_adjusted_daily_quote(
-                                stale_candidate[1], quote_rows[0], self.clock(), limit
+                                stale_candidate[1],
+                                quote_rows[0],
+                                self.clock(),
+                                limit,
+                                adjustment=adjustment,
                             )
                             if merged is not None:
                                 cached_at = self.clock()
                                 value = {
                                     "symbol": normalized,
                                     "period": "day",
-                                    "adjustment": "hfq",
+                                    "adjustment": adjustment,
                                     "bars": merged,
                                     "status": self._status(
                                         f"{stale_candidate[0].source}+{quote_provider.source}",
                                         cached_at.isoformat(),
                                         cached_at.isoformat(),
                                         delayed=False,
-                                        message="历史后复权日线滞后，已用当日收盘行情对齐补齐",
+                                        message=(
+                                            "历史日线滞后，已用当日未复权行情对齐补齐"
+                                            if adjustment == "raw"
+                                            else "历史后复权日线滞后，已用当日行情对齐补齐"
+                                        ),
                                     ),
                                 }
                                 self._set(
@@ -1721,7 +1873,7 @@ class MarketDataService:
                     value = {
                         "symbol": normalized,
                         "period": "day" if provider_period == "daily" else f"{provider_period}m",
-                        "adjustment": "hfq",
+                        "adjustment": adjustment,
                         "bars": stale_bars,
                         "status": self._status(
                             stale_source,
@@ -1755,12 +1907,14 @@ class MarketDataService:
         periods: list[str] | None = None,
         limit: int = 160,
         include_quotes: bool = True,
+        adjustment: str = "raw",
     ) -> dict[str, Any]:
         """Warm selected live-data caches without coupling them to PIT snapshots."""
 
         normalized = sorted(set(normalize_symbol(item) for item in symbols if item.strip()))
         if not normalized:
             raise ValueError("at least one symbol is required")
+        adjustment = normalize_adjustment(adjustment)
         if len(normalized) > MAX_PREFETCH_SYMBOLS:
             raise ValueError(f"prefetch supports at most {MAX_PREFETCH_SYMBOLS} symbols")
         requested_periods = []
@@ -1785,7 +1939,12 @@ class MarketDataService:
             quote_future = pool.submit(self.quotes, normalized) if include_quotes else None
             kline_futures = {
                 pool.submit(
-                    self.klines, symbol, period, limit=limit, background=True
+                    self.klines,
+                    symbol,
+                    period,
+                    limit=limit,
+                    background=True,
+                    adjustment=adjustment,
                 ): (symbol, period)
                 for symbol in normalized
                 for period in requested_periods
@@ -1827,6 +1986,9 @@ class MarketDataService:
             "prefetch_max_symbols": MAX_PREFETCH_SYMBOLS,
             "stale_seconds": self.settings.market_stale_seconds,
             "adjustment": "hfq",
+            "live_quote_price_basis": "raw",
+            "live_kline_default_adjustment": "raw",
+            "supported_adjustments": ["raw", "hfq"],
             "live_data_isolated_from_snapshots": True,
             "provider_process_mode": (
                 "REUSABLE" if isinstance(self.primary, AKShareMarketProvider) else "IN_PROCESS"

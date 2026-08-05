@@ -8,12 +8,14 @@ ACME_HOME=/var/lib/acme
 ACME_WEBROOT=/var/lib/acme-webroot
 CERT_DIR=/etc/edge/certs
 ACME_CA_SERVER="${EDGE_ACME_CA_SERVER:-letsencrypt}"
+LOG_DIR="${EDGE_GATEWAY_LOG_DIR:-/var/log/edge}"
+FRPC_LOG="$LOG_DIR/frpc.log"
 FRPC_PID=""
 RENEW_PID=""
 NGINX_PID=""
 
 mkdir -p "$ACME_HOME" "$ACME_WEBROOT" "$CERT_DIR" /tmp/client_temp /tmp/proxy_temp \
-  /tmp/fastcgi_temp /tmp/uwsgi_temp /tmp/scgi_temp
+  /tmp/fastcgi_temp /tmp/uwsgi_temp /tmp/scgi_temp "$LOG_DIR"
 # The container intentionally drops DAC_OVERRIDE.  Keep ACME's persistent
 # account and certificate stores root-owned so the root-run acme.sh process can
 # create and renew keys; only Nginx's worker temp paths need nginx ownership.
@@ -21,6 +23,9 @@ chown -R nginx:nginx /tmp/client_temp /tmp/proxy_temp /tmp/fastcgi_temp /tmp/uws
 
 export EDGE_DOMAIN
 envsubst '${EDGE_DOMAIN}' < /etc/nginx/templates/edge.conf.template > /tmp/edge.conf
+if [ -s /etc/edge/managed.conf ]; then
+  cat /etc/edge/managed.conf >> /tmp/edge.conf
+fi
 
 stop_children() {
   [ -n "$NGINX_PID" ] && nginx -s quit >/dev/null 2>&1 || true
@@ -35,7 +40,8 @@ if [ "${EDGE_FRPC_ENABLED:-false}" = "true" ]; then
     echo "EDGE_FRPC_ENABLED=true requires a non-empty /etc/edge/frpc.toml mount" >&2
     exit 1
   fi
-  frpc -c /etc/edge/frpc.toml &
+  : > "$FRPC_LOG"
+  frpc -c /etc/edge/frpc.toml >> "$FRPC_LOG" 2>&1 &
   FRPC_PID=$!
 fi
 

@@ -31,6 +31,7 @@ from ashare_ai.market.service import (
     SinaMarketProvider,
     TencentHfqDailyMarketProvider,
     _intraday_series_is_stale,
+    _validated_kline_bars,
 )
 from ashare_ai.storage.models import (
     ActiveModelConfiguration,
@@ -61,6 +62,30 @@ def test_kline_staleness_is_checked_after_close_and_respects_lunch_break() -> No
     lunch_bar = [{**previous_close[0], "timestamp": "2026-07-20T11:30:00+08:00"}]
     monday_lunch = datetime(2026, 7, 20, 4, 30, tzinfo=UTC)
     assert not _intraday_series_is_stale(lunch_bar, "5", None, monday_lunch)
+
+
+def test_kline_validation_discards_impossible_zero_price_rows() -> None:
+    rows = [
+        {
+            "timestamp": "2026-07-17T09:31:00+08:00",
+            "open": 10,
+            "high": 11,
+            "low": 9,
+            "close": 10.5,
+            "volume": 100,
+        },
+        {
+            "timestamp": "2026-07-17T09:32:00+08:00",
+            "open": 0,
+            "high": 0,
+            "low": 0,
+            "close": 0,
+            "volume": 0,
+        },
+    ]
+    validated = _validated_kline_bars(rows, "1", None, None, 10)
+    assert len(validated) == 1
+    assert validated[0]["close"] == 10.5
 
 
 def test_lagging_hfq_daily_series_is_completed_from_current_sina_close() -> None:
@@ -624,7 +649,9 @@ def test_market_kline_api_forwards_segment_boundaries_and_refresh(monkeypatch) -
     calls: list[dict[str, object]] = []
 
     class StubMarket:
-        def klines(self, symbol, period, *, limit, start, end, force_refresh):
+        def klines(
+            self, symbol, period, *, limit, start, end, force_refresh, adjustment="hfq"
+        ):
             calls.append(
                 {
                     "symbol": symbol,
@@ -633,12 +660,13 @@ def test_market_kline_api_forwards_segment_boundaries_and_refresh(monkeypatch) -
                     "start": start,
                     "end": end,
                     "force_refresh": force_refresh,
+                    "adjustment": adjustment,
                 }
             )
             return {
                 "symbol": symbol,
                 "period": period,
-                "adjustment": "hfq",
+                "adjustment": adjustment,
                 "bars": [
                     {
                         "timestamp": "2026-07-15T09:31:00+08:00",
@@ -691,8 +719,16 @@ def test_market_kline_api_forwards_segment_boundaries_and_refresh(monkeypatch) -
                 "start": datetime.fromisoformat("2026-07-10T09:30:00+08:00"),
                 "end": datetime.fromisoformat("2026-07-17T15:00:00+08:00"),
                 "force_refresh": True,
+                "adjustment": "hfq",
             }
         ]
+        raw = client.get(
+            "/api/v1/market/klines/600519.SH",
+            params={"adjust": "raw"},
+        )
+        assert raw.status_code == 200
+        assert raw.json()["adjustment"] == "raw"
+        assert calls[-1]["adjustment"] == "raw"
         assert client.get(
             "/api/v1/market/klines/600519.SH", params={"adjust": "qfq"}
         ).status_code == 422
@@ -870,6 +906,41 @@ def test_tushare_fallback_is_labeled_and_hfq_kline_contract_is_preserved() -> No
     assert kline["status"]["source"] == "tushare"
     assert kline["bars"][0]["close"] == 10.5
     assert kline["bars"][0]["turnover_rate"] == 1.25
+
+
+def test_raw_kline_contract_matches_unadjusted_live_quote_basis() -> None:
+    class RawProvider(QuoteProvider):
+        def quotes(self, symbols):
+            del symbols
+            return [{"symbol": "600900.SH", "price": 27.73}]
+
+        def klines(self, symbol, period, start, end, limit, adjustment="hfq"):
+            del symbol, period, start, end, limit
+            assert adjustment == "raw"
+            return [
+                {
+                    "timestamp": "2026-07-17T00:00:00+08:00",
+                    "open": 27.5,
+                    "high": 28.3,
+                    "low": 27.4,
+                    "close": 27.73,
+                    "volume": 100,
+                }
+            ]
+
+    provider = RawProvider()
+    service = MarketDataService(
+        primary=provider,
+        settings=Settings(market_timeout_seconds=1),
+        redis_client=None,
+    )
+
+    quote = service.quotes(["600900.SH"])[0]
+    kline = service.klines("600900.SH", "day", limit=1, adjustment="raw")
+
+    assert quote["price_basis"] == "raw"
+    assert kline["adjustment"] == "raw"
+    assert kline["bars"][0]["close"] == 27.73
 
 
 def test_missing_primary_quote_is_filled_by_tushare_without_dropping_primary_data() -> None:
@@ -1541,6 +1612,7 @@ def test_research_submission_prepares_frozen_manifest_and_deduplicates(monkeypat
                 "total_budget": 1_000_000,
                 "per_symbol_budget": 80_000,
                 "max_stock_price": 500,
+                "supreme_mode": True,
             },
             headers={"x-csrf-token": csrf, "Idempotency-Key": "mobile-research-1"},
         )
@@ -1553,11 +1625,29 @@ def test_research_submission_prepares_frozen_manifest_and_deduplicates(monkeypat
                 "total_budget": 1_000_000,
                 "per_symbol_budget": 80_000,
                 "max_stock_price": 500,
+                "supreme_mode": True,
             },
             headers={"x-csrf-token": csrf, "Idempotency-Key": "mobile-research-1"},
         )
         assert first.status_code == 202
         assert second.status_code == 200
+        assert first.json()["supreme_mode"] is True
+        assert first.json()["execution_profile"] is None
+        reused_with_standard_mode = client.post(
+            "/api/v1/research/runs",
+            json={
+                "trading_date": "2026-07-14",
+                "scope": "CUSTOM",
+                "symbols": ["600519.SH", "000858.SZ"],
+                "total_budget": 1_000_000,
+                "per_symbol_budget": 80_000,
+                "max_stock_price": 500,
+                "supreme_mode": False,
+            },
+            headers={"x-csrf-token": csrf, "Idempotency-Key": "mobile-research-2"},
+        )
+        assert reused_with_standard_mode.status_code == 200
+        assert reused_with_standard_mode.json()["supreme_mode"] is True
         conflicting = client.post(
             "/api/v1/research/runs",
             json={
@@ -1577,6 +1667,7 @@ def test_research_submission_prepares_frozen_manifest_and_deduplicates(monkeypat
         assert run.status == "PENDING"
         assert run.manifest["dependency_lock_sha256"] == "d" * 64
         assert run.manifest["research_scope"] == "CUSTOM"
+        assert run.manifest["supreme_mode"] is True
         assert run.manifest["target_symbols"] == ["600519.SH", "000858.SZ"]
         assert run.manifest["tracked_symbols"] == ["000858.SZ", "600519.SH"]
         assert run.manifest["research_budget"] == {

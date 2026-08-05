@@ -16,7 +16,7 @@ import { AdminPage } from './pages/AdminPage'
 import { FinancialSearchPage } from './pages/FinancialSearchPage'
 import { ModelSettingsPage } from './pages/ModelSettingsPage'
 import { SystemSettingsPage } from './pages/SystemSettingsPage'
-import { AboutPage } from './pages/AboutPage'
+import { EdgeGatewayPage } from './pages/EdgeGatewayPage'
 import { ExitAdvicePage } from './pages/ExitAdvicePage'
 import { AIChatPage } from './pages/AIChatPage'
 import { ThemeProvider } from './context/ThemeContext'
@@ -50,7 +50,7 @@ function AppRoutes() {
         <Route path="reports" element={<ReportsPage />} />
         <Route path="runs" element={<RunsPage />} />
         <Route path="backtest" element={<BacktestPage />} />
-        <Route path="about" element={<AboutPage />} />
+        <Route path="admin/edge-gateway" element={<EdgeGatewayPage />} />
         <Route path="admin" element={<AdminPage />} />
         <Route path="admin/models" element={<ModelSettingsPage />} />
         <Route path="admin/system-settings" element={<SystemSettingsPage />} />

@@ -356,6 +356,7 @@ def _submit_auto_for_user(
             "target_symbols": target_symbols,
             "tracked_symbols": target_symbols,
             "research_budget": budget,
+            "supreme_mode": False,
             "portfolio_requested": portfolio_requested,
             "research_only_reason": (
                 None

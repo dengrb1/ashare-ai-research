@@ -154,10 +154,14 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 模型设置 | GET/PUT | `/api/v1/admin/model-settings` | 管理员 |
 | 模型设置 | POST | `/api/v1/admin/model-settings/test` | 管理员、写入 |
 | 模型设置 | POST | `/api/v1/admin/model-settings/models` | 管理员、写入 |
+| 模型诊断日志 | GET | `/api/v1/admin/model-settings/logs` | 管理员；脱敏探测状态与错误 |
 | 系统设置 | GET/PUT/DELETE | `/api/v1/admin/system-settings` | 管理员；PUT 幂等、写入 |
 | 系统设置 | DELETE | `/api/v1/admin/system-settings/{field}` | 管理员、写入 |
 | 系统设置解锁 | POST | `/api/v1/admin/system-settings/unlock` | 管理员、写入；当前账户密码二次验证 |
 | 系统资源 | GET | `/api/v1/admin/system-resources` | 管理员；运行环境只读指标 |
+| Edge Gateway | GET/PUT | `/api/v1/admin/edge-gateway` | 管理员；写入需解锁与幂等键 |
+| Edge Gateway 校验 | POST | `/api/v1/admin/edge-gateway/validate` | 管理员；结构化 Nginx/FRP 校验 |
+| Edge Gateway 回滚 | POST | `/api/v1/admin/edge-gateway/rollback` | 管理员；写入需解锁 |
 | 研究结果 | GET | `/api/v1/scores/{trading_date}` | 登录 |
 | 研究结果 | GET | `/api/v1/scores/{trading_date}/{symbol}` | 登录 |
 | 研究结果 | GET | `/api/v1/scores/{trading_date}/{symbol}/lineage` | 登录 |
@@ -363,7 +367,9 @@ AI 对话线程和消息均按当前用户保存。消息正文中的 `@名称`�
 | `completed_at` | datetime/null | 完成或失败时间 |
 | `error_message` | string/null | 已脱敏的失败原因 |
 
-`ResearchRunResponse` 继承 `RunResponse`，并增加：`phase`、`progress`（0–100）、`report_id`、`report_type`、`report_created_at`、`research_scope`、`target_symbols`、`total_budget`、`per_symbol_budget`、`max_stock_price`、`portfolio_requested`、`portfolio_generated`、`reason_code`、`reason_message`、`formal_eligible_count`、`excluded_symbol_count`、`portfolio_reason_code`、`portfolio_reason_message`、`trigger_source`（`AUTO|MANUAL`）、`automatic_report_slot`（自动任务为 `A|B`，手动任务为 null）和 `requested_date`。
+`ResearchRunResponse` 继承 `RunResponse`，并增加：`phase`、`progress`（0–100）、`report_id`、`report_type`、`report_created_at`、`research_scope`、`target_symbols`、`total_budget`、`per_symbol_budget`、`max_stock_price`、`portfolio_requested`、`portfolio_generated`、`reason_code`、`reason_message`、`formal_eligible_count`、`excluded_symbol_count`、`portfolio_reason_code`、`portfolio_reason_message`、`trigger_source`（`AUTO|MANUAL`）、`automatic_report_slot`（自动任务为 `A|B`，手动任务为 null）、`requested_date`、`supreme_mode` 和可空的 `execution_profile`。
+
+`execution_profile` 仅在 Worker 开始数据同步后出现，字段为 `policy_version`、`mode=STANDARD|SUPREME`、`data_fetch_workers`、`model_agent_max_concurrency`、固定为 `false` 的 `model_concurrency_changed`、`resource_scope=HOST|CONTAINER`、`logical_cores`、`cpu_percent`、`available_memory_bytes`、可空 `memory_limit_bytes`/`active_memory_bytes`、`memory_budget_bytes`、`resource_level=NORMAL|WARNING|CRITICAL` 和 `reason_codes[]`。它是已固化的本次采集档案，不应用作修改运行中任务的控制通道；`model_agent_max_concurrency` 只是观测值，至高模式不会提升它。
 
 `BacktestRequest`：
 
@@ -389,6 +395,7 @@ AI 对话线程和消息均按当前用户保存。消息正文中的 `@名称`�
 | `total_budget` | decimal/null | 大于 0且不超过 100,000,000,000 |
 | `per_symbol_budget` | decimal/null | 大于 0且不超过 100,000,000,000，不能大于总预算 |
 | `max_stock_price` | decimal/null | 大于 0且不超过 10,000,000 |
+| `supreme_mode` | boolean | 默认 `false`；仅为本次数据采集请求自适应并行，绝不提高模型并发 |
 
 `WATCHLIST` 的 `symbols` 可以省略，表示当前用户全部自选股与模拟持仓；如果显式传入，所有代码必须属于当前用户的自选股或持仓。`CUSTOM` 必须至少包含一只代码。非交易日会解析为可用的最近完成交易日；若数据未就绪返回 `409`。
 
@@ -460,7 +467,17 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 
 `POST /api/v1/admin/model-settings/test` 返回 `ModelProbeResponse`：`reachable`、`message`、`model`、`checked_at`、`structured_output_supported`、`streaming_supported`。该显式操作才会在结构化探测后追加一次 8 秒上限的流式能力检测并更新 `streaming_supported`。`POST /api/v1/admin/model-settings/models` 返回 `{"models":["..."]}`。
 
+`GET /api/v1/admin/model-settings/logs?limit=50` 返回最近模型探测日志，`limit` 范围为 1–200。每项包含 `model`、`purpose`、`protocol`、`endpoint_path`、`request_mode`、`outcome`、`http_status`、`error_code`、`message`、`duration_ms`、`header_presence` 和 `created_at`。日志不保存 API Key、Authorization 值、Prompt 或上游完整响应正文；`header_presence` 只表示必要请求头是否已生成。
+
 ### 系统设置中心
+
+### Edge Gateway 配置中心
+
+`GET /api/v1/admin/edge-gateway` 返回当前版本、结构化代理主机、配置哈希、应用状态和 `source_sync`；未携带有效 `X-System-Settings-Unlock` 时不返回 FRP 明文。服务端每次读取都会检查部署配置目录中的 `frpc.toml`/`managed.conf`，外部变更会导入新的不可变版本。`PUT` 使用当前管理员解锁令牌保存最多 32 个代理主机和 64 KiB FRP TOML，FRP 内容使用 `EDGE_GATEWAY_ENCRYPTION_KEYS` 加密，提交按 `Idempotency-Key` 去重。代理目标必须匹配 `EDGE_PROXY_TARGET_ALLOWLIST`（默认 `web`）或私有/回环 IP，禁止自定义 Nginx 指令。
+
+请求和响应中的 `validation_mode` 为 `STRICT` 或 `COMPATIBLE`，默认 `STRICT`。严格模式要求当前 FRP camelCase 字段；兼容模式额外接受旧版 `[common]`、snake_case 连接/代理字段和旧式代理段落名，适合 FRP 0.x 配置。两种模式都会拒绝非法 TOML、非 `127.0.0.1` 的 FRP 本地目标以及非 80/443 的网关端口，不能用来关闭安全门禁。`GET /api/v1/admin/edge-gateway/logs?limit=200` 返回最近 FRP 运行日志；日志只读取部署挂载的日志目录并脱敏 Token、密码、密钥和 Authorization 值。
+
+本机拓扑控制器使用 `GET /api/internal/edge-gateway-config` 读取已校验配置，原子写入未跟踪的 `EDGE_GATEWAY_CONFIG_DIR`，并通过 `POST /api/internal/edge-gateway-applied` 回报应用结果；两个接口只接受 `TOPOLOGY_CONTROLLER_TOKEN`，API 不访问 Docker socket。
 
 `GET /api/v1/admin/system-settings` 返回有效的公开设置、每项来源（`database|environment`）、不可变配置版本/哈希、敏感项是否已配置、环境只读状态、Worker 心跳、已加载执行模式及各队列 `pending/processing` 摘要。它绝不返回 Tushare、对象存储或模型密钥，也不返回数据库/Redis 地址、认证参数、Fernet 密钥或卷路径。Worker 心跳可以包含清洗后的内存、内存上限和 CPU 指标。
 
@@ -572,14 +589,14 @@ docker compose -p ashare-ai-src -f compose.yaml --profile dual-research up -d --
 
 ### `POST /api/v1/research/runs`
 
-提交 `ResearchRequest`，成功返回 `202 RunResponse`。响应中的 `run_id` 用于轮询：
+提交 `ResearchRequest`，成功返回 `202 ResearchRunResponse`。响应中的 `run_id` 用于轮询：
 
 ```bash
 curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
   -H "Authorization: Bearer <ACCESS_TOKEN>"
 ```
 
-提交相同的用户、日期、范围、标的和预算且已有进行中任务时返回既有运行，状态码为 `200`，其中包括 `DATA_READINESS_WAITING`。队列不可用返回 `503`；交易时段、未来日期或不安全的历史实时重建返回 `409`。收盘后若股票日线已到而任一策略基准（CSI300、CSI500、CSI1000）尚未覆盖目标日，仍创建 `202` 任务，状态为 `DATA_READINESS_WAITING`；轮询研究详情会返回“等待基准数据同步”以及新增的 `next_retry_at`。系统在冻结的原始范围、预算、价格上限、幂等键和活动键不变的前提下按固定间隔重试；在权威交易日历确定的下一交易日 09:25（上海时间）前仍不完整时以脱敏操作性原因终止，且绝不回退到下一交易时段的上一日实时快照。实时 AKShare 模式只允许冻结当日已就绪数据，或在下一交易日安全截止前/非交易日冻结最近已完成交易日；冻结文件模式仍可按文件覆盖日期运行历史研究。
+提交相同的用户、日期、范围、标的和预算且已有进行中任务时返回既有运行，状态码为 `200`，其中包括 `DATA_READINESS_WAITING`；`supreme_mode` 不会使同一份活动研究重复执行。队列不可用返回 `503`；交易时段、未来日期或不安全的历史实时重建返回 `409`。收盘后若股票日线已到而任一策略基准（CSI300、CSI500、CSI1000）尚未覆盖目标日，仍创建 `202` 任务，状态为 `DATA_READINESS_WAITING`；轮询研究详情会返回“等待基准数据同步”以及新增的 `next_retry_at`。系统在冻结的原始范围、预算、价格上限、幂等键和活动键不变的前提下按固定间隔重试；在权威交易日历确定的下一交易日 09:25（上海时间）前仍不完整时以脱敏操作性原因终止，且绝不回退到下一交易时段的上一日实时快照。实时 AKShare 模式只允许冻结当日已就绪数据，或在下一交易日安全截止前/非交易日冻结最近已完成交易日；冻结文件模式仍可按文件覆盖日期运行历史研究。
 
 交易日开盘后提交目标为上一交易日的研究时，实时 AKShare 模式只允许复用当前用户已有的该日不可变 bundle；这也覆盖原任务已完成数据采集、但在 Agent 或模型网关阶段失败的情况。服务端会校验源运行归属、目标交易日和 bundle SHA-256，禁止用盘中实时快照重构历史数据。没有可复用 bundle 时返回 `409`，应在收盘后重新采集；冻结文件模式仍可按文件内容运行历史研究。
 
@@ -598,7 +615,7 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 
 ### `GET /api/v1/research/runs/{run_id}`
 
-返回单个 `ResearchRunResponse`，包含 `phase` 和 0–100 的 `progress`，供 Web 与手机客户端按 ID 轮询。普通用户只能读取自己的研究任务；不存在、非研究任务或无权限资源均返回 `404`。
+返回单个 `ResearchRunResponse`，包含 `phase`、0–100 的 `progress` 和 Worker 已解析时的 `execution_profile`，供 Web 与手机客户端按 ID 轮询。普通用户只能读取自己的研究任务；不存在、非研究任务或无权限资源均返回 `404`。
 
 ### `PUT /api/v1/research/settings`
 
@@ -692,11 +709,11 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 
 ### `GET /api/v1/market/quotes/{symbol}`
 
-返回一个 `QuoteResponse`。可选 `refresh=true|false` 强制刷新；该端点优先使用能按标的定向请求的实时供应商，并使用独立的短缓存。它适合当前选中证券，不会等待全市场批量快照。无效代码返回 `422`，所有上游和可用缓存均失败时返回 `503`。
+返回一个 `QuoteResponse`。报价字段是供应商原始未复权价，响应新增 `price_basis: "raw"`；可选 `refresh=true|false` 强制刷新。该端点优先使用能按标的定向请求的实时供应商，并使用独立的短缓存。它适合当前选中证券，不会等待全市场批量快照。无效代码返回 `422`，所有上游和可用缓存均失败时返回 `503`。
 
 ### `GET /api/v1/market/quotes`
 
-必填查询参数 `symbols`，使用逗号分隔，例如 `600519.SH,000001.SZ`；可选 `refresh=true|false` 强制刷新。返回 `QuoteResponse[]`，每项包含 `symbol`、`name`、`price`、`change`、`change_percent`、`open`、`high`、`low`、`previous_close`、`volume`、`amount` 和 `status`。单个数值可能为 `null`。它适合后台批量刷新；Web 会先调用单标的端点，再在后台调用此端点补全其余证券。
+必填查询参数 `symbols`，使用逗号分隔，例如 `600519.SH,000001.SZ`；可选 `refresh=true|false` 强制刷新。返回 `QuoteResponse[]`，每项包含 `symbol`、`name`、`price`、`change`、`change_percent`、`open`、`high`、`low`、`previous_close`、`volume`、`amount`、`price_basis` 和 `status`。报价字段均为未复权口径，单个数值可能为 `null`。它适合后台批量刷新；Web 会先调用单标的端点，再在后台调用此端点补全其余证券。
 
 ### `GET /api/v1/market/klines/{symbol}`
 
@@ -706,12 +723,12 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 |---|---|---|
 | `period` | `day` | `1m`、`5m`、`15m`、`30m`、`60m`、`day`/`daily` |
 | `limit` | 300 | 1–5000 |
-| `adjust` | `hfq` | 当前只支持后复权 `hfq` |
+| `adjust` | `raw` | `raw` 未复权（与实时行情一致）或 `hfq` 后复权 |
 | `start` | 无 | 带时区 datetime |
 | `end` | 无 | 带时区 datetime |
 | `refresh` | false | 是否绕过新鲜缓存 |
 
-返回 `KlineResponse`：`symbol`、`period`、`adjustment`、`bars`、`status`。每个 `bar` 包含 `timestamp`、`open`、`high`、`low`、`close`、`volume`、`amount` 和 `turnover_rate`。
+返回 `KlineResponse`：`symbol`、`period`、`adjustment`、`bars`、`status`。默认 `raw` 日线与实时行情使用同一未复权口径；需要后复权技术序列时显式传 `adjust=hfq`。每个 `bar` 包含 `timestamp`、`open`、`high`、`low`、`close`、`volume`、`amount` 和 `turnover_rate`。
 
 不支持的周期或复权方式返回 `422`；所有上游和可用缓存都失败时返回 `503`。
 
@@ -727,7 +744,7 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 
 ### `GET /api/v1/market/status`
 
-返回当前行情服务状态对象，主要字段包括 `primary`、`fallback`、`fallbacks`、`cache_seconds`、`kline_cache_seconds`、`prefetch_max_workers`、`prefetch_max_symbols`、`stale_seconds`、`adjustment`、`live_data_isolated_from_snapshots` 和可选 `quotes` 缓存状态。兼容新增的 `provider_process_mode`、`provider_process_state`、`provider_process_degraded` 与 `hedge_delay_seconds` 用于观察可复用 AKShare 隔离进程和日线延迟竞速；这些字段不暴露 PID、命令行、环境变量或内部错误。
+返回当前行情服务状态对象，主要字段包括 `primary`、`fallback`、`fallbacks`、`cache_seconds`、`kline_cache_seconds`、`prefetch_max_workers`、`prefetch_max_symbols`、`stale_seconds`、`adjustment`、`live_quote_price_basis`、`live_kline_default_adjustment`、`supported_adjustments`、`live_data_isolated_from_snapshots` 和可选 `quotes` 缓存状态。`live_quote_price_basis` 固定为 `raw`，Web 默认日 K 为 `raw`；兼容字段 `adjustment` 仍保留旧的 `hfq` 内部技术口径。兼容新增的 `provider_process_mode`、`provider_process_state`、`provider_process_degraded` 与 `hedge_delay_seconds` 用于观察可复用 AKShare 隔离进程和日线延迟竞速；这些字段不暴露 PID、命令行、环境变量或内部错误。
 
 `market_session` 为兼容性新增对象，用于界面标注实时行情是否已收盘：`state` 取值为 `OPEN`、`PRE_OPEN`、`BREAK`、`CLOSED` 或 `UNKNOWN`；并返回上海时区的 `as_of`、`trading_date`、`is_trading_day` 和原因码 `reason`。交易日 15:00 起及非交易日返回 `CLOSED`；午间休市返回 `BREAK`。交易日历暂不可用时返回 `UNKNOWN`，客户端不得将其视为已收盘。旧客户端可忽略该新增字段。
 

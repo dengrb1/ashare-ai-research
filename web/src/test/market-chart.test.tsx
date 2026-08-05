@@ -11,7 +11,7 @@ function bars(count: number, start = '2026-01-01T01:30:00+08:00'): KlineBar[] {
     time: new Date(startMs + index * 60_000).toISOString(),
     open: index + 1,
     high: index + 2,
-    low: index,
+    low: Math.max(0.1, index),
     close: index + 1.5,
     volume: 100 + index,
     amount: index === count - 1 ? undefined : 10_000 + index,
@@ -54,11 +54,11 @@ describe('market range and chunk planning', () => {
 
   it('merges unordered chunks by timestamp, replaces duplicates, and selects actual data days', () => {
     const first = bars(3)
-    const replacement = { ...first[1], close: 99 }
+    const replacement = { ...first[1], high: 99, close: 99 }
     const merged = mergeKlineBars([first[2], first[0]], [replacement])
     expect(merged.map((bar) => bar.close)).toEqual([1.5, 99, 3.5])
 
-    const daily: KlineBar[] = ['2026-07-10', '2026-07-13', '2026-07-14', '2026-07-15', '2026-07-16', '2026-07-17'].map((time, index) => ({ time, open: 1, high: 2, low: .5, close: 1 + index, volume: 1 }))
+    const daily: KlineBar[] = ['2026-07-10', '2026-07-13', '2026-07-14', '2026-07-15', '2026-07-16', '2026-07-17'].map((time, index) => ({ time, open: 1, high: 2 + index, low: .5, close: 1 + index, volume: 1 }))
     const plan = getKlineRangePlan('5d', new Date('2026-07-19T04:00:00Z'))
     const selected = trimBarsToRange(daily, plan)
     expect(selected.map((bar) => bar.time)).toEqual(['2026-07-13', '2026-07-14', '2026-07-15', '2026-07-16', '2026-07-17'])
@@ -69,6 +69,14 @@ describe('market range and chunk planning', () => {
     const annual = getKlineRangePlan('1y', new Date('2026-07-17T04:00:00Z'))
     const truncated = daily.map((bar) => ({ ...bar, time: bar.time?.replace('2026-07', '2026-06') }))
     expect(klineCoverage(annual, annual.start, truncated).complete).toBe(false)
+  })
+
+  it('drops malformed OHLC rows before they can distort the chart scale', () => {
+    const valid = bars(2)
+    const malformed = { ...valid[1], low: 0 } as KlineBar
+    const merged = mergeKlineBars([], [valid[0], malformed])
+    expect(merged).toHaveLength(1)
+    expect(merged[0].time).toBe(valid[0].time)
   })
 })
 

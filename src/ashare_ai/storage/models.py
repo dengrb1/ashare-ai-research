@@ -235,6 +235,30 @@ class ActiveModelConfiguration(Base):
     configuration: Mapped[ModelConfigurationVersion] = relationship()
 
 
+class ModelProbeLog(Base):
+    """Sanitized health and error record for an administrator model probe."""
+
+    __tablename__ = "model_probe_logs"
+    __table_args__ = (
+        Index("ix_model_probe_logs_created", "created_at"),
+        Index("ix_model_probe_logs_model_created", "model", "created_at"),
+    )
+
+    log_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    model: Mapped[str] = mapped_column(String(128), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(32), nullable=False)
+    protocol: Mapped[str] = mapped_column(String(32), nullable=False)
+    endpoint_path: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(16), nullable=False)
+    http_status: Mapped[int | None] = mapped_column(Integer)
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    header_presence: Mapped[dict[str, bool]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class SystemConfigurationVersion(Base):
     """Immutable administrator-owned operational configuration revision.
 
@@ -272,6 +296,41 @@ class ActiveSystemConfiguration(Base):
     activated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     configuration: Mapped[SystemConfigurationVersion] = relationship()
+
+
+class EdgeGatewayConfigurationVersion(Base):
+    __tablename__ = "edge_gateway_configuration_versions"
+    __table_args__ = (
+        UniqueConstraint("version", name="uq_edge_gateway_configuration_version"),
+        UniqueConstraint("config_sha256", name="uq_edge_gateway_configuration_hash"),
+    )
+
+    configuration_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    validation_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="STRICT")
+    proxy_hosts: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    encrypted_frpc_toml: Mapped[str] = mapped_column(Text, nullable=False)
+    encryption_key_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    config_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("user_accounts.user_id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    applied_sha256: Mapped[str | None] = mapped_column(String(64))
+    apply_status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
+    apply_message: Mapped[str | None] = mapped_column(Text)
+
+
+class ActiveEdgeGatewayConfiguration(Base):
+    __tablename__ = "active_edge_gateway_configuration"
+
+    scope: Mapped[str] = mapped_column(String(32), primary_key=True, default="default")
+    configuration_id: Mapped[str] = mapped_column(
+        ForeignKey("edge_gateway_configuration_versions.configuration_id"), nullable=False
+    )
+    activated_by: Mapped[str | None] = mapped_column(ForeignKey("user_accounts.user_id"))
+    activated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    configuration: Mapped[EdgeGatewayConfigurationVersion] = relationship()
 
 
 class SecurityMaster(Base):

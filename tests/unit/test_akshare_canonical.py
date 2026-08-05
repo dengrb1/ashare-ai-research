@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from threading import Barrier, Lock, get_ident
 
 import numpy as np
 import pandas as pd
@@ -151,6 +152,40 @@ def test_akshare_bundle_uses_real_market_history_and_labeled_neutral_placeholder
         "CSI1000",
         "EQUAL_WEIGHT_UNIVERSE",
     }
+
+
+def test_history_fetches_concurrently_and_preserves_candidate_order() -> None:
+    trading_date = date(2026, 7, 15)
+
+    class ConcurrentProvider(Provider):
+        def __init__(self, value: date) -> None:
+            super().__init__(value)
+            self.barrier = Barrier(2)
+            self.thread_ids: set[int] = set()
+            self.lock = Lock()
+
+        def daily_bars(self, symbol, start_date, end_date):
+            with self.lock:
+                self.thread_ids.add(get_ident())
+            self.barrier.wait(timeout=1)
+            return super().daily_bars(symbol, start_date, end_date)
+
+    provider = ConcurrentProvider(trading_date)
+    builder = AKShareCanonicalBundleBuilder(provider=provider, history_sessions=65)
+    candidates = [{"symbol": f"{600000 + index:06d}.SH"} for index in range(4)]
+
+    selected = builder._select_histories(
+        candidates,
+        start_date=trading_date - timedelta(days=180),
+        trading_date=trading_date,
+        target_size=4,
+        fetch_workers=2,
+    )
+
+    assert [security["symbol"] for security, _history in selected] == [
+        item["symbol"] for item in candidates
+    ]
+    assert len(provider.thread_ids) >= 2
 
 
 def test_free_financial_and_cninfo_data_remove_symbol_placeholders() -> None:

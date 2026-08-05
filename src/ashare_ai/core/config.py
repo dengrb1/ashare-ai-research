@@ -73,6 +73,7 @@ class Settings(BaseSettings):
     akshare_fetch_max_attempts: int = Field(default=2, ge=1, le=5)
     akshare_fetch_backoff_seconds: float = Field(default=1.0, ge=0, le=60)
     worker_lease_seconds: int = Field(default=900, ge=30, le=7200)
+    supreme_mode_config_path: Path = runtime_resource_path("configs/supreme_mode.v1.json")
     ashare_pipeline_factory: str | None = None
     ashare_stage_backend_factory: str | None = None
     ashare_backtest_executor_factory: str | None = None
@@ -122,6 +123,12 @@ class Settings(BaseSettings):
     # control plane fail closed before enabling two research consumers.
     model_gateway_max_concurrency: int = Field(default=8, ge=1, le=128)
     model_settings_encryption_keys: str | None = None
+    edge_gateway_encryption_keys: str | None = None
+    edge_gateway_config_dir: Path = Path(".secrets/edge-gateway")
+    edge_gateway_log_dir: Path = Path(".secrets/edge-gateway-logs")
+    edge_gateway_source_dir: Path = Path("docker/edge-gateway")
+    edge_gateway_host_source_dir: Path = Path("docker/edge-gateway")
+    edge_proxy_target_allowlist: str = "web"
     personal_data_encryption_keys: str | None = None
     mipush_app_secret: str | None = None
     mipush_package_name: str | None = None

@@ -87,6 +87,41 @@ export interface SystemSettingsUnlock {
   expires_at: string
 }
 
+export interface EdgeProxyHost {
+  id?: string | null
+  name: string
+  domains: string[]
+  forward_scheme: 'http' | 'https'
+  forward_host: string
+  forward_port: number
+  ssl_enabled: boolean
+  websocket_support: boolean
+  enabled: boolean
+  notes: string
+}
+
+export interface EdgeGatewayConfiguration {
+  configuration_id?: string | null
+  version: number
+  enabled: boolean
+  validation_mode: 'STRICT' | 'COMPATIBLE'
+  proxy_hosts: EdgeProxyHost[]
+  frpc_toml: string
+  config_sha256?: string | null
+  apply_status: string
+  apply_message?: string | null
+  applied_at?: string | null
+  applied_sha256?: string | null
+  source_sync?: boolean
+}
+
+export interface EdgeGatewayLogs {
+  available: boolean
+  message: string
+  lines: string[]
+  updated_at?: string | null
+}
+
 export interface User {
   id?: string
   user_id?: string
@@ -119,6 +154,8 @@ export interface Quote {
   prev_close?: number
   volume?: number
   amount?: number
+  /** Live quotes are provider-native, unadjusted prices. */
+  price_basis?: 'raw' | string
   source?: string
   collected_at?: string
   cached_at?: string
@@ -410,6 +447,22 @@ export interface ModelSettingsDraft {
   enabled: boolean
 }
 
+export interface ModelProbeLog {
+  log_id: string
+  model: string
+  purpose: string
+  protocol: string
+  endpoint_path: string
+  request_mode: string
+  outcome: string
+  http_status?: number | null
+  error_code?: string | null
+  message: string
+  duration_ms: number
+  header_presence: Record<string, boolean>
+  created_at: string
+}
+
 export interface ModelProfile {
   model: string
   cache_policy: 'GROK' | 'OPENAI' | 'COMPATIBLE'
@@ -536,6 +589,23 @@ export interface Run {
   trigger_source?: 'AUTO' | 'MANUAL'
   automatic_report_slot?: 'A' | 'B' | null
   requested_date?: string | null
+  supreme_mode?: boolean
+  execution_profile?: {
+    policy_version: string
+    mode: 'STANDARD' | 'SUPREME'
+    data_fetch_workers: number
+    model_agent_max_concurrency: number
+    model_concurrency_changed: false
+    resource_scope: 'HOST' | 'CONTAINER'
+    logical_cores: number
+    cpu_percent: number
+    available_memory_bytes: number
+    memory_limit_bytes?: number | null
+    active_memory_bytes?: number | null
+    memory_budget_bytes: number
+    resource_level: 'NORMAL' | 'WARNING' | 'CRITICAL'
+    reason_codes: string[]
+  } | null
   reused?: boolean
   data_readiness_state?: string | null
   next_retry_at?: string | null
@@ -563,6 +633,7 @@ export interface ResearchSubmission {
   total_budget?: number
   per_symbol_budget?: number
   max_stock_price?: number
+  supreme_mode?: boolean
 }
 
 export interface ResearchSettings {

@@ -89,7 +89,7 @@ describe('API security and market adapters', () => {
     expect(rows[0]).toMatchObject({ change_pct: 1.01, prev_close: 1485, source: 'AKShare', delayed: true })
   })
 
-  it('maps kline timestamps while retaining hfq adjustment request', async () => {
+  it('maps kline timestamps while requesting the live-compatible raw basis', async () => {
     vi.mocked(fetch).mockResolvedValue(jsonResponse({
       symbol: '600519.SH', period: 'day', adjustment: 'hfq',
       bars: [{ timestamp: '2026-07-15T07:00:00Z', open: 1, high: 2, low: .5, close: 1.8, volume: 100 }],
@@ -99,7 +99,7 @@ describe('API security and market adapters', () => {
     const payload = await api.kline('600519.SH', 'day', 1200, { start: '2026-06-01T00:00:00+08:00', end: '2026-07-01T00:00:00+08:00' })
     expect(payload.bars[0].time).toBe('2026-07-15T07:00:00Z')
     const url = String(vi.mocked(fetch).mock.calls[0][0])
-    expect(url).toContain('adjust=hfq')
+    expect(url).toContain('adjust=raw')
     expect(url).toContain('limit=1200')
     expect(url).toContain('start=2026-06-01T00%3A00%3A00%2B08%3A00')
     expect(url).toContain('end=2026-07-01T00%3A00%3A00%2B08%3A00')

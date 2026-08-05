@@ -118,12 +118,43 @@ export function barTimeMs(bar: KlineBar) {
   return Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T00:00:00+08:00` : value)
 }
 
+function finiteNumber(value: unknown) {
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : Number.NaN
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function validKlineBar(bar: KlineBar): KlineBar | null {
+  const open = finiteNumber(bar.open)
+  const high = finiteNumber(bar.high)
+  const low = finiteNumber(bar.low)
+  const close = finiteNumber(bar.close)
+  const volume = finiteNumber(bar.volume)
+  const timestamp = barTimestamp(bar)
+  if (!timestamp || !Number.isFinite(barTimeMs(bar)) || open === null || high === null || low === null || close === null || volume === null) return null
+  if (open <= 0 || high <= 0 || low <= 0 || close <= 0 || volume < 0 || low > Math.min(open, close) || high < Math.max(open, close)) return null
+  const amount = bar.amount === undefined || bar.amount === null ? undefined : finiteNumber(bar.amount)
+  const turnoverRate = bar.turnover_rate === undefined || bar.turnover_rate === null ? null : finiteNumber(bar.turnover_rate)
+  return {
+    ...bar,
+    time: timestamp,
+    open,
+    high,
+    low,
+    close,
+    volume,
+    ...(amount === null ? {} : { amount }),
+    turnover_rate: turnoverRate,
+  }
+}
+
 export function mergeKlineBars(current: KlineBar[], incoming: KlineBar[]) {
   const merged = new Map<number, KlineBar>()
   for (const bar of [...current, ...incoming]) {
-    const timestamp = barTimeMs(bar)
+    const normalized = validKlineBar(bar)
+    if (!normalized) continue
+    const timestamp = barTimeMs(normalized)
     if (!Number.isFinite(timestamp)) continue
-    merged.set(timestamp, { ...bar, time: barTimestamp(bar) })
+    merged.set(timestamp, normalized)
   }
   return [...merged.entries()].sort(([left], [right]) => left - right).map(([, bar]) => bar)
 }

@@ -15,6 +15,7 @@ type MarketRefreshIntervalSeconds = (typeof MARKET_REFRESH_INTERVAL_OPTIONS)[num
 export interface KlineCacheEntry {
   symbol: string
   period: string
+  adjustment?: string
   bars: KlineBar[]
   status: MarketDataStatus | null
   fetchedAt: number
@@ -84,6 +85,7 @@ function entryFromPayload(payload: KlinePayload, fallbackPeriod: string, now = D
   return {
     symbol: payload.symbol,
     period: payload.period || fallbackPeriod,
+    adjustment: payload.adjustment,
     bars: (payload.bars || []).map((bar) => ({ ...bar, time: bar.time || bar.timestamp })),
     status: payload.status || null,
     fetchedAt: payload.status?.cached_at ? Date.parse(payload.status.cached_at) || now : now,

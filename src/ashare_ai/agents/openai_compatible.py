@@ -18,6 +18,10 @@ from ashare_ai.agents.protocols import GenerationMetadata, StructuredGeneration,
 _CODE_FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", flags=re.DOTALL | re.IGNORECASE)
 _RETRYABLE_STATUS_CODES = frozenset({408, 409, 429, 500, 502, 503, 504})
 _STREAM_RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+# A number of "OpenAI-compatible" gateways expose only Chat Completions.  Keep
+# Responses as the preferred protocol, but use Chat Completions when the
+# Responses route or its request shape is not implemented.
+_CHAT_FALLBACK_STATUS_CODES = frozenset({400, 404, 405, 406, 415, 422, 501})
 _CACHE_POLICIES = frozenset({"GROK", "OPENAI", "COMPATIBLE"})
 CachePolicy = Literal["GROK", "OPENAI", "COMPATIBLE"]
 
@@ -49,7 +53,7 @@ class ModelUsage(tuple[int, int, int, int, int]):
 
 
 class OpenAICompatibleError(RuntimeError):
-    """Raised when a compatible Responses API cannot produce a valid response."""
+    """Raised when a compatible model endpoint cannot produce a valid response."""
 
     def __init__(
         self,
@@ -66,7 +70,7 @@ class OpenAICompatibleError(RuntimeError):
 
 
 class OpenAICompatibleStructuredLLMClient:
-    """Generate Pydantic-validated JSON with an OpenAI-compatible Responses endpoint.
+    """Generate Pydantic-validated JSON with an OpenAI-compatible model endpoint.
 
     The request uses the Responses API ``text.format`` JSON-schema contract.  Providers
     that implement the OpenAI-compatible endpoint therefore receive the same strict
@@ -116,6 +120,10 @@ class OpenAICompatibleStructuredLLMClient:
         self._retry_backoff = retry_backoff
         self._cache_policy = cache_policy
         self._client = client
+        self.last_protocol = "RESPONSES"
+        self.last_endpoint_path = "/responses"
+        self.last_request_mode = "json_schema"
+        self.last_status_code: int | None = None
         # Reusing one connection pool across many calls avoids a fresh TCP/TLS
         # handshake per request.  Callers on a bounded lifetime (e.g. a worker
         # that exits after one research run) may leave the shared client to be
@@ -165,23 +173,44 @@ class OpenAICompatibleStructuredLLMClient:
         advanced_controls = self._cache_policy == "OPENAI"
         if advanced_controls:
             request_body["prompt_cache_key"] = _structured_prompt_cache_key(messages, schema)
+        chat_request_body: dict[str, Any] | None = None
         started = perf_counter()
         attempts = 0
         schema_fallback_used = False
         advanced_fallback_used = False
+        chat_fallback_used = False
         client, owns_client = self._client_for()
         try:
             while True:
                 try:
+                    endpoint = "/chat/completions" if chat_fallback_used else "/responses"
+                    self.last_protocol = (
+                        "CHAT_COMPLETIONS" if chat_fallback_used else "RESPONSES"
+                    )
+                    self.last_endpoint_path = endpoint
+                    body = chat_request_body if chat_fallback_used else request_body
+                    text_config = request_body.get("text")
+                    format_config = (
+                        text_config.get("format")
+                        if isinstance(text_config, Mapping)
+                        else None
+                    )
+                    self.last_request_mode = "json_object" if chat_fallback_used else str(
+                        format_config.get("type")
+                        if isinstance(format_config, Mapping)
+                        else "unknown"
+                    )
+                    self.last_status_code = None
                     response = await client.post(
-                        f"{self._base_url}/responses",
-                        json=request_body,
+                        f"{self._base_url}{endpoint}",
+                        json=body,
                         headers={
                             "Authorization": f"Bearer {self._api_key}",
                             "Idempotency-Key": idempotency_key,
                         },
                         timeout=self._timeout,
                     )
+                    self.last_status_code = response.status_code
                     if response.status_code in _RETRYABLE_STATUS_CODES:
                         raise _RetryableResponseError(response)
                     if response.is_error:
@@ -192,6 +221,7 @@ class OpenAICompatibleStructuredLLMClient:
                         )
                         if (
                             advanced_controls
+                            and not chat_fallback_used
                             and not advanced_fallback_used
                             and response.status_code in {400, 404, 422}
                         ):
@@ -201,7 +231,22 @@ class OpenAICompatibleStructuredLLMClient:
                             advanced_fallback_used = True
                             continue
                         if (
-                            not schema_fallback_used
+                            not chat_fallback_used
+                            and _should_fallback_to_chat(
+                                response.status_code, schema_fallback_used=schema_fallback_used
+                            )
+                        ):
+                            chat_request_body = _chat_completion_body(
+                                model=self._model,
+                                messages=messages,
+                                reasoning_effort=self._reasoning_effort,
+                                json_object=True,
+                            )
+                            chat_fallback_used = True
+                            continue
+                        if (
+                            not chat_fallback_used
+                            and not schema_fallback_used
                             and response.status_code in {400, 404, 422}
                         ):
                             # A number of OpenAI-compatible gateways implement the
@@ -310,7 +355,7 @@ class OpenAICompatibleStructuredLLMClient:
         messages: tuple[Mapping[str, Any], ...],
         idempotency_key: str,
     ) -> TextGeneration:
-        """Collect a JSON-object-mode Responses stream without imposing a schema.
+        """Collect a JSON-object-mode stream without imposing a schema.
 
         Some compatible gateways reliably support streaming JSON Object mode but
         reject strict JSON Schema.  Callers must still parse and validate the
@@ -365,7 +410,7 @@ class OpenAICompatibleStructuredLLMClient:
         allow_degraded: bool = True,
         json_object: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Yield normalized Responses API text deltas and a final usage event."""
+        """Yield normalized model text deltas and a final usage event."""
         if not messages or not idempotency_key:
             raise ValueError("messages and idempotency_key are required")
         request_body = {
@@ -389,6 +434,10 @@ class OpenAICompatibleStructuredLLMClient:
             while True:
                 try:
                     completed_received = False
+                    self.last_protocol = "RESPONSES"
+                    self.last_endpoint_path = "/responses"
+                    self.last_request_mode = "stream_json_object" if json_object else "stream"
+                    self.last_status_code = None
                     async with client.stream(
                         "POST",
                         f"{self._base_url}/responses",
@@ -400,6 +449,7 @@ class OpenAICompatibleStructuredLLMClient:
                         },
                         timeout=self._timeout,
                     ) as response:
+                        self.last_status_code = response.status_code
                         if response.status_code in _STREAM_RETRYABLE_STATUS_CODES:
                             raise _RetryableResponseError(response)
                         if response.is_error:
@@ -509,7 +559,9 @@ class OpenAICompatibleStructuredLLMClient:
                         degraded = await self._generate_text_degraded(
                             client=client,
                             request_body=request_body,
+                            messages=messages,
                             idempotency_key=idempotency_key,
+                            json_object=json_object,
                         )
                         yield {"type": "degraded", "reason_code": "STREAMING_UNSUPPORTED"}
                         yield {"type": "delta", "delta": degraded["text"]}
@@ -550,7 +602,9 @@ class OpenAICompatibleStructuredLLMClient:
         *,
         client: httpx.AsyncClient,
         request_body: Mapping[str, Any],
+        messages: tuple[Mapping[str, Any], ...],
         idempotency_key: str,
+        json_object: bool,
     ) -> dict[str, Any]:
         body = dict(request_body)
         body["stream"] = False
@@ -565,12 +619,36 @@ class OpenAICompatibleStructuredLLMClient:
             timeout=self._timeout,
         )
         if response.is_error:
-            raise OpenAICompatibleError(
-                _http_error_message(response),
-                code=_status_error_code(response.status_code),
-                status_code=response.status_code,
-                retryable=response.status_code in _RETRYABLE_STATUS_CODES,
+            if response.status_code not in _CHAT_FALLBACK_STATUS_CODES:
+                raise OpenAICompatibleError(
+                    _http_error_message(response),
+                    code=_status_error_code(response.status_code),
+                    status_code=response.status_code,
+                    retryable=response.status_code in _RETRYABLE_STATUS_CODES,
+                )
+            chat_response = await client.post(
+                f"{self._base_url}/chat/completions",
+                json=_chat_completion_body(
+                    model=self._model,
+                    messages=messages,
+                    reasoning_effort=self._reasoning_effort,
+                    json_object=json_object,
+                ),
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Idempotency-Key": idempotency_key,
+                    "Accept": "application/json",
+                },
+                timeout=self._timeout,
             )
+            if chat_response.is_error:
+                raise OpenAICompatibleError(
+                    _http_error_message(chat_response),
+                    code=_status_error_code(chat_response.status_code),
+                    status_code=chat_response.status_code,
+                    retryable=chat_response.status_code in _RETRYABLE_STATUS_CODES,
+                )
+            response = chat_response
         payload = _decode_response(response)
         text = _extract_output_text(payload).strip()
         if not text:
@@ -631,6 +709,71 @@ def _messages_to_input(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, 
             raise ValueError(f"messages[{index}].content must be text or a list of parts")
         input_messages.append({"role": role, "content": parts})
     return input_messages
+
+
+def _chat_completion_body(
+    *,
+    model: str,
+    messages: Sequence[Mapping[str, Any]],
+    reasoning_effort: str,
+    json_object: bool,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": _messages_to_chat(messages),
+        "reasoning_effort": reasoning_effort,
+    }
+    if json_object:
+        body["response_format"] = {"type": "json_object"}
+    return body
+
+
+def _messages_to_chat(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Translate Responses content parts to the Chat Completions shape."""
+
+    chat_messages: list[dict[str, Any]] = []
+    for index, message in enumerate(messages):
+        role = message.get("role")
+        content = message.get("content")
+        if not isinstance(role, str) or not role:
+            raise ValueError(f"messages[{index}].role must be a non-empty string")
+        if isinstance(content, str):
+            chat_messages.append({"role": role, "content": content})
+            continue
+        if not isinstance(content, Sequence) or isinstance(content, (bytes, bytearray)):
+            raise ValueError(f"messages[{index}].content must be text or a list of parts")
+        parts: list[dict[str, Any]] = []
+        for part_index, raw_part in enumerate(content):
+            if not isinstance(raw_part, Mapping):
+                raise ValueError(f"messages[{index}].content[{part_index}] must be an object")
+            part_type = raw_part.get("type")
+            if part_type in {"input_text", "output_text"}:
+                text = raw_part.get("text")
+                if not isinstance(text, str):
+                    raise ValueError(
+                        f"messages[{index}].content[{part_index}].text must be a string"
+                    )
+                parts.append({"type": "text", "text": text})
+            elif part_type == "input_image":
+                image_url = raw_part.get("image_url")
+                if not isinstance(image_url, str):
+                    raise ValueError(
+                        f"messages[{index}].content[{part_index}].image_url must be a string"
+                    )
+                parts.append({"type": "image_url", "image_url": {"url": image_url}})
+            else:
+                raise ValueError(f"messages[{index}].content[{part_index}] has invalid type")
+        chat_messages.append({"role": role, "content": parts})
+    return chat_messages
+
+
+def _should_fallback_to_chat(status_code: int, *, schema_fallback_used: bool) -> bool:
+    if status_code not in _CHAT_FALLBACK_STATUS_CODES:
+        return False
+    # Give Responses JSON Object mode one chance for the common 400/422 schema
+    # incompatibility before switching protocols.  Missing/unsupported routes
+    # should switch immediately.
+    return status_code not in {400, 422} or schema_fallback_used
 
 
 def _status_error_code(status_code: int) -> str:

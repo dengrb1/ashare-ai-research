@@ -555,6 +555,7 @@ def _deterministic_search(
                 if intent.end_date
                 else None
             ),
+            adjustment="raw",
         )
         serializable = _json_value(payload)
         bars = serializable.get("bars", []) if isinstance(serializable, dict) else []

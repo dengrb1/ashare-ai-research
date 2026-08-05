@@ -27,7 +27,6 @@ const NAV = [
   { to: '/backtest', label: '回测工作台', icon: '⟲' },
   { to: '/runs', label: '运行与审计', icon: '≡' },
   { group: '管理' },
-  { to: '/about', label: '关于本系统', icon: 'ⓘ' },
 ]
 
 const TITLES: Record<string, [string, string]> = {
@@ -44,7 +43,7 @@ const TITLES: Record<string, [string, string]> = {
   '/reports': ['研究报告', '研究结论与可追溯证据摘要'],
   '/backtest': ['回测工作台', '固定快照上的事件驱动回测'],
   '/runs': ['运行与审计', '任务状态、失败原因和审计事件'],
-  '/about': ['关于本系统', '系统定位、研究链路与使用边界'],
+  '/admin/edge-gateway': ['Edge Gateway', 'FRP 隧道与结构化 Nginx 代理主机'],
   '/admin': ['用户管理', '账户、角色与访问控制'],
   '/admin/models': ['模型设置', '加密凭据、模型分工、连通性与版本状态'],
   '/admin/system-settings': ['系统设置', '持久化运行配置与 Worker 执行拓扑'],
@@ -108,7 +107,7 @@ export function AppShell() {
           <NavLink key={item.to} to={item.to!} end={item.end} onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}>
             <span>{item.icon}</span>{item.label}
           </NavLink>)}
-        {isAdmin && <><NavLink to="/admin" end onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}><span>⚙</span>用户管理</NavLink><NavLink to="/admin/system-settings" onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}><span>⌘</span>系统设置</NavLink><NavLink to="/admin/models" onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}><span>◉</span>模型设置</NavLink></>}
+        {isAdmin && <><NavLink to="/admin" end onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}><span>⚙</span>用户管理</NavLink><NavLink to="/admin/system-settings" onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}><span>⌘</span>系统设置</NavLink><NavLink to="/admin/models" onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}><span>◉</span>模型设置</NavLink><NavLink to="/admin/edge-gateway" onClick={() => closeMenu()} className={({ isActive }) => isActive ? 'active' : ''}><span>⇄</span>Edge Gateway</NavLink></>}
       </nav>
       <div className="sidebar-foot">
         <div className={`feed-state ${delayed ? 'delayed' : ''}`}><i />{delayed ? '行情非实时' : `${source} 行情正常`}</div>

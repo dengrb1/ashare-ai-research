@@ -95,6 +95,12 @@ from ashare_ai.api.schemas import (
     BuyEntryMonitorRequest,
     BuyEntryMonitorResponse,
     CandidateResponse,
+    EdgeGatewayAppliedRequest,
+    EdgeGatewayConfigurationRequest,
+    EdgeGatewayConfigurationResponse,
+    EdgeGatewayLogsResponse,
+    EdgeGatewayValidateRequest,
+    EdgeGatewayValidationResponse,
     ExitAdviceResponse,
     ExitMonitorSettingsRequest,
     HealthResponse,
@@ -106,6 +112,7 @@ from ashare_ai.api.schemas import (
     MarketRefreshSettingsRequest,
     MarketSessionStatus,
     ModelListResponse,
+    ModelProbeLogResponse,
     ModelProbeResponse,
     ModelProfileSettings,
     ModelSettingsRequest,
@@ -161,6 +168,13 @@ from ashare_ai.api.schemas import (
 from ashare_ai.api.static_web import NativeSPAStaticFiles
 from ashare_ai.api.system_settings_unlock import issue_unlock, require_settings_unlock
 from ashare_ai.core.config import get_settings
+from ashare_ai.core.edge_gateway import (
+    EdgeGatewayConfigurationService,
+    EdgeGatewayError,
+    render_nginx,
+    validate_frpc_toml,
+    validate_proxy_hosts,
+)
 from ashare_ai.core.hashing import sha256_bytes, stable_hash
 from ashare_ai.core.security import safe_error_message
 from ashare_ai.core.system_settings import (
@@ -170,7 +184,11 @@ from ashare_ai.core.system_settings import (
     get_effective_settings,
 )
 from ashare_ai.core.time import SHANGHAI, market_session
-from ashare_ai.market.service import get_market_data_service, reset_market_data_service
+from ashare_ai.market.service import (
+    get_market_data_service,
+    normalize_adjustment,
+    reset_market_data_service,
+)
 from ashare_ai.notifications.push import PushConfigurationError, PushDeviceService
 from ashare_ai.notifications.service import InvalidNotificationCursor, NotificationService
 from ashare_ai.observability.audit import AuditLogger
@@ -210,6 +228,7 @@ from ashare_ai.search.service import (
 )
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import (
+    ActiveEdgeGatewayConfiguration,
     ActiveModelConfiguration,
     ActiveSystemConfiguration,
     AIChatMessage,
@@ -219,9 +238,11 @@ from ashare_ai.storage.models import (
     BacktestRun,
     BuyEntryMonitorRow,
     CandidateRow,
+    EdgeGatewayConfigurationVersion,
     ExitAdviceRow,
     JobRun,
     ModelConfigurationVersion,
+    ModelProbeLog,
     PersonalArchiveJob,
     PortfolioRow,
     ReportRow,
@@ -716,6 +737,12 @@ def _research_run_response(db: Session, row: JobRun) -> ResearchRunResponse:
             "trigger_source": manifest.get("trigger_source", "MANUAL"),
             "automatic_report_slot": manifest.get("automatic_report_slot"),
             "requested_date": manifest.get("requested_date", row.trading_date),
+            "supreme_mode": bool(manifest.get("supreme_mode", False)),
+            "execution_profile": (
+                manifest.get("execution_profile")
+                if isinstance(manifest.get("execution_profile"), dict)
+                else None
+            ),
             "data_readiness_state": (
                 "WAITING_FOR_BENCHMARKS" if normalized == "DATA_READINESS_WAITING" else None
             ),
@@ -2456,19 +2483,152 @@ def topology_desired(request: Request, db: DbSession) -> dict[str, object]:
     if not hmac.compare_digest(received, expected):
         raise HTTPException(status_code=403, detail="topology controller is not authorized")
     runtime = SystemConfigurationService().resolve(db)
+    edge_config = EdgeGatewayConfigurationService().public_view(db)
     _, restart_required, _, _ = _system_worker_snapshot(str(runtime.topology_sha256))
     return {
         "research_execution_mode": runtime.settings.research_execution_mode,
-        "edge_gateway_enabled": runtime.settings.edge_gateway_enabled,
+        "edge_gateway_enabled": bool(edge_config["enabled"]) if edge_config.get("version", 0) else runtime.settings.edge_gateway_enabled,
+        "edge_gateway_config_sha256": edge_config.get("config_sha256"),
         "edge_domain": runtime.settings.edge_domain,
         "edge_acme_email": runtime.settings.edge_acme_email,
         "edge_acme_ca_server": runtime.settings.edge_acme_ca_server,
         "edge_frpc_enabled": runtime.settings.edge_frpc_enabled,
         "edge_frpc_config_file": runtime.settings.edge_frpc_config_file,
+        "edge_gateway_config_dir": str(get_settings().edge_gateway_config_dir),
+        "edge_gateway_source_dir": str(get_settings().edge_gateway_host_source_dir),
         "auto_restart_enabled": runtime.settings.auto_restart_enabled,
         "restart_required": restart_required,
         "topology_sha256": runtime.topology_sha256,
     }
+
+
+def _edge_gateway_response(db: Session, *, reveal: bool = False) -> EdgeGatewayConfigurationResponse:
+    return EdgeGatewayConfigurationResponse.model_validate(
+        EdgeGatewayConfigurationService().public_view(db, reveal=reveal)
+    )
+
+
+@app.get("/api/v1/admin/edge-gateway", response_model=EdgeGatewayConfigurationResponse)
+def get_edge_gateway(
+    db: DbSession,
+    context: Current,
+    unlock_token: SystemSettingsUnlockToken = None,
+) -> EdgeGatewayConfigurationResponse:
+    _admin(context)
+    reveal = bool(unlock_token)
+    if reveal:
+        require_settings_unlock(context, unlock_token)
+    try:
+        return _edge_gateway_response(db, reveal=reveal)
+    except EdgeGatewayError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/admin/edge-gateway/validate", response_model=EdgeGatewayValidationResponse)
+def validate_edge_gateway(
+    payload: EdgeGatewayValidateRequest,
+    context: Writer,
+) -> EdgeGatewayValidationResponse:
+    _admin(context)
+    try:
+        hosts = validate_proxy_hosts([item.model_dump() for item in payload.proxy_hosts])
+        validate_frpc_toml(
+            payload.frpc_toml,
+            strict=payload.validation_mode == "STRICT",
+        )
+        rendered = render_nginx(hosts)
+        return EdgeGatewayValidationResponse(
+            nginx_sha256=sha256_bytes(rendered.encode()), proxy_count=len(hosts)
+        )
+    except EdgeGatewayError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/admin/edge-gateway/logs", response_model=EdgeGatewayLogsResponse)
+def edge_gateway_logs(
+    context: Current,
+    limit: Annotated[int, Query(ge=1, le=300)] = 200,
+) -> EdgeGatewayLogsResponse:
+    _admin(context)
+    return EdgeGatewayLogsResponse(**EdgeGatewayConfigurationService().read_frp_logs(limit=limit))
+
+
+@app.put("/api/v1/admin/edge-gateway", response_model=EdgeGatewayConfigurationResponse)
+def put_edge_gateway(
+    payload: EdgeGatewayConfigurationRequest,
+    db: DbSession,
+    context: Writer,
+    unlock_token: SystemSettingsUnlockToken = None,
+    idempotency_key: IdempotencyKey = None,
+) -> EdgeGatewayConfigurationResponse:
+    _admin(context)
+    require_settings_unlock(context, unlock_token)
+    body = payload.model_dump(mode="json")
+    fingerprint = _idempotency_fingerprint(context.user.user_id, "/api/v1/admin/edge-gateway", idempotency_key, body)
+    replay = _find_idempotency(db, user_id=context.user.user_id, route="/api/v1/admin/edge-gateway", fingerprint=fingerprint)
+    if replay is not None:
+        return _edge_gateway_response(db, reveal=True)
+    try:
+        result = EdgeGatewayConfigurationService().save(
+            db,
+            enabled=payload.enabled,
+            validation_mode=payload.validation_mode,
+            proxy_hosts=[item.model_dump() for item in payload.proxy_hosts],
+            frpc_toml=payload.frpc_toml,
+            user_id=context.user.user_id,
+        )
+        _remember_idempotency(db, user_id=context.user.user_id, route="/api/v1/admin/edge-gateway", fingerprint=fingerprint, resource_type="EDGE_GATEWAY_CONFIGURATION", resource_id=result.get("configuration_id") or "environment")
+        db.commit()
+        return EdgeGatewayConfigurationResponse.model_validate(result)
+    except EdgeGatewayError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/admin/edge-gateway/rollback", response_model=EdgeGatewayConfigurationResponse)
+def rollback_edge_gateway(
+    db: DbSession,
+    context: Writer,
+    unlock_token: SystemSettingsUnlockToken = None,
+) -> EdgeGatewayConfigurationResponse:
+    _admin(context)
+    require_settings_unlock(context, unlock_token)
+    pointer = db.get(ActiveEdgeGatewayConfiguration, "default")
+    if pointer is None:
+        raise HTTPException(status_code=409, detail="no edge-gateway configuration to roll back")
+    current = db.get(EdgeGatewayConfigurationVersion, pointer.configuration_id)
+    previous = db.scalar(
+        select(EdgeGatewayConfigurationVersion)
+        .where(EdgeGatewayConfigurationVersion.version < (current.version if current else 1))
+        .order_by(EdgeGatewayConfigurationVersion.version.desc())
+    )
+    if previous is None:
+        raise HTTPException(status_code=409, detail="no previous edge-gateway configuration")
+    pointer.configuration_id = previous.configuration_id
+    pointer.activated_by = context.user.user_id
+    pointer.activated_at = datetime.now(UTC)
+    db.commit()
+    return _edge_gateway_response(db, reveal=True)
+
+
+@app.get("/api/internal/edge-gateway-config")
+def edge_gateway_internal_config(request: Request, db: DbSession) -> dict[str, object]:
+    expected = get_settings().topology_controller_token
+    received = request.headers.get("X-Topology-Controller-Token", "")
+    if not expected or not hmac.compare_digest(received, expected):
+        raise HTTPException(status_code=403, detail="topology controller is not authorized")
+    return EdgeGatewayConfigurationService().internal_payload(db)
+
+
+@app.post("/api/internal/edge-gateway-applied")
+def edge_gateway_applied(request: Request, payload: EdgeGatewayAppliedRequest, db: DbSession) -> dict[str, bool]:
+    expected = get_settings().topology_controller_token
+    received = request.headers.get("X-Topology-Controller-Token", "")
+    if not expected or not hmac.compare_digest(received, expected):
+        raise HTTPException(status_code=403, detail="topology controller is not authorized")
+    EdgeGatewayConfigurationService().mark_applied(db, payload.configuration_id, payload.sha256, payload.status, payload.message)
+    db.commit()
+    return {"ok": True}
 
 
 def _system_settings_payload(
@@ -2505,10 +2665,14 @@ async def put_model_settings(
     try:
         probe = await service.probe(draft, db) if draft.enabled else None
         service.save_and_activate(db, draft, user_id=context.user.user_id, probe=probe)
+        if probe is not None:
+            service.persist_probe_logs(db, probe.diagnostics)
         db.commit()
         return _model_settings_response(db)
     except ModelSettingsError as exc:
         db.rollback()
+        service.persist_probe_logs(db, exc.diagnostics)
+        db.commit()
         raise HTTPException(
             status_code=422, detail={"code": exc.code, "message": str(exc)}
         ) from exc
@@ -2519,15 +2683,37 @@ async def test_model_settings(
     payload: ModelSettingsRequest, db: DbSession, context: Writer
 ) -> ModelProbeResponse:
     _admin(context)
+    service = ModelConfigurationService()
     try:
-        result = await ModelConfigurationService().probe(
+        result = await service.probe(
             _model_draft(payload), db, include_streaming=True
         )
+        service.persist_probe_logs(db, result.diagnostics)
+        db.commit()
         return ModelProbeResponse(**result.__dict__)
     except ModelSettingsError as exc:
+        db.rollback()
+        service.persist_probe_logs(db, exc.diagnostics)
+        db.commit()
         raise HTTPException(
             status_code=422, detail={"code": exc.code, "message": str(exc)}
         ) from exc
+
+
+@app.get(
+    "/api/v1/admin/model-settings/logs",
+    response_model=list[ModelProbeLogResponse],
+)
+def model_settings_logs(
+    db: DbSession,
+    context: Current,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[ModelProbeLogResponse]:
+    _admin(context)
+    rows = db.scalars(
+        select(ModelProbeLog).order_by(ModelProbeLog.created_at.desc()).limit(limit)
+    ).all()
+    return [ModelProbeLogResponse.model_validate(row) for row in rows]
 
 
 @app.post("/api/v1/admin/model-settings/models", response_model=ModelListResponse)
@@ -3298,14 +3484,14 @@ def snapshots(
     return [SnapshotResponse.model_validate(row) for row in rows]
 
 
-@app.post("/api/v1/research/runs", response_model=RunResponse, status_code=202)
+@app.post("/api/v1/research/runs", response_model=ResearchRunResponse, status_code=202)
 def submit_research(
     payload: ResearchRequest,
     response: Response,
     db: DbSession,
     context: Writer,
     idempotency_key: IdempotencyKey = None,
-) -> RunResponse:
+) -> ResearchRunResponse:
     idempotency_route = "/api/v1/research/runs"
     fingerprint = _idempotency_fingerprint(
         context.user.user_id,
@@ -3329,7 +3515,7 @@ def submit_research(
         ):
             raise HTTPException(status_code=409, detail="idempotent resource is unavailable")
         response.status_code = status.HTTP_200_OK
-        return RunResponse.model_validate(existing_run)
+        return _research_run_response(db, existing_run)
     requested_date = payload.trading_date
     submitted_at = datetime.now(SHANGHAI)
     actual_research_date = _manual_research_date(requested_date, submitted_at)
@@ -3413,7 +3599,7 @@ def submit_research(
             "DATA_READINESS_WAITING",
         }:
             response.status_code = 200
-            return RunResponse.model_validate(existing)
+            return _research_run_response(db, existing)
         existing.active_research_key = None
         db.commit()
     try:
@@ -3452,6 +3638,7 @@ def submit_research(
         "research_scope": payload.scope,
         "target_symbols": target_symbols,
         "research_budget": research_budget,
+        "supreme_mode": payload.supreme_mode,
         "portfolio_requested": portfolio_requested,
         "research_only_reason": (
             None
@@ -3477,6 +3664,7 @@ def submit_research(
             "actual_research_date": actual_research_date.isoformat(),
             "research_scope": payload.scope,
             "target_symbol_count": len(target_symbols),
+            "supreme_mode": payload.supreme_mode,
             "portfolio_requested": portfolio_requested,
             "input_hash": run.input_hash,
         },
@@ -3503,7 +3691,7 @@ def submit_research(
             winner_run = db.get(JobRun, replay.resource_id)
             if winner_run is not None and _owns(winner_run, context):
                 response.status_code = status.HTTP_200_OK
-                return RunResponse.model_validate(winner_run)
+                return _research_run_response(db, winner_run)
         winner = db.scalar(select(JobRun).where(JobRun.active_research_key == active_key))
         orphan = db.get(JobRun, run_id)
         if orphan is not None and (winner is None or orphan.run_id != winner.run_id):
@@ -3522,7 +3710,7 @@ def submit_research(
         if winner is None:
             raise HTTPException(status_code=409, detail="research submission conflicted") from exc
         response.status_code = 200
-        return RunResponse.model_validate(winner)
+        return _research_run_response(db, winner)
     try:
         if readiness_wait is not None:
             enqueue_research_at(
@@ -3555,17 +3743,7 @@ def submit_research(
         )
         db.commit()
         raise HTTPException(status_code=503, detail="research queue unavailable") from exc
-    return RunResponse.model_validate(
-        {
-            **{column.name: getattr(run, column.name) for column in run.__table__.columns},
-            "data_readiness_state": (
-                "WAITING_FOR_BENCHMARKS" if run.status == "DATA_READINESS_WAITING" else None
-            ),
-            "next_retry_at": (dict(run.manifest).get("data_readiness_wait") or {}).get(
-                "next_retry_at"
-            ),
-        }
-    )
+    return _research_run_response(db, run)
 
 
 @app.get("/api/v1/research/settings", response_model=ResearchSettingsResponse)
@@ -4204,22 +4382,33 @@ def market_klines(
     _: Current,
     period: str = "day",
     limit: int = Query(default=300, ge=1, le=5000),
-    adjust: str = "hfq",
+    adjust: str = "raw",
     start: datetime | None = None,
     end: datetime | None = None,
     refresh: bool = False,
 ) -> KlineResponse:
-    if adjust.casefold() != "hfq":
-        raise HTTPException(status_code=422, detail="only hfq adjustment is supported")
     try:
+        normalized_adjustment = normalize_adjustment(adjust)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422, detail="adjust must be raw or hfq"
+        ) from exc
+    try:
+        kwargs: dict[str, Any] = {
+            "limit": limit,
+            "start": start,
+            "end": end,
+            "force_refresh": refresh,
+        }
+        # Keep the legacy hfq call shape compatible with lightweight custom
+        # providers while making the public default explicitly raw.
+        if normalized_adjustment != "hfq":
+            kwargs["adjustment"] = normalized_adjustment
         return KlineResponse.model_validate(
             get_market_data_service().klines(
                 symbol,
                 period,
-                limit=limit,
-                start=start,
-                end=end,
-                force_refresh=refresh,
+                **kwargs,
             )
         )
     except ValueError as exc:

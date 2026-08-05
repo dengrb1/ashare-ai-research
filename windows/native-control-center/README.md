@@ -71,3 +71,5 @@ Git、Docker Desktop 或 WSL。
 管理器会把 `ashare-native.ps1` 和 `dependencies.lock.json` 作为资源嵌入 EXE，
 启动时提取到用户本地管理目录。因此安装后的管理器不依赖仓库中的松散脚本文件。
 长时间操作只显示在窗口底部状态栏和活动记录中，不会把鼠标全局设置为忙碌光标。
+
+Edge Gateway 与 Docker/Linux 原生版保持同一套管理能力和 API 契约。Windows 原生运行目录中的 `config\edge-gateway` 保存 `frpc.toml` 与 `managed.conf`；管理页面会读取文件外部修改，保存和控制器应用也会写回同一目录。

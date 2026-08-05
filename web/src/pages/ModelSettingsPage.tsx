@@ -1,9 +1,9 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { Navigate } from 'react-router'
 import { api } from '../api'
 import { ErrorNotice, formatTime, Panel, StatusPill } from '../components/Ui'
 import { useAuth } from '../context/AuthContext'
-import type { ModelProfile, ModelSettings, ModelSettingsDraft } from '../types'
+import type { ModelProbeLog, ModelProfile, ModelSettings, ModelSettingsDraft } from '../types'
 
 function defaultProfile(model: string): ModelProfile {
   return {
@@ -40,6 +40,21 @@ export function ModelSettingsPage() {
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState('')
+  const [logs, setLogs] = useState<ModelProbeLog[]>([])
+  const [logsBusy, setLogsBusy] = useState(false)
+  const [logsError, setLogsError] = useState('')
+
+  const loadLogs = useCallback(async () => {
+    setLogsBusy(true)
+    try {
+      setLogs(await api.modelProbeLogs())
+      setLogsError('')
+    } catch (reason) {
+      setLogsError(reason instanceof Error ? reason.message : '模型诊断日志加载失败')
+    } finally {
+      setLogsBusy(false)
+    }
+  }, [])
 
   useEffect(() => {
     if (!isAdmin) return
@@ -58,6 +73,13 @@ export function ModelSettingsPage() {
       })
     }).catch((reason) => setError(reason instanceof Error ? reason.message : '模型设置加载失败'))
   }, [isAdmin])
+
+  useEffect(() => {
+    if (!isAdmin) return
+    void loadLogs()
+    const timer = window.setInterval(() => void loadLogs(), 15000)
+    return () => window.clearInterval(timer)
+  }, [isAdmin, loadLogs])
 
   if (!isAdmin) return <Navigate to="/" replace />
 
@@ -84,6 +106,7 @@ export function ModelSettingsPage() {
       if (action === 'test') {
         const result = await api.testModelSettings(form)
         setMessage(`${result.model} 连通成功：${result.message}`)
+        void loadLogs()
       } else if (action === 'models') {
         const result = await api.listModels(form)
         setModels(result.models)
@@ -93,9 +116,11 @@ export function ModelSettingsPage() {
         setCurrent(result)
         setForm({ ...form, api_key: '' })
         setMessage(`模型配置 v${result.version} 已启用`)
+        void loadLogs()
       }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '模型操作失败')
+      if (action !== 'models') void loadLogs()
     } finally {
       setBusy('')
     }
@@ -145,6 +170,18 @@ export function ModelSettingsPage() {
         {message && <div className="snapshot-isolation">{message}</div>}
         <p className="form-hint">启用配置时会优先执行严格 JSON Schema 探测；兼容网关不支持时自动改用 JSON Object，并继续校验返回结构。失败时旧版本继续生效。模型档案最多可配置 32 条。</p>
       </form>
+    </Panel>
+
+    <Panel title="AI 服务诊断日志" eyebrow="MODEL SERVICE OBSERVABILITY" className="model-probe-log-panel" action={<button type="button" className="secondary" disabled={logsBusy} onClick={() => void loadLogs()}>{logsBusy ? '读取中…' : '刷新日志'}</button>}>
+      <ErrorNotice message={logsError} />
+      {logs.length ? <div className="table-wrap model-probe-log-table"><table><thead><tr><th>时间</th><th>模型 / 用途</th><th>协议 / 路径</th><th>结果</th><th>状态 / 错误码</th><th>诊断</th></tr></thead><tbody>{logs.map((log) => <tr key={log.log_id}>
+        <td><time>{formatTime(log.created_at)}</time><small>{log.duration_ms} ms</small></td>
+        <td><strong>{log.model}</strong><small>{log.purpose}</small></td>
+        <td><code>{log.protocol}</code><small>{log.endpoint_path} · {log.request_mode}</small></td>
+        <td><StatusPill status={log.outcome} /></td>
+        <td><strong>{log.http_status ?? '—'}</strong><small>{log.error_code || '—'}</small></td>
+        <td><span>{log.message}</span><small>{Object.entries(log.header_presence).map(([name, present]) => `${name}: ${present ? '已发送' : '缺失'}`).join(' · ')}</small></td>
+      </tr>)}</tbody></table></div> : <div className="empty-state"><strong>{logsBusy ? '正在读取诊断日志' : '暂无模型探测记录'}</strong><p>点击“测试连接”或“验证并启用新版本”后会生成诊断记录。</p></div>}
     </Panel>
   </div>
 }

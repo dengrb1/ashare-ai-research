@@ -355,7 +355,14 @@ class ChatContextService:
                         decision_at=provisional,
                     )
                     if historical
-                    else pool.submit(self.market.klines, symbol, "day", limit=30, end=provisional)
+                    else pool.submit(
+                        self.market.klines,
+                        symbol,
+                        "day",
+                        limit=30,
+                        end=provisional,
+                        adjustment="raw",
+                    )
                 ): symbol
                 for symbol in symbols
             }

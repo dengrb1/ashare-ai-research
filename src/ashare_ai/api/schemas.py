@@ -163,6 +163,22 @@ class ModelProbeResponse(BaseModel):
     streaming_supported: bool = False
 
 
+class ModelProbeLogResponse(OrmResponse):
+    log_id: str
+    model: str
+    purpose: str
+    protocol: str
+    endpoint_path: str
+    request_mode: str
+    outcome: str
+    http_status: int | None = None
+    error_code: str | None = None
+    message: str
+    duration_ms: int
+    header_presence: dict[str, bool]
+    created_at: datetime
+
+
 class ModelListResponse(BaseModel):
     models: list[str]
 
@@ -229,6 +245,67 @@ class SystemSettingsUnlockRequest(BaseModel):
 class SystemSettingsUnlockResponse(BaseModel):
     unlock_token: str
     expires_at: datetime
+
+
+class EdgeProxyHost(BaseModel):
+    id: str | None = None
+    name: str = Field(min_length=1, max_length=80)
+    domains: list[str] = Field(min_length=1, max_length=8)
+    forward_scheme: Literal["http", "https"] = "http"
+    forward_host: str = Field(min_length=1, max_length=253)
+    forward_port: int = Field(default=80, ge=1, le=65535)
+    ssl_enabled: bool = True
+    websocket_support: bool = True
+    enabled: bool = True
+    notes: str = Field(default="", max_length=240)
+
+
+class EdgeGatewayConfigurationRequest(BaseModel):
+    enabled: bool = False
+    validation_mode: Literal["STRICT", "COMPATIBLE"] = "STRICT"
+    proxy_hosts: list[EdgeProxyHost] = Field(default_factory=list, max_length=32)
+    frpc_toml: str = Field(default="", max_length=65536)
+
+
+class EdgeGatewayValidateRequest(BaseModel):
+    validation_mode: Literal["STRICT", "COMPATIBLE"] = "STRICT"
+    proxy_hosts: list[EdgeProxyHost] = Field(default_factory=list, max_length=32)
+    frpc_toml: str = Field(default="", max_length=65536)
+
+
+class EdgeGatewayConfigurationResponse(BaseModel):
+    configuration_id: str | None = None
+    version: int
+    enabled: bool
+    validation_mode: Literal["STRICT", "COMPATIBLE"] = "STRICT"
+    proxy_hosts: list[EdgeProxyHost] = Field(default_factory=list)
+    frpc_toml: str = ""
+    config_sha256: str | None = None
+    apply_status: str
+    apply_message: str | None = None
+    applied_at: datetime | None = None
+    applied_sha256: str | None = None
+    source_sync: bool = False
+
+
+class EdgeGatewayValidationResponse(BaseModel):
+    valid: bool = True
+    nginx_sha256: str
+    proxy_count: int
+
+
+class EdgeGatewayLogsResponse(BaseModel):
+    available: bool
+    message: str
+    lines: list[str] = Field(default_factory=list)
+    updated_at: datetime | None = None
+
+
+class EdgeGatewayAppliedRequest(BaseModel):
+    configuration_id: str
+    sha256: str = Field(min_length=64, max_length=64)
+    status: Literal["APPLIED", "FAILED"]
+    message: str | None = Field(default=None, max_length=500)
 
 
 class WorkerHealthResponse(BaseModel):
@@ -906,6 +983,7 @@ class ResearchRequest(BaseModel):
     total_budget: Decimal | None = Field(default=None, gt=0, le=Decimal("100000000000"))
     per_symbol_budget: Decimal | None = Field(default=None, gt=0, le=Decimal("100000000000"))
     max_stock_price: Decimal | None = Field(default=None, gt=0, le=Decimal("10000000"))
+    supreme_mode: bool = False
 
     @field_validator("scope", mode="before")
     @classmethod
@@ -944,6 +1022,23 @@ class ResearchRequest(BaseModel):
         ):
             raise ValueError("per-symbol budget cannot exceed total budget")
         return self
+
+
+class ResearchExecutionProfileResponse(BaseModel):
+    policy_version: str
+    mode: Literal["STANDARD", "SUPREME"]
+    data_fetch_workers: int = Field(ge=1, le=16)
+    model_agent_max_concurrency: int = Field(ge=1, le=16)
+    model_concurrency_changed: Literal[False] = False
+    resource_scope: Literal["HOST", "CONTAINER"]
+    logical_cores: int = Field(ge=1)
+    cpu_percent: float = Field(ge=0)
+    available_memory_bytes: int = Field(ge=0)
+    memory_limit_bytes: int | None = Field(default=None, ge=0)
+    active_memory_bytes: int | None = Field(default=None, ge=0)
+    memory_budget_bytes: int = Field(ge=0)
+    resource_level: Literal["NORMAL", "WARNING", "CRITICAL"]
+    reason_codes: list[str] = Field(default_factory=list)
 
 
 class AutomaticResearchReportSettings(BaseModel):
@@ -1126,6 +1221,8 @@ class ResearchRunResponse(RunResponse):
     trigger_source: Literal["AUTO", "MANUAL"] = "MANUAL"
     automatic_report_slot: Literal["A", "B"] | None = None
     requested_date: date | None = None
+    supreme_mode: bool = False
+    execution_profile: ResearchExecutionProfileResponse | None = None
 
 
 class AuditEventResponse(OrmResponse):
@@ -1216,6 +1313,7 @@ class QuoteResponse(BaseModel):
     previous_close: float | None = None
     volume: float | None = None
     amount: float | None = None
+    price_basis: str = "raw"
     status: MarketDataStatus
 
 

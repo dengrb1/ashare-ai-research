@@ -1,4 +1,4 @@
-import type { AIChatAttachment, AIChatMessage, AIChatThread, AICostSummary, AssetState, AuditEvent, BuyEntryMonitor, Candidate, DataEnvelope, ExitAdvice, FinancialSearchResult, FinancialSearchStatus, HealthStatus, KlineBar, KlineQueryOptions, MarketPrefetchResponse, MarketServiceStatus, ModelSettings, ModelSettingsDraft, Notification, NotificationSummary, PersonalArchiveJob, Portfolio, Quote, Report, ReportExecutionStatus, ReportSymbol, ResearchSettings, ResearchSubmission, Run, RunActivityResponse, Score, Snapshot, SystemResources, SystemSettings, SystemSettingsDraft, SystemSettingsUnlock, TokenPair, TradeAdviceMonitor, TradePlan, User } from './types'
+import type { AIChatAttachment, AIChatMessage, AIChatThread, AICostSummary, AssetState, AuditEvent, BuyEntryMonitor, Candidate, DataEnvelope, ExitAdvice, FinancialSearchResult, FinancialSearchStatus, HealthStatus, KlineBar, KlineQueryOptions, MarketPrefetchResponse, MarketServiceStatus, ModelProbeLog, ModelSettings, ModelSettingsDraft, Notification, NotificationSummary, PersonalArchiveJob, Portfolio, Quote, Report, ReportExecutionStatus, ReportSymbol, ResearchSettings, ResearchSubmission, Run, RunActivityResponse, Score, Snapshot, SystemResources, SystemSettings, SystemSettingsDraft, SystemSettingsUnlock, TokenPair, TradeAdviceMonitor, TradePlan, User } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api/v1').replace(/\/$/, '')
 
@@ -64,7 +64,7 @@ type RawQuote = Quote & {
 function normalizeQuote(row: RawQuote): Quote {
   return {
     ...row,
-    price: row.price ?? 0,
+      price: row.price ?? 0,
     change_pct: row.change_pct ?? row.change_percent ?? 0,
     prev_close: row.prev_close ?? row.previous_close,
     source: row.source || row.status?.source,
@@ -133,7 +133,7 @@ export const api = {
     const payload = await request<DataEnvelope<KlineBar[]> & { bars: KlineBar[] }>(`/market/klines/${encodeURIComponent(symbol)}${params({
       period,
       limit,
-      adjust: 'hfq',
+      adjust: 'raw',
       start: query.start,
       end: query.end,
       refresh: query.refresh ? 'true' : undefined,
@@ -194,6 +194,7 @@ export const api = {
   resetPassword: (id: string, password: string) => request<User>(`/admin/users/${id}`, { method: 'PATCH', body: JSON.stringify({ password }) }),
   deleteUser: (id: string) => request<void>(`/admin/users/${id}`, { method: 'DELETE' }),
   modelSettings: () => request<ModelSettings>('/admin/model-settings'),
+  modelProbeLogs: (limit = 50) => request<ModelProbeLog[]>(`/admin/model-settings/logs?limit=${limit}`),
   testModelSettings: (payload: ModelSettingsDraft) => request<{ reachable: boolean; message: string; model: string; checked_at: string }>('/admin/model-settings/test', { method: 'POST', body: JSON.stringify(payload) }),
   saveModelSettings: (payload: ModelSettingsDraft) => request<ModelSettings>('/admin/model-settings', { method: 'PUT', body: JSON.stringify(payload) }),
   listModels: (payload: ModelSettingsDraft) => request<{ models: string[] }>('/admin/model-settings/models', { method: 'POST', body: JSON.stringify(payload) }),
@@ -204,6 +205,11 @@ export const api = {
   saveSystemSettings: (payload: SystemSettingsDraft, unlockToken: string, idempotencyKey: string = crypto.randomUUID()) => request<SystemSettings>('/admin/system-settings', { method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey, 'X-System-Settings-Unlock': unlockToken }, body: JSON.stringify(payload) }),
   restoreSystemSetting: (field: string, unlockToken: string) => request<SystemSettings>(`/admin/system-settings/${encodeURIComponent(field)}`, { method: 'DELETE', headers: { 'X-System-Settings-Unlock': unlockToken } }),
   restoreAllSystemSettings: (unlockToken: string) => request<SystemSettings>('/admin/system-settings', { method: 'DELETE', headers: { 'X-System-Settings-Unlock': unlockToken } }),
+  edgeGateway: (unlockToken?: string) => request<import('./types').EdgeGatewayConfiguration>('/admin/edge-gateway', { headers: unlockToken ? { 'X-System-Settings-Unlock': unlockToken } : undefined }),
+  edgeGatewayLogs: (limit = 200) => request<import('./types').EdgeGatewayLogs>(`/admin/edge-gateway/logs?limit=${limit}`),
+  validateEdgeGateway: (payload: { validation_mode: 'STRICT' | 'COMPATIBLE'; proxy_hosts: import('./types').EdgeProxyHost[]; frpc_toml: string }) => request<{ valid: boolean; nginx_sha256: string; proxy_count: number }>('/admin/edge-gateway/validate', { method: 'POST', body: JSON.stringify(payload) }),
+  saveEdgeGateway: (payload: { enabled: boolean; validation_mode: 'STRICT' | 'COMPATIBLE'; proxy_hosts: import('./types').EdgeProxyHost[]; frpc_toml: string }, unlockToken: string, idempotencyKey = crypto.randomUUID()) => request<import('./types').EdgeGatewayConfiguration>('/admin/edge-gateway', { method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey, 'X-System-Settings-Unlock': unlockToken }, body: JSON.stringify(payload) }),
+  rollbackEdgeGateway: (unlockToken: string) => request<import('./types').EdgeGatewayConfiguration>('/admin/edge-gateway/rollback', { method: 'POST', headers: { 'X-System-Settings-Unlock': unlockToken } }),
 }
 
 export async function streamAIChat(
