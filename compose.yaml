@@ -37,13 +37,19 @@ services:
     build:
       context: .
       dockerfile: docker/edge-gateway.Dockerfile
+      args:
+        EDGE_GATEWAY_VERSION: "${EDGE_GATEWAY_VERSION:-2.0.4-alpha.1}"
     environment:
       EDGE_DOMAIN: "${EDGE_DOMAIN:-}"
       EDGE_ACME_EMAIL: "${EDGE_ACME_EMAIL:-}"
       EDGE_ACME_CA_SERVER: "${EDGE_ACME_CA_SERVER:-letsencrypt}"
       EDGE_FRPC_ENABLED: "${EDGE_FRPC_ENABLED:-false}"
+      EDGE_GATEWAY_RELEASE: "alpha"
       EDGE_GATEWAY_LOG_DIR: "/var/log/edge"
       EDGE_GATEWAY_CONFIG_DIR: "${EDGE_GATEWAY_CONFIG_DIR:-./.secrets/edge-gateway}"
+    labels:
+      io.ashare.edge-gateway.release: "alpha"
+      org.opencontainers.image.version: "${EDGE_GATEWAY_VERSION:-2.0.4-alpha.1}"
     volumes:
       - edge-acme-data:/var/lib/acme
       - edge-certificates:/etc/edge/certs

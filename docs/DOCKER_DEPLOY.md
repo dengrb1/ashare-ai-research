@@ -101,9 +101,11 @@ docker compose -p ashare-ai-src -f compose.yaml exec -T api \
 
 返回 `200` 即表示应用可访问服务器内的 SearXNG。不要把 SearXNG 改为家中电脑的地址，也不要为它增加公网 `ports`。AI 问答只会向该服务发送搜索词，不会把数据库凭据或任意内网访问权交给模型。
 
-## 5. 可选低内存 HTTPS 边缘网关
+## 5. 可选低内存 HTTPS 边缘网关（alpha）
 
 默认 Compose 只在 `127.0.0.1:80` 暴露 Web，API、PostgreSQL 和 Redis 也只绑定本机。若希望由本仓库提供 HTTPS 终止层，可启用独立的 `edge-gateway` profile；不启用时，原有 Caddy、Nginx 或云负载均衡器方案保持不变。
+
+`edge-gateway` 当前标记为 `2.0.4-alpha.1`。该版本已验证 Docker Desktop 和 Docker Engine 的 x86_64 容器运行方式；首次启用、升级或曾运行旧版网关时必须使用 `--force-recreate`，以确保 `/var/log/edge` 的具名日志卷被挂载。旧容器即使漏挂载该卷也会临时写入 `/tmp/edge` 并保持 Nginx 可用，但不会保留 FRP 日志。
 
 启用前，完成下列前提：
 
@@ -127,7 +129,7 @@ EDGE_PROXY_TARGET_ALLOWLIST=web
 首次启动会以 ACME HTTP-01 自动申请 ECDSA P-256 证书，证书和 ACME 账号保存在 Compose 的 `edge-certificates`、`edge-acme-data` 卷中：
 
 ```bash
-docker compose -p ashare-ai-src -f compose.yaml --profile edge up -d --build
+docker compose -p ashare-ai-src -f compose.yaml --profile edge up -d --build --force-recreate edge-gateway
 docker compose -p ashare-ai-src -f compose.yaml --profile edge ps edge-gateway
 docker compose -p ashare-ai-src -f compose.yaml --profile edge logs --tail 100 edge-gateway
 ```

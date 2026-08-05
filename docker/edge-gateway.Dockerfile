@@ -4,6 +4,11 @@ ARG FRP_VERSION=0.68.0
 ARG FRP_SHA256=3cf934477f4fb1ee9e19e49c31fb33f5ffe3283300076f59afad8b8ccf1e1621
 ARG ACME_SH_VERSION=3.1.1
 ARG ACME_SH_SHA256=c5d623ac0af400e83cd676aefaf045228f60e9fc597fea5db4c3a5bd7f6bfcf4
+ARG EDGE_GATEWAY_VERSION=2.0.4-alpha.1
+
+LABEL org.opencontainers.image.title="Ashare AI Edge Gateway" \
+      org.opencontainers.image.version="${EDGE_GATEWAY_VERSION}" \
+      org.opencontainers.image.description="Optional HTTPS edge gateway (alpha)"
 
 RUN apk add --no-cache ca-certificates curl gettext openssl socat \
     && curl --fail --location --silent --show-error \
@@ -29,6 +34,7 @@ COPY docker/edge-gateway/entrypoint.sh /usr/local/bin/edge-gateway-entrypoint
 # They must remain root-owned because the runtime drops CAP_DAC_OVERRIDE while
 # acme.sh still runs as root.
 RUN chmod 0755 /usr/local/bin/edge-gateway-entrypoint \
+    && sed -i 's/\r$//' /usr/local/bin/edge-gateway-entrypoint \
     && mkdir -p /var/lib/acme /var/lib/acme-webroot /etc/edge/certs /var/cache/nginx \
     && chown -R nginx:nginx /var/cache/nginx
 

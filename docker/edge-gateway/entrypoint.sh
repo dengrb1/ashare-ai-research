@@ -9,13 +9,23 @@ ACME_WEBROOT=/var/lib/acme-webroot
 CERT_DIR=/etc/edge/certs
 ACME_CA_SERVER="${EDGE_ACME_CA_SERVER:-letsencrypt}"
 LOG_DIR="${EDGE_GATEWAY_LOG_DIR:-/var/log/edge}"
-FRPC_LOG="$LOG_DIR/frpc.log"
 FRPC_PID=""
 RENEW_PID=""
 NGINX_PID=""
 
 mkdir -p "$ACME_HOME" "$ACME_WEBROOT" "$CERT_DIR" /tmp/client_temp /tmp/proxy_temp \
-  /tmp/fastcgi_temp /tmp/uwsgi_temp /tmp/scgi_temp "$LOG_DIR"
+  /tmp/fastcgi_temp /tmp/uwsgi_temp /tmp/scgi_temp
+
+# Compose mounts a persistent named volume at /var/log/edge.  A container
+# created from an older Compose definition may not have that mount; keep the
+# immutable-root-filesystem contract and use tmpfs logs until it is recreated.
+if ! mkdir -p "$LOG_DIR" 2>/dev/null || [ ! -w "$LOG_DIR" ]; then
+  echo "edge-gateway log directory is unavailable; using /tmp/edge logs until the container is recreated" >&2
+  LOG_DIR=/tmp/edge
+  mkdir -p "$LOG_DIR"
+fi
+FRPC_LOG="$LOG_DIR/frpc.log"
+
 # The container intentionally drops DAC_OVERRIDE.  Keep ACME's persistent
 # account and certificate stores root-owned so the root-run acme.sh process can
 # create and renew keys; only Nginx's worker temp paths need nginx ownership.

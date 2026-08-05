@@ -61,10 +61,14 @@ def test_optional_edge_gateway_is_isolated_and_memory_bounded() -> None:
     assert "ports" not in edge
     assert edge["depends_on"] == {"web": {"condition": "service_healthy"}}
     assert edge["environment"]["EDGE_FRPC_ENABLED"] == "${EDGE_FRPC_ENABLED:-false}"
+    assert edge["environment"]["EDGE_GATEWAY_RELEASE"] == "alpha"
+    assert edge["labels"]["io.ashare.edge-gateway.release"] == "alpha"
+    assert edge["build"]["args"]["EDGE_GATEWAY_VERSION"] == "${EDGE_GATEWAY_VERSION:-2.0.4-alpha.1}"
     assert edge["security_opt"] == ["no-new-privileges:true"]
     assert "NET_BIND_SERVICE" in edge["cap_add"]
     assert "edge-acme-data:/var/lib/acme" in edge["volumes"]
     assert "edge-certificates:/etc/edge/certs" in edge["volumes"]
+    assert "edge-gateway-logs:/var/log/edge" in edge["volumes"]
     assert "/var/lib/acme-webroot:rw,noexec,nosuid,size=4m" in edge["tmpfs"]
 
 
@@ -79,6 +83,9 @@ def test_edge_gateway_pins_downloads_and_sanitizes_forwarded_headers() -> None:
     assert "sha256sum -c -" in dockerfile
     assert "chown -R nginx:nginx /var/lib/acme" not in dockerfile
     assert "chown -R nginx:nginx /var/cache/nginx" in dockerfile
+    assert "EDGE_GATEWAY_VERSION=2.0.4-alpha.1" in dockerfile
+    assert 'org.opencontainers.image.version="${EDGE_GATEWAY_VERSION}"' in dockerfile
+    assert "sed -i 's/\\r$//' /usr/local/bin/edge-gateway-entrypoint" in dockerfile
     assert "ssl_protocols TLSv1.2 TLSv1.3" in nginx
     assert "ssl_reject_handshake on" in nginx
     assert "proxy_set_header X-Forwarded-For $remote_addr" in nginx
@@ -86,6 +93,8 @@ def test_edge_gateway_pins_downloads_and_sanitizes_forwarded_headers() -> None:
     assert "proxy_buffering off" in nginx
     assert "--keylength ec-256" in entrypoint
     assert "EDGE_FRPC_ENABLED=true requires" in entrypoint
+    assert "using /tmp/edge logs until the container is recreated" in entrypoint
+    assert "if ! mkdir -p \"$LOG_DIR\" 2>/dev/null || [ ! -w \"$LOG_DIR\" ]; then" in entrypoint
     assert 'chown -R nginx:nginx "$ACME_HOME"' not in entrypoint
     assert "chown -R nginx:nginx /tmp/client_temp" in entrypoint
 
