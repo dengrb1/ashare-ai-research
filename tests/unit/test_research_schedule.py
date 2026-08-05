@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -197,6 +198,7 @@ def test_auto_dispatch_is_per_user_and_idempotent() -> None:
                     symbols=[],
                     total_budget=1_000_000,
                     per_symbol_budget=80_000,
+                    max_stock_price=500,
                     config_version=1,
                     updated_at=now.astimezone(UTC),
                 )
@@ -262,6 +264,10 @@ def test_auto_dispatch_is_per_user_and_idempotent() -> None:
         assert all(run.manifest["trigger_source"] == "AUTO" for run in runs)
         assert all(run.manifest["requested_date"] == "2026-07-15" for run in runs)
         assert all(run.manifest["actual_research_date"] == "2026-07-15" for run in runs)
+        assert all(
+            Decimal(run.manifest["research_budget"]["max_stock_price"]) == Decimal("500")
+            for run in runs
+        )
 
 
 def test_auto_dispatch_does_not_create_run_before_data_ready() -> None:

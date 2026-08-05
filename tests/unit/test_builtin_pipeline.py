@@ -18,8 +18,8 @@ from ashare_ai.agents.protocols import GenerationMetadata, StructuredGeneration
 from ashare_ai.agents.validation import ComponentAnalysis
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.time import SHANGHAI, market_decision_time
-from ashare_ai.orchestration.builtin import BuiltinDailyBackend
-from ashare_ai.orchestration.bundle import make_demo_bundle
+from ashare_ai.orchestration.builtin import BuiltinDailyBackend, FeatureArtifact
+from ashare_ai.orchestration.bundle import CanonicalDailyBundle, make_demo_bundle
 from ashare_ai.orchestration.daily import daily_research_flow
 from ashare_ai.orchestration.production import ApplicationPipeline
 from ashare_ai.portfolio.events import ActiveEventRisk, EventSeverity
@@ -337,6 +337,52 @@ def test_custom_research_scores_only_requested_eligible_symbols(tmp_path) -> Non
     universe = backend._read_stage(run_id, "universe", UniverseResult)
     assert universe_id == backend._stage_digest(run_id, "universe")
     assert universe.included == tuple(targets)
+
+
+def test_research_max_stock_price_filters_universe_before_feature_generation(tmp_path) -> None:
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    backend = BuiltinDailyBackend(
+        session_factory=factory,
+        object_root=tmp_path / "objects",
+        state_root=tmp_path / "state",
+        policy_path="configs/first_release.v1.json",
+        app_env="development",
+    )
+    pipeline = ApplicationPipeline(backend, session_factory=factory)
+    run_id = pipeline.start_run(date(2026, 7, 14))
+    with factory() as session:
+        run = session.get(JobRun, run_id)
+        assert run is not None
+        run.manifest = {
+            **run.manifest,
+            "research_scope": "MARKET",
+            "research_budget": {"max_stock_price": "10"},
+        }
+        session.commit()
+
+    pipeline.sync_reference_data(run_id)
+    snapshots = pipeline.ingest_and_verify(run_id)
+    universe_id = pipeline.build_universe(run_id, snapshots)
+    universe = backend._read_stage(run_id, "universe", UniverseResult)
+    bundle = backend._read_stage(run_id, "bundle", CanonicalDailyBundle)
+    latest_closes = {
+        item.symbol: item.close
+        for item in bundle.bars
+        if item.trading_date == bundle.trading_date
+    }
+
+    assert universe.included
+    assert all(latest_closes[symbol] <= 10 for symbol in universe.included)
+    assert any(latest_closes[symbol] > 10 for symbol in latest_closes)
+    pipeline.build_features(run_id, universe_id)
+    features = backend._read_stage(run_id, "features", FeatureArtifact)
+    assert {item.symbol for item in features.items} == set(universe.included)
 
 
 def test_small_custom_research_succeeds_reports_all_symbols_and_freezes_advice_snapshot(

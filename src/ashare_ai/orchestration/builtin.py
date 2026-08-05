@@ -739,9 +739,61 @@ class BuiltinDailyBackend:
                     ),
                 }
             )
-        elif len(result.included) < self.policy.portfolio.target_count:
+        max_stock_price = self._research_max_stock_price(manifest)
+        if max_stock_price is not None:
+            latest_bars: dict[str, DailyBar] = {}
+            for bar in bundle.bars:
+                if bar.trading_date != bundle.trading_date or bar.available_at > bundle.decision_at:
+                    continue
+                current = latest_bars.get(bar.symbol)
+                if current is None or (bar.available_at, bar.source_record_id) > (
+                    current.available_at,
+                    current.source_record_id,
+                ):
+                    latest_bars[bar.symbol] = bar
+            latest_closes = {symbol: bar.close for symbol, bar in latest_bars.items()}
+            included = tuple(
+                symbol
+                for symbol in result.included
+                if latest_closes.get(symbol) is not None
+                and latest_closes[symbol] <= max_stock_price
+            )
+            result = result.model_copy(
+                update={
+                    "included": included,
+                    "input_hash": stable_hash(
+                        {
+                            "base_universe_hash": result.input_hash,
+                            "max_stock_price": max_stock_price,
+                            "price_references": {
+                                symbol: latest_closes.get(symbol)
+                                for symbol in result.included
+                            },
+                        }
+                    ),
+                }
+            )
+            if research_scope != "MARKET" and not included:
+                raise ValueError("指定股票均超过最高可接受股价或未通过研究股票池校验")
+        if (
+            research_scope == "MARKET"
+            and max_stock_price is None
+            and len(result.included) < self.policy.portfolio.target_count
+        ):
             raise ValueError("canonical bundle cannot produce the required 15-stock portfolio")
         return self._write_stage(run_id, "universe", result)
+
+    @staticmethod
+    def _research_max_stock_price(manifest: Mapping[str, Any]) -> Decimal | None:
+        budget = manifest.get("research_budget")
+        budget = budget if isinstance(budget, Mapping) else {}
+        raw_maximum = budget.get("max_stock_price")
+        if raw_maximum is None:
+            return None
+        maximum = Decimal(str(raw_maximum))
+        if maximum <= 0:
+            raise ValueError("research budget max_stock_price must be positive")
+        return maximum
 
     def build_features(self, run_id: str, universe_id: str) -> str:
         if universe_id != self._stage_digest(run_id, "universe"):
