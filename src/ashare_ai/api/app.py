@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hmac
 import json
 import logging
 import shutil
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from threading import Lock
@@ -147,6 +148,8 @@ from ashare_ai.api.schemas import (
     RunClearRequest,
     RunListResponse,
     RunResponse,
+    RuntimeModeRequest,
+    RuntimeModeResponse,
     ScoreResponse,
     SecurityResolveCandidate,
     SecurityResolveResponse,
@@ -176,6 +179,7 @@ from ashare_ai.core.edge_gateway import (
     validate_proxy_hosts,
 )
 from ashare_ai.core.hashing import sha256_bytes, stable_hash
+from ashare_ai.core.runtime_mode import is_after_close, runtime_mode_policy
 from ashare_ai.core.security import safe_error_message
 from ashare_ai.core.system_settings import (
     SECRET_SETTING_FIELDS,
@@ -280,12 +284,14 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         ModelConfigurationService().bootstrap_from_environment(session)
         AttachmentService(session).cleanup_expired()
         session.commit()
-    market = get_market_data_service()
-    if not market.start():
-        logger.warning("AKShare market provider warmup failed; fallbacks remain available")
+    _reconcile_market_runtime()
+    governor = asyncio.create_task(_runtime_governor())
     try:
         yield
     finally:
+        governor.cancel()
+        with suppress(asyncio.CancelledError):
+            await governor
         reset_market_data_service()
 
 
@@ -342,6 +348,68 @@ def _market_session_status(now: datetime | None = None) -> MarketSessionStatus:
         trading_date=trading_date,
         is_trading_day=domain_status.is_trading_day,
         reason=domain_status.reason,
+    )
+
+
+def _reconcile_market_runtime(now: datetime | None = None) -> None:
+    """Apply the API profile without loading the heavy provider just to inspect it."""
+
+    settings = get_effective_settings()
+    policy = runtime_mode_policy(settings)
+    market = get_market_data_service()
+    if policy.auto_close_after_close and is_after_close(now):
+        release = getattr(market, "release_after_close", None)
+        if callable(release):
+            release()
+        return
+    if policy.mode == "SUPREME" and not market.start():
+        logger.warning("supreme market provider warmup failed; fallbacks remain available")
+
+
+async def _runtime_governor() -> None:
+    """Release live-data resources at close and keep the polling task tiny."""
+
+    while True:
+        try:
+            _reconcile_market_runtime()
+        except Exception:
+            logger.exception("runtime profile reconciliation failed")
+        await asyncio.sleep(60)
+
+
+def _runtime_mode_response(db: Session | None = None) -> RuntimeModeResponse:
+    _reconcile_market_runtime()
+    settings = (
+        SystemConfigurationService().resolve(db).settings
+        if db is not None
+        else get_effective_settings()
+    )
+    policy = runtime_mode_policy(settings)
+    market = get_market_data_service()
+    status_payload = (
+        market.status() if callable(getattr(market, "status", None)) else {}
+    )
+    after_close = is_after_close()
+    if after_close and policy.auto_close_after_close:
+        reason = "AFTER_CLOSE_RECLAIMED"
+    elif policy.mode == "SUPREME":
+        reason = "SUPREME_WARM"
+    else:
+        reason = "LIGHTWEIGHT_ON_DEMAND"
+    return RuntimeModeResponse(
+        mode=policy.mode,
+        memory_strategy=policy.memory_strategy,
+        primary_provider=str(status_payload.get("primary", policy.primary_provider)),
+        provider_process_mode=str(status_payload.get("provider_process_mode", "UNKNOWN")),
+        provider_process_state=str(status_payload.get("provider_process_state", "UNKNOWN")),
+        provider_process_degraded=bool(status_payload.get("provider_process_degraded", False)),
+        after_close=after_close,
+        auto_close_after_close=policy.auto_close_after_close,
+        market_cache_max_entries=policy.market_cache_max_entries,
+        market_prefetch_max_workers=policy.market_prefetch_max_workers,
+        market_provider_max_workers=policy.market_provider_max_workers,
+        market_provider_max_queue=policy.market_provider_max_queue,
+        reason=reason,
     )
 
 
@@ -766,6 +834,11 @@ def health(db: DbSession) -> HealthResponse:
     )
 
 
+@app.get("/api/v1/runtime/mode", response_model=RuntimeModeResponse)
+def get_runtime_mode(db: DbSession, _: Current) -> RuntimeModeResponse:
+    return _runtime_mode_response(db)
+
+
 @app.post("/api/v1/auth/login", response_model=UserResponse)
 def login(
     payload: LoginRequest, request: Request, response: Response, db: DbSession
@@ -863,6 +936,7 @@ def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
                 "chat_images_seven_day_retention": True,
                 "personal_archive_export_import": True,
                 "searxng_web_research": True,
+                "runtime_modes": True,
             },
             endpoints={
                 "assets": "/api/v1/assets",
@@ -888,6 +962,8 @@ def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
                 "ai_chat_thread_index": "/api/v1/ai/chat/thread-index",
                 "personal_data_exports": "/api/v1/me/data-exports",
                 "personal_data_imports": "/api/v1/me/data-imports",
+                "runtime_mode": "/api/v1/runtime/mode",
+                "admin_runtime_mode": "/api/v1/admin/runtime/mode",
             },
         ),
     )
@@ -2448,6 +2524,11 @@ def _system_settings_response(db: Session) -> SystemSettingsResponse:
     )
 
 
+def _reload_market_runtime() -> None:
+    reset_market_data_service()
+    _reconcile_market_runtime()
+
+
 def _system_settings_restart_command(
     execution_mode: str, edge_gateway_enabled: bool = False
 ) -> str:
@@ -2739,6 +2820,57 @@ def get_system_settings(db: DbSession, context: Current) -> SystemSettingsRespon
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+@app.put("/api/v1/admin/runtime/mode", response_model=RuntimeModeResponse)
+def put_runtime_mode(
+    payload: RuntimeModeRequest,
+    db: DbSession,
+    context: Writer,
+    idempotency_key: IdempotencyKey = None,
+    unlock_token: SystemSettingsUnlockToken = None,
+) -> RuntimeModeResponse:
+    _admin(context)
+    require_settings_unlock(context, unlock_token)
+    body = payload.model_dump(mode="json")
+    route = "/api/v1/admin/runtime/mode"
+    fingerprint = _idempotency_fingerprint(
+        context.user.user_id, route, idempotency_key, body
+    )
+    replay = _find_idempotency(
+        db,
+        user_id=context.user.user_id,
+        route=route,
+        fingerprint=fingerprint,
+    )
+    if replay is not None:
+        return _runtime_mode_response(db)
+    try:
+        runtime = SystemConfigurationService().save(
+            db,
+            public_updates={"api_runtime_mode": payload.mode},
+            secret_updates={},
+            user_id=context.user.user_id,
+        )
+        _remember_idempotency(
+            db,
+            user_id=context.user.user_id,
+            route=route,
+            fingerprint=fingerprint,
+            resource_type="API_RUNTIME_MODE",
+            resource_id=runtime.configuration_id or "environment",
+        )
+        db.commit()
+        _reload_market_runtime()
+        logger.info(
+            "administrator changed API runtime mode=%s configuration=%s",
+            payload.mode,
+            runtime.config_sha256,
+        )
+        return _runtime_mode_response(db)
+    except SystemSettingsError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @app.get("/api/v1/admin/system-resources", response_model=SystemResourcesResponse)
 def get_system_resources(context: Current) -> SystemResourcesResponse:
     _admin(context)
@@ -2807,8 +2939,7 @@ def put_system_settings(
         # Cached adapters are recreated on the next request so non-topology
         # values (search, market and storage tuning) hot-load without a Docker
         # restart.  Worker topology itself is intentionally boot-time only.
-        reset_market_data_service()
-        get_market_data_service().start()
+        _reload_market_runtime()
         get_financial_search_service.cache_clear()
         logger.info(
             "administrator saved system configuration version=%s hash=%s",
@@ -2833,8 +2964,7 @@ def restore_system_setting(
     try:
         SystemConfigurationService().restore_field(db, field=field, user_id=context.user.user_id)
         db.commit()
-        reset_market_data_service()
-        get_market_data_service().start()
+        _reload_market_runtime()
         get_financial_search_service.cache_clear()
         return _system_settings_response(db)
     except SystemSettingsError as exc:
@@ -2853,8 +2983,7 @@ def restore_all_system_settings(
     try:
         SystemConfigurationService().restore_all(db, user_id=context.user.user_id)
         db.commit()
-        reset_market_data_service()
-        get_market_data_service().start()
+        _reload_market_runtime()
         get_financial_search_service.cache_clear()
         return _system_settings_response(db)
     except SystemSettingsError as exc:

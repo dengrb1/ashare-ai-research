@@ -213,6 +213,8 @@ class SystemSettingsRequest(BaseModel):
     market_stale_seconds: int | None = Field(default=None, ge=15, le=86400)
     market_timeout_seconds: float | None = Field(default=None, gt=0, le=120)
     market_hedge_delay_seconds: float | None = Field(default=None, ge=0.1, le=3.0)
+    api_runtime_mode: Literal["LIGHTWEIGHT", "SUPREME"] | None = None
+    api_runtime_auto_close: bool | None = None
     financial_search_cache_seconds: int | None = Field(default=None, ge=0, le=300)
     financial_search_max_concurrency: int | None = Field(default=None, ge=1, le=32)
     financial_search_rate_limit_per_minute: int | None = Field(default=None, ge=1, le=600)
@@ -342,6 +344,26 @@ class SystemSettingsResponse(BaseModel):
     workers: list[WorkerHealthResponse] = Field(default_factory=list)
     queues: dict[str, QueueSummaryResponse] = Field(default_factory=dict)
     compose_restart_command: str
+
+
+class RuntimeModeRequest(BaseModel):
+    mode: Literal["LIGHTWEIGHT", "SUPREME"]
+
+
+class RuntimeModeResponse(BaseModel):
+    mode: Literal["LIGHTWEIGHT", "SUPREME"]
+    memory_strategy: Literal["LOW_RESIDENT", "MAX_THROUGHPUT"]
+    primary_provider: str
+    provider_process_mode: str
+    provider_process_state: str
+    provider_process_degraded: bool
+    after_close: bool
+    auto_close_after_close: bool
+    market_cache_max_entries: int = Field(ge=1)
+    market_prefetch_max_workers: int = Field(ge=1)
+    market_provider_max_workers: int = Field(ge=1)
+    market_provider_max_queue: int = Field(ge=1)
+    reason: str
 
 
 class ResourceMetricResponse(BaseModel):

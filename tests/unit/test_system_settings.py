@@ -429,6 +429,9 @@ def test_system_settings_api_requires_admin_csrf_and_is_idempotent(monkeypatch) 
         assert resources.status_code == 200
         assert resources.json()["scope"] in {"HOST", "CONTAINER"}
         assert "redis_url" not in resources.text
+        runtime_mode = client.get("/api/v1/runtime/mode")
+        assert runtime_mode.status_code == 200
+        assert runtime_mode.json()["mode"] == "LIGHTWEIGHT"
         payload = {"market_cache_seconds": 23, "tushare_token": "must-not-return"}
         assert client.put("/api/v1/admin/system-settings", json=payload).status_code == 403
         csrf = client.cookies.get("ashare_csrf")
@@ -485,6 +488,24 @@ def test_system_settings_api_requires_admin_csrf_and_is_idempotent(monkeypatch) 
         assert first.json()["version"] == second.json()["version"] == 1
         assert first.json()["secret_configured"]["tushare_token"] is True
         assert "must-not-return" not in first.text
+        mode_headers = {
+            "x-csrf-token": csrf,
+            "X-System-Settings-Unlock": unlocked.json()["unlock_token"],
+            "Idempotency-Key": "runtime-mode-once",
+        }
+        mode_response = client.put(
+            "/api/v1/admin/runtime/mode",
+            json={"mode": "SUPREME"},
+            headers=mode_headers,
+        )
+        assert mode_response.status_code == 200
+        assert mode_response.json()["mode"] == "SUPREME"
+        assert mode_response.json()["memory_strategy"] == "MAX_THROUGHPUT"
+        assert client.put(
+            "/api/v1/admin/runtime/mode",
+            json={"mode": "SUPREME"},
+            headers=mode_headers,
+        ).json()["mode"] == "SUPREME"
         assert client.put(
             "/api/v1/admin/system-settings",
             json={"market_cache_seconds": 24},

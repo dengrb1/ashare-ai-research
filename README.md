@@ -132,6 +132,8 @@ flowchart LR
 
 默认 Docker 栈包括 WebGUI、API、串行 `job-worker`、独立 `exit-advice-worker`、PostgreSQL、Redis 和仅在私有网络中可访问的 SearXNG。小型主机建议至少 2 GB 内存。
 
+API 默认使用 `LIGHTWEIGHT` 运行模式：实时行情不在 API 启动时预热 AKShare，缓存和预取并发受限，收盘后自动回收行情子进程与进程内缓存。需要更高实时行情吞吐时，可通过 `/api/v1/admin/runtime/mode` 切换到 `SUPREME`；该模式仍把 AKShare 保持在隔离子进程中，不改变研究 Worker 的执行模式。
+
 ## 项目结构
 
 ```text

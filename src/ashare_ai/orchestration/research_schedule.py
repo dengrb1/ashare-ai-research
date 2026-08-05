@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from datetime import UTC, date, datetime, time, timedelta
-from importlib import import_module
 from typing import Any, Protocol
 
 from sqlalchemy import select
@@ -70,18 +69,12 @@ def data_readiness_wait(
 
 
 class FreeExchangeCalendar:
-    """Free exchange-session calendar exposed by AKShare's Sina calendar adapter."""
+    """Free exchange-session calendar fetched through the isolated market child."""
 
     def sessions(self, start_date: date, end_date: date) -> tuple[date, ...]:
-        sdk = import_module("akshare")
-        frame = sdk.tool_trade_date_hist_sina()
-        values: set[date] = set()
-        for row in frame.to_dict(orient="records"):
-            raw = row.get("trade_date", row.get("日期"))
-            parsed = _date_value(raw)
-            if parsed is not None and start_date <= parsed <= end_date:
-                values.add(parsed)
-        return tuple(sorted(values))
+        from ashare_ai.market.service import get_market_data_service
+
+        return get_market_data_service().sessions(start_date, end_date)
 
 
 class AKShareDataReadiness:

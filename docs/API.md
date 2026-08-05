@@ -105,6 +105,7 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 分组 | 方法 | 路径 | 权限 |
 |---|---|---|---|
 | 健康 | GET | `/api/v1/health` | 公开 |
+| API 运行模式 | GET | `/api/v1/runtime/mode` | 登录；当前 API 实时资源档案 |
 | 认证 | POST | `/api/v1/auth/login` | 公开 |
 | 认证 | POST | `/api/v1/auth/token` | 公开 |
 | 认证 | POST | `/api/v1/auth/refresh` | 公开（提交 refresh token） |
@@ -156,6 +157,7 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 模型设置 | POST | `/api/v1/admin/model-settings/models` | 管理员、写入 |
 | 模型诊断日志 | GET | `/api/v1/admin/model-settings/logs` | 管理员；脱敏探测状态与错误 |
 | 系统设置 | GET/PUT/DELETE | `/api/v1/admin/system-settings` | 管理员；PUT 幂等、写入 |
+| API 运行模式 | PUT | `/api/v1/admin/runtime/mode` | 管理员；解锁、幂等、写入 |
 | 系统设置 | DELETE | `/api/v1/admin/system-settings/{field}` | 管理员、写入 |
 | 系统设置解锁 | POST | `/api/v1/admin/system-settings/unlock` | 管理员、写入；当前账户密码二次验证 |
 | 系统资源 | GET | `/api/v1/admin/system-resources` | 管理员；运行环境只读指标 |
@@ -471,6 +473,34 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 
 ### 系统设置中心
 
+### API 运行模式
+
+API 实时行情资源提供两个模式，模式值为 `LIGHTWEIGHT` 或 `SUPREME`。它只影响 API 进程的实时行情适配器、缓存和并发，不改变研究 Worker 的 `SERIAL|DUAL` 拓扑、模型并发、评分公式或点时约束。
+
+- `LIGHTWEIGHT`（默认）：使用低驻留的 Sina/Tencent 适配器，最多 128 个进程内行情缓存条目，预取和 provider 并发各为 1，不在 API 启动时预热 AKShare。
+- `SUPREME`：使用可复用的隔离 AKShare 子进程，并按现有行情配置恢复缓存和预取并发；重型 SDK 不进入 API 主解释器。
+- `api_runtime_auto_close=true`（默认）时，收盘后 API governor 会关闭行情子进程并清空进程内行情缓存；Redis 中的共享缓存和不可变研究快照不受影响。下一次需要实时数据时按模式重新建立资源。
+
+读取当前档案：
+
+```bash
+curl -sS "$BASE_URL/api/v1/runtime/mode" \
+  -H "Authorization: Bearer <ACCESS_TOKEN>"
+```
+
+管理员切换档案前，沿用系统设置解锁和 `Idempotency-Key`：
+
+```bash
+curl -sS -X PUT "$BASE_URL/api/v1/admin/runtime/mode" \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: <UNIQUE_KEY>" \
+  -H "X-System-Settings-Unlock: <UNLOCK_TOKEN>" \
+  -d '{"mode":"SUPREME"}'
+```
+
+响应会返回 `provider_process_state`、`after_close`、缓存上限和并发上限。研究创建接口中的 `supreme_mode` 仍然只控制该次研究的数据采集并行度；它不会隐式改变 API 运行模式。
+
 ### Edge Gateway 配置中心
 
 `GET /api/v1/admin/edge-gateway` 返回当前版本、结构化代理主机、配置哈希、应用状态和 `source_sync`；未携带有效 `X-System-Settings-Unlock` 时不返回 FRP 明文。服务端每次读取都会检查部署配置目录中的 `frpc.toml`/`managed.conf`，外部变更会导入新的不可变版本。`PUT` 使用当前管理员解锁令牌保存最多 32 个代理主机和 64 KiB FRP TOML，FRP 内容使用 `EDGE_GATEWAY_ENCRYPTION_KEYS` 加密，提交按 `Idempotency-Key` 去重。代理目标必须匹配 `EDGE_PROXY_TARGET_ALLOWLIST`（默认 `web`）或私有/回环 IP，禁止自定义 Nginx 指令。
@@ -489,6 +519,7 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 - 公网边缘网关：`edge_domain`（公网 DNS 域名）、`edge_acme_email`（ACME 账号邮箱）、`edge_acme_ca_server`（默认 `letsencrypt`）、`edge_frpc_enabled` 与 `edge_frpc_config_file`（宿主机未跟踪的 frpc.toml 路径）；启用 `edge_gateway_enabled` 时必须同时提供域名与邮箱，启用 `edge_frpc_enabled` 时必须提供非空配置文件路径，否则返回 `422`；
 - 对象存储 endpoint/bucket/TLS，SearXNG 地址/超时/结果数；
 - 行情、金融检索缓存与并发/限流；
+- API 实时运行档案 `api_runtime_mode=LIGHTWEIGHT|SUPREME` 与收盘后回收开关 `api_runtime_auto_close`；
 - 每日研究启动与重试间隔、旧版重试窗口兼容值、Worker lease、AKShare 参数、数据包模式、演示数据开关、最低上市日和成交额；旧版窗口仅保持读取/写入兼容，自动补数统一在权威交易日历确定的下一交易日 09:25（上海时间）截止；
 - 可写但永不回显的 `tushare_token`、`object_store_access_key`、`object_store_secret_key`。
 
@@ -744,7 +775,7 @@ curl -sS "$BASE_URL/api/v1/research/runs/<RUN_ID>" \
 
 ### `GET /api/v1/market/status`
 
-返回当前行情服务状态对象，主要字段包括 `primary`、`fallback`、`fallbacks`、`cache_seconds`、`kline_cache_seconds`、`prefetch_max_workers`、`prefetch_max_symbols`、`stale_seconds`、`adjustment`、`live_quote_price_basis`、`live_kline_default_adjustment`、`supported_adjustments`、`live_data_isolated_from_snapshots` 和可选 `quotes` 缓存状态。`live_quote_price_basis` 固定为 `raw`，Web 默认日 K 为 `raw`；兼容字段 `adjustment` 仍保留旧的 `hfq` 内部技术口径。兼容新增的 `provider_process_mode`、`provider_process_state`、`provider_process_degraded` 与 `hedge_delay_seconds` 用于观察可复用 AKShare 隔离进程和日线延迟竞速；这些字段不暴露 PID、命令行、环境变量或内部错误。
+返回当前行情服务状态对象，主要字段包括 `runtime_mode`、`runtime_mode_policy`、`primary`、`fallback`、`fallbacks`、`cache_seconds`、`kline_cache_seconds`、`prefetch_max_workers`、`prefetch_max_symbols`、`stale_seconds`、`adjustment`、`live_quote_price_basis`、`live_kline_default_adjustment`、`supported_adjustments`、`live_data_isolated_from_snapshots` 和可选 `quotes` 缓存状态。`live_quote_price_basis` 固定为 `raw`，Web 默认日 K 为 `raw`；兼容字段 `adjustment` 仍保留旧的 `hfq` 内部技术口径。兼容新增的 `provider_process_mode`、`provider_process_state`、`provider_process_degraded` 与 `hedge_delay_seconds` 用于观察可复用 AKShare 隔离进程和日线延迟竞速；这些字段不暴露 PID、命令行、环境变量或内部错误。
 
 `market_session` 为兼容性新增对象，用于界面标注实时行情是否已收盘：`state` 取值为 `OPEN`、`PRE_OPEN`、`BREAK`、`CLOSED` 或 `UNKNOWN`；并返回上海时区的 `as_of`、`trading_date`、`is_trading_day` 和原因码 `reason`。交易日 15:00 起及非交易日返回 `CLOSED`；午间休市返回 `BREAK`。交易日历暂不可用时返回 `UNKNOWN`，客户端不得将其视为已收盘。旧客户端可忽略该新增字段。
 

@@ -25,6 +25,7 @@ import httpx
 
 from ashare_ai.adapters.symbols import normalize_symbol as canonical_symbol
 from ashare_ai.core.config import Settings, get_settings
+from ashare_ai.core.runtime_mode import is_after_close, runtime_mode_policy
 from ashare_ai.core.system_settings import get_effective_settings
 from ashare_ai.core.time import SHANGHAI
 
@@ -488,6 +489,19 @@ class _AKShareInProcessProvider:
             )
         return bars
 
+    def sessions(self, start_date: date, end_date: date) -> list[date]:
+        frame = self._sdk().tool_trade_date_hist_sina()
+        values: set[date] = set()
+        for item in frame.to_dict(orient="records"):
+            raw = item.get("trade_date", item.get("日期"))
+            try:
+                parsed = date.fromisoformat(str(raw).replace("/", "-"))
+            except (TypeError, ValueError):
+                continue
+            if start_date <= parsed <= end_date:
+                values.add(parsed)
+        return sorted(values)
+
 
 class _PriorityGate:
     """Serialize provider IPC while letting foreground work overtake queued prefetches."""
@@ -743,6 +757,26 @@ class AKShareMarketProvider:
             maximum_items=limit,
             background=True,
         )
+
+    def sessions(self, start_date: date, end_date: date) -> tuple[date, ...]:
+        rows = self._request(
+            {
+                "operation": "sessions",
+                "start": start_date.isoformat(),
+                "end": end_date.isoformat(),
+            },
+            maximum_items=4096,
+        )
+        values: set[date] = set()
+        for item in rows:
+            raw = item.get("date")
+            if not isinstance(raw, str):
+                continue
+            try:
+                values.add(date.fromisoformat(raw))
+            except ValueError:
+                continue
+        return tuple(sorted(values))
 
 
 class SinaMarketProvider:
@@ -1084,16 +1118,42 @@ class MarketDataService:
         redis_client: Any = ...,
     ) -> None:
         self.settings = settings or get_settings()
-        self.primary = primary or AKShareMarketProvider(
-            timeout_seconds=self.settings.market_timeout_seconds
+        self.runtime_policy = runtime_mode_policy(self.settings)
+        profile_limits = primary is None
+        self._cache_max_entries = (
+            self.runtime_policy.market_cache_max_entries
+            if profile_limits
+            else self.settings.market_cache_max_entries
         )
+        self._prefetch_max_workers = (
+            self.runtime_policy.market_prefetch_max_workers
+            if profile_limits
+            else self.settings.market_prefetch_max_workers
+        )
+        self._provider_max_workers = (
+            self.runtime_policy.market_provider_max_workers
+            if profile_limits
+            else self.settings.market_provider_max_workers
+        )
+        self._provider_max_queue = (
+            self.runtime_policy.market_provider_max_queue
+            if profile_limits
+            else self.settings.market_provider_max_queue
+        )
+        if primary is not None:
+            self.primary = primary
+        elif self.runtime_policy.use_isolated_akshare:
+            self.primary = AKShareMarketProvider(
+                timeout_seconds=self.settings.market_timeout_seconds
+            )
+        else:
+            self.primary = SinaMarketProvider()
         if fallback is not None:
             self.fallbacks: tuple[MarketProvider, ...] = (fallback,)
         else:
-            defaults: list[MarketProvider] = [
-                SinaMarketProvider(),
-                TencentHfqDailyMarketProvider(),
-            ]
+            defaults: list[MarketProvider] = [TencentHfqDailyMarketProvider()]
+            if not isinstance(self.primary, SinaMarketProvider):
+                defaults.insert(0, SinaMarketProvider())
             if self.settings.tushare_token:
                 defaults.append(TushareMarketProvider(self.settings.tushare_token))
             self.fallbacks = tuple(defaults)
@@ -1109,23 +1169,53 @@ class MarketDataService:
         # directly influenced by authenticated callers.  The cache itself is
         # LRU-bounded, so the per-key lock table is capped at twice that and any
         # overflow keys share one fallback lock instead of growing memory.
-        self._max_locks = max(1024, self.settings.market_cache_max_entries * 2)
+        self._max_locks = max(128, self._cache_max_entries * 2)
         self._overflow_lock = threading.Lock()
         self._provider_slots = threading.BoundedSemaphore(
             max(
-                self.settings.market_provider_max_workers,
-                self.settings.market_provider_max_queue,
+                self._provider_max_workers,
+                self._provider_max_queue,
             )
         )
 
     def start(self) -> bool:
         if isinstance(self.primary, AKShareMarketProvider):
+            if not self._provider_allowed(self.primary):
+                return True
             return self.primary.start()
         return True
 
     def close(self) -> None:
         if isinstance(self.primary, AKShareMarketProvider):
             self.primary.close()
+        with self._cache_guard:
+            self._cache.clear()
+        with self._guard:
+            self._locks.clear()
+
+    def release_after_close(self) -> None:
+        if self.runtime_policy.auto_close_after_close and is_after_close(self.clock()):
+            self.close()
+
+    def _provider_allowed(self, provider: MarketProvider) -> bool:
+        return not (
+            isinstance(provider, AKShareMarketProvider)
+            and self.runtime_policy.auto_close_after_close
+            and is_after_close(self.clock())
+        )
+
+    def sessions(self, start_date: date, end_date: date) -> tuple[date, ...]:
+        provider_sessions = getattr(self.primary, "sessions", None)
+        if callable(provider_sessions) and self._provider_allowed(self.primary):
+            return tuple(provider_sessions(start_date, end_date))
+
+        # Calendar reads are rare and must not make the lightweight API retain
+        # the AKShare runtime after the request completes.
+        isolated = AKShareMarketProvider(timeout_seconds=self.settings.market_timeout_seconds)
+        try:
+            return isolated.sessions(start_date, end_date)
+        finally:
+            isolated.close()
 
     def _lock(self, key: str) -> threading.Lock:
         with self._guard:
@@ -1232,7 +1322,7 @@ class MarketDataService:
         with self._cache_guard:
             self._cache[key] = value
             self._cache.move_to_end(key)
-            while len(self._cache) > self.settings.market_cache_max_entries:
+            while len(self._cache) > self._cache_max_entries:
                 self._cache.popitem(last=False)
 
     @staticmethod
@@ -1475,6 +1565,8 @@ class MarketDataService:
                 refreshed: dict[str, dict[str, Any]] = {}
                 missing = set(normalized)
                 for provider in (self.primary, *self.fallbacks):
+                    if not self._provider_allowed(provider):
+                        continue
                     if not missing:
                         break
                     try:
@@ -1577,6 +1669,8 @@ class MarketDataService:
             errors: list[str] = []
             try:
                 for provider in (*self.fallbacks, self.primary):
+                    if not self._provider_allowed(provider):
+                        continue
                     try:
                         collected = self.clock()
                         rows = self._call(provider.quotes, [normalized])
@@ -1692,7 +1786,11 @@ class MarketDataService:
             stale_candidate: tuple[MarketProvider, list[dict[str, Any]]] | None = None
             try:
                 preloaded: tuple[MarketProvider, list[dict[str, Any]], datetime] | None = None
-                providers_to_call: list[MarketProvider] = [self.primary, *self.fallbacks]
+                providers_to_call: list[MarketProvider] = [
+                    provider
+                    for provider in (self.primary, *self.fallbacks)
+                    if self._provider_allowed(provider)
+                ]
                 tencent = next(
                     (
                         provider
@@ -1704,6 +1802,7 @@ class MarketDataService:
                 if (
                     provider_period == "daily"
                     and isinstance(self.primary, AKShareMarketProvider)
+                    and self._provider_allowed(self.primary)
                     and tencent is not None
                 ):
                     try:
@@ -1931,7 +2030,7 @@ class MarketDataService:
         klines: dict[str, dict[str, dict[str, Any]]] = {}
         errors: dict[str, str] = {}
         task_count = len(normalized) * len(requested_periods) + int(include_quotes)
-        max_workers = min(self.settings.market_prefetch_max_workers, task_count)
+        max_workers = min(self._prefetch_max_workers, task_count)
         with ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="market-prefetch",
@@ -1977,6 +2076,8 @@ class MarketDataService:
                 "symbols": len(quote_record["items"]),
             }
         return {
+            "runtime_mode": self.runtime_policy.mode,
+            "runtime_mode_policy": self.runtime_policy.as_dict(),
             "primary": self.primary.source,
             "fallback": self.fallback.source if self.fallback else None,
             "fallbacks": [provider.source for provider in self.fallbacks],

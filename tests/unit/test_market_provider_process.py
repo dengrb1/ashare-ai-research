@@ -4,7 +4,7 @@ import json
 import queue
 import threading
 import time
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 import pytest
@@ -198,6 +198,24 @@ def test_child_contract_filters_quotes_and_validates_kline_limit() -> None:
             },
             provider=Provider(),  # type: ignore[arg-type]
         )
+
+
+def test_child_contract_returns_bounded_calendar_rows() -> None:
+    class Provider:
+        def sessions(self, start_date: date, end_date: date) -> list[date]:
+            assert start_date == date(2026, 7, 17)
+            assert end_date == date(2026, 7, 20)
+            return [date(2026, 7, 17), date(2026, 7, 20)]
+
+    rows = handle_request(
+        {
+            "operation": "sessions",
+            "start": "2026-07-17",
+            "end": "2026-07-20",
+        },
+        provider=Provider(),  # type: ignore[arg-type]
+    )
+    assert rows == [{"date": "2026-07-17"}, {"date": "2026-07-20"}]
 
 
 def test_market_number_rejects_non_finite_values() -> None:

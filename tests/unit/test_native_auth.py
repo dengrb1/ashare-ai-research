@@ -92,9 +92,10 @@ def test_native_bearer_refresh_rotation_revoke_expiry_and_disable() -> None:
                 "ai_cost_summary": True,
                 "persistent_ai_chat": True,
             "chat_images_seven_day_retention": True,
-            "personal_archive_export_import": True,
-            "searxng_web_research": True,
-        }
+                "personal_archive_export_import": True,
+                "searxng_web_research": True,
+                "runtime_modes": True,
+            }
         assert bootstrap_body["capabilities"]["endpoints"]["report_symbols"] == (
             "/api/v1/reports/{report_id}/symbols"
         )
