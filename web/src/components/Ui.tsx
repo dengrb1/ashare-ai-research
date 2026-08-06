@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { Inbox } from 'lucide-react'
 import { ErrorToast } from '../context/ToastContext'
 
 export function Panel({ title, eyebrow, action, children, className = '' }: { title?: string; eyebrow?: string; action?: ReactNode; children: ReactNode; className?: string }) {
@@ -22,7 +23,7 @@ export function StatusPill({ status }: { status: string }) {
 }
 
 export function Empty({ title = '暂无数据', description }: { title?: string; description?: string }) {
-  return <div className="empty"><span>⌁</span><strong>{title}</strong>{description && <p>{description}</p>}</div>
+  return <div className="empty"><span><Inbox size={28} strokeWidth={1.4} /></span><strong>{title}</strong>{description && <p>{description}</p>}</div>
 }
 
 export function Loading({ label = '加载中' }: { label?: string }) {

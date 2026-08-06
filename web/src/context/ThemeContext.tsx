@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from 'react'
+import { Moon, Sun } from 'lucide-react'
 
 export type Theme = 'light' | 'dark'
 export type ThemeMode = 'system' | Theme
@@ -78,8 +79,9 @@ export function ThemeToggle({ compact = false }: { compact?: boolean }) {
   const labels: Record<ThemeMode, string> = { system: '跟随系统', light: '浅色', dark: '深色' }
   const nextLabels: Record<ThemeMode, string> = { system: '浅色', light: '深色', dark: '跟随系统' }
   const actionLabel = `当前：${labels[theme]}；切换${nextLabels[theme]}主题`
+  const Icon = resolvedTheme === 'dark' ? Sun : Moon
   return <button className={`theme-toggle${compact ? ' compact' : ''}`} onClick={toggleTheme} title={actionLabel} aria-label={actionLabel}>
-    <span aria-hidden="true">{theme === 'system' ? '◐' : resolvedTheme === 'light' ? '☾' : '☀'}</span>
+    <Icon size={15} strokeWidth={1.8} aria-hidden="true" />
     {!compact && <span>{labels[theme]}</span>}
   </button>
 }

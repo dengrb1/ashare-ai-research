@@ -1,10 +1,32 @@
 import { useEffect, useState } from 'react'
+import { CalendarClock, Calculator, Database, Scale } from 'lucide-react'
 import { api, unwrapList } from '../api'
 import { MarketClosedNotice } from '../components/MarketClosedNotice'
 import { useMarket } from '../context/MarketContext'
 import type { Run } from '../types'
 import { Empty, formatAmount, formatNumber, formatTime, Panel, StatusPill, today } from '../components/Ui'
-import { Sparkline } from '../components/Sparkline'
+
+const RUNNING = ['PENDING', 'QUEUED', 'RUNNING', 'PROCESSING', 'DATA_READINESS_WAITING', 'CANCEL_REQUESTED']
+const COMPLETE = ['SUCCEEDED', 'FUSED', 'COMPLETED', 'SUCCESS']
+const FAILED = ['FAILED', 'CANCELLED', 'ERROR']
+
+function researchState(latest: Run | undefined): { label: string; pulse: boolean } {
+  if (!latest) return { label: '今日尚未发起研究', pulse: false }
+  const status = latest.status.toUpperCase()
+  if (COMPLETE.includes(status)) return { label: '今日研究已完成', pulse: false }
+  if (RUNNING.includes(status)) {
+    return { label: status === 'DATA_READINESS_WAITING' ? '等待基准数据同步' : '研究执行中', pulse: true }
+  }
+  if (FAILED.includes(status)) return { label: '研究未完成', pulse: false }
+  return { label: '等待研究队列', pulse: false }
+}
+
+const PRINCIPLES = [
+  { icon: CalendarClock, title: '时点正确', text: 'symbol + trading_date + available_at 全程可追溯，决策不晚于数据可用时点' },
+  { icon: Calculator, title: '评分确定', text: '最终评分只来自版本化的确定性公式，同一输入产出同一结果' },
+  { icon: Scale, title: '规则有效', text: '涨跌停、T+1、费用按生效日期匹配，规则缺失时拒绝交易' },
+  { icon: Database, title: '行情隔离', text: '实时数据不进入冻结研究快照，回测与组合只读已提交 Manifest' },
+]
 
 export function DashboardPage() {
   const { quotes, watchlist, positions, totalAssets, assetsLoading, quotesLoading, subscribe } = useMarket()
@@ -13,8 +35,9 @@ export function DashboardPage() {
   useEffect(() => subscribe(positions.map((position) => position.symbol)), [positions.map((position) => position.symbol).sort().join(','), subscribe])
   const latest = runs[0]
   const quoteSymbols = Array.from(new Set([...watchlist, ...positions.map((position) => position.symbol)])).slice(0, 4)
-  const completed = runs.filter((run) => ['COMPLETED', 'SUCCESS', 'SUCCEEDED', 'FUSED'].includes(run.status.toUpperCase())).length
-  const running = runs.filter((run) => ['PENDING', 'RUNNING', 'PROCESSING', 'QUEUED'].includes(run.status.toUpperCase())).length
+  const completed = runs.filter((run) => COMPLETE.includes(run.status.toUpperCase())).length
+  const running = runs.filter((run) => RUNNING.includes(run.status.toUpperCase())).length
+  const state = researchState(latest)
   const positionRows = positions.map((position) => {
     const livePrice = quotes[position.symbol]?.price
     const estimated = !(livePrice && livePrice > 0)
@@ -29,19 +52,25 @@ export function DashboardPage() {
   const totalReturn = totalCost > 0 ? totalPnl / totalCost * 100 : 0
 
   return <div className="page-stack">
-    <div className="hero-strip">
-      <div><span className="eyebrow">TRADING DATE</span><strong>{today()}</strong><p>数据可用性截止时点与研究决策时点独立记录</p></div>
-      <div className="hero-rule" /><div className="hero-stat"><span>近期完成</span><strong>{completed}</strong><small>次研究 / 回测</small></div>
-      <div className="hero-stat"><span>执行中</span><strong>{running}</strong><small>异步任务</small></div>
-      <div className="hero-stat"><span>自选覆盖</span><strong>{watchlist.length}</strong><small>只活跃刷新</small></div>
-    </div>
+    <section className="research-hero" aria-label="研究时点">
+      <div className="research-hero-date">
+        <span>研究时点 · POINT IN TIME</span>
+        <strong>{latest?.trading_date || today()}</strong>
+        <div><i className={state.pulse ? '' : 'idle'} />{state.label}{latest?.decision_at ? ` · 冻结 ${formatTime(latest.decision_at)}` : ''}</div>
+      </div>
+      <div className="research-hero-stats">
+        <div><span>近期完成</span><strong>{completed}</strong><small>次研究 / 回测</small></div>
+        <div><span>执行中</span><strong>{running}</strong><small>异步任务</small></div>
+        <div><span>自选覆盖</span><strong>{watchlist.length}</strong><small>只活跃刷新</small></div>
+      </div>
+    </section>
     <MarketClosedNotice />
     <div className="metric-grid">
-      {quoteSymbols.length ? quoteSymbols.map((symbol, index) => {
+      {quoteSymbols.length ? quoteSymbols.map((symbol) => {
         const quote = quotes[symbol]
         if (quote) return <div className="quote-card" key={quote.symbol}>
           <div><div><strong>{quote.name || quote.symbol}</strong><small>{quote.symbol}</small></div><span className={quote.change_pct >= 0 ? 'price-up' : 'price-down'}>{quote.change_pct >= 0 ? '+' : ''}{formatNumber(quote.change_pct)}%</span></div>
-          <div className="quote-main"><strong>{formatNumber(quote.price)}</strong><Sparkline positive={quote.change_pct >= 0} values={[quote.prev_close || quote.price * .99, quote.open || quote.price, quote.low || quote.price * .98, quote.high || quote.price * 1.01, quote.price + index * .01]} /></div>
+          <div className="quote-main"><strong>{formatNumber(quote.price)}</strong></div>
           <small>成交额 {formatAmount(quote.amount)}</small>
         </div>
         return quotesLoading || assetsLoading
@@ -57,16 +86,13 @@ export function DashboardPage() {
       </Panel>
       <Panel title="研究流水线" eyebrow="DAILY PIPELINE" action={latest && <StatusPill status={latest.status} />}>
         {latest ? <div className="pipeline">
-          {['冻结数据快照', '特征与 Agent 分析', '确定性综合评分', '候选过滤', '模拟组合与报告'].map((step, index) => <div className="pipeline-step" key={step}><span>{index + 1}</span><div><strong>{step}</strong><small>{index < 4 ? '依赖前序产物与哈希验证' : '发布可追溯结果'}</small></div><i /></div>)}
+          {['冻结数据快照', '特征与 Agent 分析', '确定性综合评分', '候选过滤', '模拟组合与报告'].map((step, index) => <div className="pipeline-step" key={step}><span>{index + 1}</span><div><strong>{step}</strong><small>{index < 4 ? '依赖前序产物与哈希验证' : '发布可追溯结果'}</small></div></div>)}
           <div className="run-summary"><span>最近运行</span><strong>{latest.run_id}</strong><small>{formatTime(latest.started_at || latest.created_at)}</small></div>
         </div> : <Empty title="尚无研究运行" description="前往每日研究发起首个任务" />}
       </Panel>
       <Panel title="系统原则" eyebrow="GUARDRAILS">
         <div className="guardrail-list">
-          <div><span>01</span><div><strong>时点正确</strong><p>symbol + trading_date + available_at</p></div></div>
-          <div><span>02</span><div><strong>评分确定</strong><p>仅版本化纯函数生成最终分</p></div></div>
-          <div><span>03</span><div><strong>规则有效</strong><p>涨跌停、T+1 与费用按生效日匹配</p></div></div>
-          <div><span>04</span><div><strong>行情隔离</strong><p>实时数据不进入冻结研究快照</p></div></div>
+          {PRINCIPLES.map(({ icon: Icon, title, text }) => <div key={title}><span><Icon size={18} strokeWidth={1.7} /></span><div><strong>{title}</strong><p>{text}</p></div></div>)}
         </div>
       </Panel>
     </div>
