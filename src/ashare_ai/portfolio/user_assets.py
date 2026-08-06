@@ -76,7 +76,7 @@ class UserAssetService:
         user_id: str,
         watchlist: list[str],
         positions: list[dict[str, Any]],
-        total_assets: float | None | _UnsetTotalAssets = UNSET_TOTAL_ASSETS,
+        total_assets: float | _UnsetTotalAssets | None = UNSET_TOTAL_ASSETS,
         exit_monitor_enabled: bool = False,
         default_profit_trigger: float | None = None,
         stop_loss_monitor_enabled: bool | None = None,
