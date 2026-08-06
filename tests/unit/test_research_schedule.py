@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+import time
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -11,6 +12,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from ashare_ai.core.hashing import stable_hash
 from ashare_ai.core.time import SHANGHAI
 from ashare_ai.orchestration.research_schedule import (
+    _READINESS_RESULTS,
+    AKShareDataReadiness,
     _automatic_run_key,
     auto_dispatch_state,
     data_readiness_wait,
@@ -295,3 +298,89 @@ def test_scheduler_aligns_retries_to_shanghai_five_minute_ticks() -> None:
 
     assert calls == ["dispatch", "dispatch"]
     assert sleeps == [30]
+
+
+@pytest.fixture(autouse=True)
+def _clean_readiness_cache() -> None:
+    """The probe-result cache is a module-level dict shared by every test."""
+    _READINESS_RESULTS.clear()
+    yield
+    _READINESS_RESULTS.clear()
+
+
+class CountingBenchmarkProvider:
+    """Ready immediately: every benchmark series has a bar dated on the end date."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def benchmark_bars(self, code: str, start_date: date, end_date: date):
+        del code, start_date
+        self.calls += 1
+        return [{"date": end_date}]
+
+
+class SlowBenchmarkProvider:
+    """Stalls past the probe budget so the wall-clock timeout must cut it off."""
+
+    def __init__(self, delay: float) -> None:
+        self.delay = delay
+
+    def benchmark_bars(self, code: str, start_date: date, end_date: date):
+        del code, start_date
+        time.sleep(self.delay)
+        return [{"date": end_date}]
+
+
+def _patch_provider(monkeypatch: pytest.MonkeyPatch, provider: object) -> None:
+    monkeypatch.setattr(
+        "ashare_ai.orchestration.akshare_bundle.AKShareCanonicalProvider",
+        lambda: provider,
+    )
+
+
+def test_readiness_probes_three_series_and_caches(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = CountingBenchmarkProvider()
+    _patch_provider(monkeypatch, provider)
+    readiness = AKShareDataReadiness()
+    trading_date = date(2026, 7, 15)
+    checked_at = datetime.now(UTC)
+
+    assert readiness.ready(trading_date, checked_at) is True
+    assert provider.calls == 3  # one benchmark_bars call per index series
+
+    # A second probe for the same trading date within the TTL is a cache hit.
+    assert readiness.ready(trading_date, checked_at) is True
+    assert provider.calls == 3
+
+
+def test_readiness_cache_expires_after_the_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = CountingBenchmarkProvider()
+    _patch_provider(monkeypatch, provider)
+    readiness = AKShareDataReadiness()
+    trading_date = date(2026, 7, 15)
+    checked_at = datetime.now(UTC)
+
+    assert readiness.ready(trading_date, checked_at) is True
+    assert provider.calls == 3
+
+    # A checked_at past the 60s TTL misses the cache and probes again.
+    stale = checked_at + timedelta(seconds=61)
+    assert readiness.ready(trading_date, stale) is True
+    assert provider.calls == 6
+
+
+def test_readiness_budget_bounds_a_stalling_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = SlowBenchmarkProvider(delay=0.5)
+    _patch_provider(monkeypatch, provider)
+    readiness = AKShareDataReadiness()
+    trading_date = date(2026, 7, 16)
+    checked_at = datetime.now(UTC)
+
+    began = time.monotonic()
+    assert readiness.ready(trading_date, checked_at, budget_seconds=0.2) is False
+    assert time.monotonic() - began < 1.0
+
+    # The probe thread keeps running to completion in the background; drain the
+    # single-worker executor so it cannot delay a later test's probe.
+    time.sleep(0.6)

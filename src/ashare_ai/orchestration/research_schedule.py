@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Protocol
 
@@ -28,6 +31,24 @@ from ashare_ai.storage.models import (
 MARKET_OPEN = time(9, 0)
 AUTO_START = time(15, 5)
 DATA_READINESS_CUTOFF = time(9, 25)
+
+# Readiness-probe hardening.  ``benchmark_bars`` retries with a backoff and a
+# eastmoney -> sina fallback and has no wall-clock timeout of its own, so an
+# unbounded probe could hang a submit request indefinitely.  The probe therefore
+# runs on a dedicated executor thread under a wall-clock budget; a timeout means
+# "not ready" (fail-closed -> the run defers to DATA_READINESS_WAITING and the
+# worker re-probes on its next retry, where the P1 calendar cache keeps those
+# retries cheap).
+_READINESS_BUDGET_SECONDS_DEFAULT = 10.0
+# In-process short-term cache of the probe result per trading date, so the
+# minute-tick scheduler and concurrent submit requests coalesce onto a single
+# upstream probe instead of each hitting AKShare.  The scheduler re-evaluates
+# every tick and the submit path probes right before enqueue, so 60s is plenty.
+_READINESS_RESULT_TTL_SECONDS = 60
+_READINESS_RESULTS_MAX_ENTRIES = 8
+_READINESS_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="readiness-probe")
+_READINESS_RESULTS: dict[date, tuple[datetime, bool]] = {}
+_READINESS_RESULTS_LOCK = threading.Lock()
 
 
 class TradingCalendarProvider(Protocol):
@@ -78,23 +99,85 @@ class FreeExchangeCalendar:
 
 
 class AKShareDataReadiness:
-    def ready(self, trading_date: date, checked_at: datetime) -> bool:
-        del checked_at
-        from ashare_ai.orchestration.akshare_bundle import AKShareCanonicalProvider
+    """Probe benchmark-data readiness under a bounded wall-clock budget.
 
-        provider = AKShareCanonicalProvider()
-        # The backtest policy consumes all three series.  A CSI300-only probe
-        # can otherwise admit a run that is guaranteed to fail at snapshot time.
-        for code in ("000300", "000905", "000852"):
-            rows = provider.benchmark_bars(code, trading_date - timedelta(days=10), trading_date)
-            available = sorted(
-                parsed
-                for row in rows
-                if (parsed := _date_value(row.get("日期", row.get("date")))) is not None
-            )
-            if not available or available[-1] != trading_date:
-                return False
-        return True
+    The real probe runs on a dedicated executor thread; if AKShare stalls past
+    ``budget_seconds`` the caller gets ``False`` (fail-closed -> the run defers to
+    DATA_READINESS_WAITING) instead of an unbounded HTTP hang.  Results are cached
+    in-process per trading date for a short TTL so the minute-tick scheduler and
+    submit requests coalesce onto one upstream probe.
+    """
+
+    def ready(
+        self,
+        trading_date: date,
+        checked_at: datetime,
+        *,
+        budget_seconds: float | None = None,
+    ) -> bool:
+        cached = _readiness_cached(trading_date, checked_at)
+        if cached is not None:
+            return cached
+        result = _probe_readiness(
+            trading_date,
+            budget_seconds=(
+                budget_seconds if budget_seconds is not None else _READINESS_BUDGET_SECONDS_DEFAULT
+            ),
+        )
+        _readiness_cache_set(trading_date, result)
+        return result
+
+
+def _probe_readiness(trading_date: date, *, budget_seconds: float) -> bool:
+    """Run the AKShare benchmark probe under a wall-clock budget."""
+    future = _READINESS_EXECUTOR.submit(_probe_benchmarks, trading_date)
+    try:
+        return bool(future.result(timeout=budget_seconds))
+    except FutureTimeoutError:
+        # The probe thread keeps running to completion in the background; it never
+        # writes the result cache, so a later tick probes again fresh.
+        future.cancel()
+        return False
+
+
+def _probe_benchmarks(trading_date: date) -> bool:
+    from ashare_ai.orchestration.akshare_bundle import AKShareCanonicalProvider
+
+    provider = AKShareCanonicalProvider()
+    # The backtest policy consumes all three series.  A CSI300-only probe
+    # can otherwise admit a run that is guaranteed to fail at snapshot time.
+    for code in ("000300", "000905", "000852"):
+        rows = provider.benchmark_bars(code, trading_date - timedelta(days=10), trading_date)
+        available = sorted(
+            parsed
+            for row in rows
+            if (parsed := _date_value(row.get("日期", row.get("date")))) is not None
+        )
+        if not available or available[-1] != trading_date:
+            return False
+    return True
+
+
+def _readiness_cached(trading_date: date, checked_at: datetime) -> bool | None:
+    with _READINESS_RESULTS_LOCK:
+        entry = _READINESS_RESULTS.get(trading_date)
+        if entry is None:
+            return None
+        recorded_at, result = entry
+        if checked_at - recorded_at > timedelta(seconds=_READINESS_RESULT_TTL_SECONDS):
+            return None
+        return result
+
+
+def _readiness_cache_set(trading_date: date, result: bool) -> None:
+    with _READINESS_RESULTS_LOCK:
+        _READINESS_RESULTS[trading_date] = (datetime.now(UTC), result)
+        if len(_READINESS_RESULTS) > _READINESS_RESULTS_MAX_ENTRIES:
+            excess = len(_READINESS_RESULTS) - _READINESS_RESULTS_MAX_ENTRIES
+            for stale in sorted(
+                _READINESS_RESULTS, key=lambda day: _READINESS_RESULTS[day][0]
+            )[:excess]:
+                del _READINESS_RESULTS[stale]
 
 
 def resolve_manual_research_date(

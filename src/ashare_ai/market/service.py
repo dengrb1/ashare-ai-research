@@ -44,6 +44,32 @@ MAX_PREFETCH_SYMBOLS = 50
 # bounded so those residual calls cannot multiply across request-local pools.
 _PROVIDER_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="market-provider")
 
+# The A-share trading calendar is one full snapshot from Sina, authoritative for
+# months ahead.  Cache it whole (not per requested range) so the submit request,
+# the minute-tick scheduler and worker retries all share a single upstream fetch
+# and slice the same record locally instead of each calling AKShare.
+_CALENDAR_CACHE_KEY = "calendar:v1"
+_CALENDAR_CACHE_SECONDS = 6 * 60 * 60
+_CALENDAR_FULL_START = date(1990, 1, 1)
+_CALENDAR_FULL_END = date(2100, 1, 1)
+
+
+def _calendar_range(values: object, start_date: date, end_date: date) -> tuple[date, ...]:
+    """Slice a cached full-calendar list down to the requested window."""
+    if not isinstance(values, list):
+        return ()
+    result: list[date] = []
+    for raw in values:
+        if not isinstance(raw, str):
+            continue
+        try:
+            parsed = date.fromisoformat(raw)
+        except ValueError:
+            continue
+        if start_date <= parsed <= end_date:
+            result.append(parsed)
+    return tuple(result)
+
 
 def _market_subprocess_env() -> dict[str, str]:
     allowed = {
@@ -1205,15 +1231,39 @@ class MarketDataService:
         )
 
     def sessions(self, start_date: date, end_date: date) -> tuple[date, ...]:
+        # The whole calendar is cached, so a submit's 20-day lookup, the
+        # scheduler's 20-day window and a worker's 14-day retry window all hit
+        # the same record instead of each fetching AKShare.
+        now = self.clock()
+        cached = self._get(_CALENDAR_CACHE_KEY, now)
+        if cached is not None and self._fresh(cached, now):
+            return _calendar_range(cached.get("sessions"), start_date, end_date)
+        with self._lock(_CALENDAR_CACHE_KEY):
+            now = self.clock()
+            cached = self._get(_CALENDAR_CACHE_KEY, now)
+            if cached is not None and self._fresh(cached, now):
+                return _calendar_range(cached.get("sessions"), start_date, end_date)
+            value = self._fetch_calendar()
+            if value:
+                self._set(
+                    _CALENDAR_CACHE_KEY,
+                    {
+                        "sessions": [day.isoformat() for day in value],
+                        "cached_at": self.clock().isoformat(),
+                        "cache_seconds": _CALENDAR_CACHE_SECONDS,
+                    },
+                )
+            return _calendar_range([day.isoformat() for day in value], start_date, end_date)
+
+    def _fetch_calendar(self) -> tuple[date, ...]:
         provider_sessions = getattr(self.primary, "sessions", None)
         if callable(provider_sessions) and self._provider_allowed(self.primary):
-            return tuple(provider_sessions(start_date, end_date))
-
+            return tuple(provider_sessions(_CALENDAR_FULL_START, _CALENDAR_FULL_END))
         # Calendar reads are rare and must not make the lightweight API retain
         # the AKShare runtime after the request completes.
         isolated = AKShareMarketProvider(timeout_seconds=self.settings.market_timeout_seconds)
         try:
-            return isolated.sessions(start_date, end_date)
+            return tuple(isolated.sessions(_CALENDAR_FULL_START, _CALENDAR_FULL_END))
         finally:
             isolated.close()
 
