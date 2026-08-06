@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable
 from datetime import UTC, date, datetime
 from importlib import import_module
@@ -14,9 +15,9 @@ from sqlalchemy.orm import Session
 from ashare_ai.agents.model_settings import ModelConfigurationService
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.hashing import sha256_bytes, stable_hash
-from ashare_ai.core.security import safe_error_message
 from ashare_ai.core.system_settings import SystemConfigurationService
 from ashare_ai.core.time import SHANGHAI, market_decision_time
+from ashare_ai.core.user_errors import public_error_message
 from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import JobRun
@@ -42,6 +43,11 @@ def _execution_id() -> str:
     except (ImportError, RuntimeError):
         runtime_id = None
     return str(runtime_id or uuid4())
+
+
+def _elapsed_ms(started: float) -> int:
+    """Milliseconds elapsed on the monotonic clock since ``started``."""
+    return round((time.perf_counter() - started) * 1000)
 
 
 class PipelineBackend(Protocol):
@@ -163,16 +169,20 @@ class ApplicationPipeline:
         return run_id
 
     def _stage(self, run_id: str, name: str, function: Callable[[], T]) -> T:
+        # Monotonic wall clock for stage duration; audit timestamps are created
+        # separately and must not be used to approximate stage boundaries.
+        started = time.perf_counter()
         try:
             result = function()
         except Exception as exc:
+            duration_ms = _elapsed_ms(started)
             with self.session_factory() as session:
                 run = session.get(JobRun, run_id)
                 if run is not None:
                     cancel_requested = run.status == "CANCEL_REQUESTED"
                     if not cancel_requested:
                         run.status = "FAILED"
-                        run.error_message = safe_error_message(exc)
+                        run.error_message = public_error_message("RESEARCH_FAILED")
                         run.completed_at = datetime.now(UTC)
                     AuditLogger(session).record(
                         run_id,
@@ -181,6 +191,7 @@ class ApplicationPipeline:
                         severity="WARNING" if cancel_requested else "ERROR",
                         details={
                             **_error_details(exc, stage=name),
+                            "duration_ms": duration_ms,
                             **({"cancel_requested": True} if cancel_requested else {}),
                         },
                     )
@@ -191,7 +202,11 @@ class ApplicationPipeline:
                 run_id,
                 "STAGE_COMPLETED",
                 f"Pipeline stage completed: {name}",
-                details={"stage": name, "output_hash": stable_hash(result)},
+                details={
+                    "stage": name,
+                    "duration_ms": _elapsed_ms(started),
+                    "output_hash": stable_hash(result),
+                },
             )
             session.commit()
         return result

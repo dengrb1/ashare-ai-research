@@ -24,7 +24,7 @@ from ashare_ai.backtest.trade_plan import (
 )
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.hashing import canonical_json, stable_hash
-from ashare_ai.core.security import safe_error_message
+from ashare_ai.core.user_errors import public_error_message
 from ashare_ai.notifications.service import NotificationService
 from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.orchestration.builtin_backtest import read_backtest_bundle
@@ -355,7 +355,7 @@ def mark_trade_plan_failed(
         if row is None:
             return
         row.status = "FAILED"
-        row.error_message = safe_error_message(error)
+        row.error_message = public_error_message("TRADE_PLAN_FAILED")
         row.active_trade_plan_key = None
         row.completed_at = datetime.now(UTC)
         transition_operation_run(
@@ -365,7 +365,7 @@ def mark_trade_plan_failed(
             event_type="TRADE_PLAN_FAILED",
             message="Trade Plan generation failed",
             details={"plan_id": plan_id, "error_type": type(error).__name__},
-            error_message=safe_error_message(error),
+            error_message=public_error_message("TRADE_PLAN_FAILED"),
         )
         AuditLogger(session).record(
             row.run_id,

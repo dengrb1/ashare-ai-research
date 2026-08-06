@@ -11,9 +11,9 @@ from sqlalchemy.orm import Session
 
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.hashing import stable_hash
-from ashare_ai.core.security import safe_error_message
 from ashare_ai.core.system_settings import get_effective_settings
 from ashare_ai.core.time import SHANGHAI
+from ashare_ai.core.user_errors import public_error_message
 from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.orchestration.research_jobs import enqueue_research, enqueue_research_at
 from ashare_ai.orchestration.research_settings import ResearchSettingsService
@@ -398,7 +398,7 @@ def _submit_auto_for_user(
             if orphan is not None:
                 orphan.status = "FAILED"
                 orphan.active_research_key = None
-                orphan.error_message = "deduplicated by automatic research idempotency"
+                orphan.error_message = public_error_message("RESEARCH_DEDUPLICATED")
                 orphan.completed_at = datetime.now(UTC)
                 session.commit()
             return None
@@ -414,7 +414,7 @@ def _submit_auto_for_user(
             if run is not None:
                 run.status = "FAILED"
                 run.active_research_key = None
-                run.error_message = safe_error_message(exc)
+                run.error_message = public_error_message("QUEUE_UNAVAILABLE")
                 run.completed_at = datetime.now(UTC)
                 AuditLogger(session).record(
                     run_id,

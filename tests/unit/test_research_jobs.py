@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from ashare_ai.core.user_errors import public_error_message
 from ashare_ai.orchestration.research_jobs import _retry_waiting_research, execute_research_job
 from ashare_ai.storage.models import AuditEvent, Base, JobRun
 
@@ -147,7 +148,9 @@ def test_research_worker_persists_failure_reason() -> None:
         run = session.get(JobRun, "research-run")
         assert run is not None
         assert run.status == "FAILED"
-        assert run.error_message == "failed at features"
+        # The user-facing failure reason is fixed Chinese copy; the exception text
+        # stays in the structured audit details for operations.
+        assert run.error_message == public_error_message("RESEARCH_FAILED")
         assert (
             session.query(AuditEvent).order_by(AuditEvent.created_at.desc()).first().severity
             == "ERROR"
@@ -211,10 +214,7 @@ def test_data_readiness_wait_fails_at_next_session_cutoff() -> None:
         run = session.get(JobRun, "research-run")
         assert run is not None
         assert run.status == "FAILED"
-        assert (
-            run.error_message
-            == "benchmark data did not synchronize before the next trading session"
-        )
+        assert run.error_message == public_error_message("DATA_READINESS_TIMEOUT")
         assert run.audit_events[-1].event_type == "DATA_READINESS_TIMEOUT"
 
 

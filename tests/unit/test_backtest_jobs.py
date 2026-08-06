@@ -5,6 +5,7 @@ from datetime import UTC, date, datetime
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from ashare_ai.core.user_errors import public_error_message
 from ashare_ai.orchestration.backtest_jobs import (
     BacktestJobOutput,
     execute_backtest_job,
@@ -123,7 +124,9 @@ def test_executor_load_or_snapshot_failure_is_persisted() -> None:
         run = session.get(JobRun, "failed-run")
         assert backtest is not None and backtest.status == "FAILED"
         assert run is not None and run.status == "FAILED"
-        assert run.error_message == "executor unavailable"
+        # User-facing backtest failure is fixed Chinese copy; the executor
+        # exception stays in the audit details.
+        assert run.error_message == public_error_message("BACKTEST_FAILED")
     mark_backtest_failed(
         "failed-backtest", RuntimeError("executor unavailable"), session_factory=factory
     )

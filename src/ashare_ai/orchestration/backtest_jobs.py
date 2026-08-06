@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ashare_ai.core.config import get_settings
-from ashare_ai.core.security import safe_error_message
+from ashare_ai.core.user_errors import public_error_message
 from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.orchestration.daily import flow
 from ashare_ai.orchestration.redis_queue import RedisLeasedQueue
@@ -83,7 +83,7 @@ def mark_backtest_failed(
         failed.completed_at = datetime.now(UTC)
         if job is not None:
             job.status = "FAILED"
-            job.error_message = safe_error_message(error)
+            job.error_message = public_error_message("BACKTEST_FAILED")
             job.completed_at = datetime.now(UTC)
             AuditLogger(session).record(
                 job.run_id,

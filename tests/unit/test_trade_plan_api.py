@@ -244,6 +244,90 @@ def test_trade_plan_submission_binds_report_run_and_reuses_active_request(monkey
         session.close()
 
 
+def test_trade_plan_enqueue_unavailable_returns_chinese_503(monkeypatch) -> None:
+    session, now = _database()
+    run = JobRun(
+        run_id="run-1",
+        user_id="user-1",
+        run_type="DAILY",
+        trading_date=date(2026, 7, 15),
+        decision_at=now,
+        status="SUCCEEDED",
+        idempotency_key="run-key",
+        manifest={
+            "policy_version": "first-release-v2",
+            "data_quality_gate": {"passed": True},
+            "model_configuration": {"enabled": False},
+        },
+        input_hash="a" * 64,
+        started_at=now,
+        completed_at=now,
+    )
+    report = ReportRow(
+        report_id="report-1",
+        run_id=run.run_id,
+        trading_date=run.trading_date,
+        report_type="DAILY_RESEARCH",
+        object_uri="file:///report",
+        content_sha256="b" * 64,
+        created_at=now,
+    )
+    candidate = CandidateRow(
+        run_id=run.run_id,
+        symbol="600000.SH",
+        trading_date=run.trading_date,
+        decision_at=now,
+        rank=1,
+        total_score=80,
+        prediction_percentile=1,
+        industry_code="BANK",
+        event_risk_multiplier=1,
+        style_exposures={},
+        evidence_hash="c" * 64,
+    )
+    snapshot = SnapshotManifestRow(
+        snapshot_id="snapshot-1",
+        run_id=run.run_id,
+        dataset="backtest_bundle",
+        source="fixture",
+        schema_version="1",
+        adapter_version="1",
+        fetched_at=now,
+        row_count=10,
+        payload_sha256="d" * 64,
+        parquet_uri="file:///snapshot",
+        status="COMMITTED",
+        details={
+            "parquet_file_sha256": "e" * 64,
+            "future_trading_dates": ["2026-07-16", "2026-07-17", "2026-07-20"],
+        },
+        committed_at=now,
+    )
+    session.add_all([run, report, candidate, snapshot])
+    session.commit()
+
+    def raise_queue(*args, **kwargs):
+        raise RuntimeError("redis connection refused at 127.0.0.1:6379")
+
+    monkeypatch.setattr("ashare_ai.api.app.enqueue_trade_plan", raise_queue)
+    client = _client(session)
+    try:
+        response = client.post(
+            "/api/v1/reports/report-1/trade-plans",
+            json={"symbols": ["600000.SH"], "budget_override": 100000},
+        )
+        assert response.status_code == 503
+        assert response.json()["detail"] == "任务队列暂时不可用，请稍后重试。"
+        plan = session.query(TradePlanRow).one()
+        assert plan.status == "FAILED"
+        assert plan.error_message == "任务队列暂时不可用，请稍后重试。"
+        assert "redis" not in response.text
+        assert "127.0.0.1" not in response.text
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+
 def test_trade_plan_rejects_fused_and_critical_candidates(monkeypatch) -> None:
     session, now = _database()
     run = JobRun(

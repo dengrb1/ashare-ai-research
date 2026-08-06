@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from ashare_ai.core.config import Settings
 from ashare_ai.core.time import SHANGHAI
+from ashare_ai.core.user_errors import public_error_message
 from ashare_ai.orchestration import production
 from ashare_ai.orchestration.akshare_bundle import MarketDataAcquisitionError
 from ashare_ai.orchestration.production import ApplicationPipeline
@@ -137,13 +138,31 @@ def test_acquisition_failure_is_sanitized_and_audited(monkeypatch) -> None:
         run = session.get(JobRun, run_id)
         event = session.query(AuditEvent).filter_by(event_type="STAGE_FAILED").one()
         assert run is not None and run.status == "FAILED"
-        assert "000300" in str(run.error_message)
+        # The public failure reason is fixed Chinese copy; the acquisition subject
+        # and other diagnostics stay in the structured audit details.
+        assert run.error_message == public_error_message("RESEARCH_FAILED")
         assert "http" not in str(run.error_message).lower()
-        assert event.details == {
-            "stage": "sync_reference_data",
-            "error_type": "MarketDataAcquisitionError",
-            "operation": "benchmark_bars",
-            "subject": "000300",
-            "attempt_count": 4,
-            "sources": ["eastmoney", "sina"],
-        }
+        assert event.details["error_type"] == "MarketDataAcquisitionError"
+        assert event.details["operation"] == "benchmark_bars"
+        assert event.details["subject"] == "000300"
+        assert event.details["attempt_count"] == 4
+        assert event.details["sources"] == ["eastmoney", "sina"]
+        assert event.details["stage"] == "sync_reference_data"
+        assert isinstance(event.details["duration_ms"], int)
+        assert event.details["duration_ms"] >= 0
+
+
+def test_stage_duration_is_recorded_for_completed_stages(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite://")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    monkeypatch.setattr(production, "_execution_id", lambda: "duration-flow-run")
+    pipeline = ApplicationPipeline(Backend(), factory)
+    run_id = pipeline.start_run(date(2026, 7, 14))
+    pipeline.sync_reference_data(run_id)
+    with factory() as session:
+        event = session.query(AuditEvent).filter_by(event_type="STAGE_COMPLETED").one()
+        assert event.details["stage"] == "sync_reference_data"
+        assert isinstance(event.details["duration_ms"], int)
+        assert event.details["duration_ms"] >= 0
+        assert "output_hash" in event.details

@@ -188,6 +188,7 @@ from ashare_ai.core.system_settings import (
     get_effective_settings,
 )
 from ashare_ai.core.time import SHANGHAI, market_session
+from ashare_ai.core.user_errors import public_error_message
 from ashare_ai.market.service import (
     get_market_data_service,
     normalize_adjustment,
@@ -594,7 +595,7 @@ def _historical_bundle_source_run(
     except Exception as exc:
         raise HTTPException(
             status_code=503,
-            detail="authoritative trading calendar unavailable for historical research",
+            detail=public_error_message("TRADING_CALENDAR_UNAVAILABLE"),
         ) from exc
     if current.date() not in sessions:
         return None
@@ -3540,7 +3541,9 @@ def submit_trade_plan(
             select(TradePlanRow).where(TradePlanRow.active_trade_plan_key == active_key)
         )
         if winner is None:
-            raise HTTPException(status_code=409, detail="trade plan submission conflicted") from exc
+            raise HTTPException(
+                status_code=409, detail=public_error_message("TRADE_PLAN_SUBMISSION_CONFLICTED")
+            ) from exc
         response.status_code = 200
         return TradePlanResponse.model_validate(winner)
     except Exception as exc:
@@ -3548,10 +3551,12 @@ def submit_trade_plan(
         if failed is not None:
             failed.status = "FAILED"
             failed.active_trade_plan_key = None
-            failed.error_message = safe_error_message(exc)
+            failed.error_message = public_error_message("QUEUE_UNAVAILABLE")
             failed.completed_at = datetime.now(UTC)
             db.commit()
-        raise HTTPException(status_code=503, detail="trade plan queue unavailable") from exc
+        raise HTTPException(
+            status_code=503, detail=public_error_message("QUEUE_UNAVAILABLE")
+        ) from exc
     return TradePlanResponse.model_validate(row)
 
 
@@ -3659,7 +3664,7 @@ def submit_research(
     except Exception as exc:
         raise HTTPException(
             status_code=503,
-            detail="authoritative trading calendar unavailable for data readiness",
+            detail=public_error_message("TRADING_CALENDAR_UNAVAILABLE"),
         ) from exc
     if payload.scope == "WATCHLIST":
         assets = UserAssetService(db).get(context.user.user_id)
@@ -3827,7 +3832,7 @@ def submit_research(
             orphan.user_id = context.user.user_id
             orphan.active_research_key = None
             orphan.status = "FAILED"
-            orphan.error_message = "deduplicated by a concurrent research submission"
+            orphan.error_message = public_error_message("RESEARCH_DEDUPLICATED")
             orphan.completed_at = datetime.now(UTC)
             AuditLogger(db).record(
                 orphan.run_id,
@@ -3837,7 +3842,9 @@ def submit_research(
             )
             db.commit()
         if winner is None:
-            raise HTTPException(status_code=409, detail="research submission conflicted") from exc
+            raise HTTPException(
+                status_code=409, detail=public_error_message("RESEARCH_SUBMISSION_CONFLICTED")
+            ) from exc
         response.status_code = 200
         return _research_run_response(db, winner)
     try:
@@ -3861,7 +3868,7 @@ def submit_research(
     except Exception as exc:
         run.status = "FAILED"
         run.active_research_key = None
-        run.error_message = safe_error_message(exc)
+        run.error_message = public_error_message("QUEUE_UNAVAILABLE")
         run.completed_at = datetime.now(UTC)
         AuditLogger(db).record(
             run_id,
@@ -3871,7 +3878,9 @@ def submit_research(
             details={"error_type": type(exc).__name__},
         )
         db.commit()
-        raise HTTPException(status_code=503, detail="research queue unavailable") from exc
+        raise HTTPException(
+            status_code=503, detail=public_error_message("QUEUE_UNAVAILABLE")
+        ) from exc
     return _research_run_response(db, run)
 
 
@@ -4356,13 +4365,15 @@ def submit_backtest(
             if winner_backtest is not None and winner_backtest.user_id == context.user.user_id:
                 response.status_code = status.HTTP_200_OK
                 return _backtest_response(db, winner_backtest)
-        raise HTTPException(status_code=409, detail="backtest submission conflicted") from exc
+        raise HTTPException(
+            status_code=409, detail=public_error_message("BACKTEST_SUBMISSION_CONFLICTED")
+        ) from exc
     try:
         enqueue_backtest(backtest.backtest_id)
     except Exception as exc:
         failed_at = datetime.now(UTC)
         job.status = "FAILED"
-        job.error_message = safe_error_message(exc)
+        job.error_message = public_error_message("QUEUE_UNAVAILABLE")
         job.completed_at = failed_at
         backtest.status = "FAILED"
         backtest.completed_at = failed_at
@@ -4374,7 +4385,9 @@ def submit_backtest(
             details={"backtest_id": backtest.backtest_id, "error_type": type(exc).__name__},
         )
         db.commit()
-        raise HTTPException(status_code=503, detail="backtest queue unavailable") from exc
+        raise HTTPException(
+            status_code=503, detail=public_error_message("QUEUE_UNAVAILABLE")
+        ) from exc
     return _backtest_response(db, backtest)
 
 
@@ -4460,7 +4473,7 @@ def retry_backtest(backtest_id: str, db: DbSession, context: Writer) -> Backtest
         row.status = "FAILED"
         row.completed_at = failed_at
         job.status = "FAILED"
-        job.error_message = safe_error_message(exc)
+        job.error_message = public_error_message("QUEUE_UNAVAILABLE")
         job.completed_at = failed_at
         AuditLogger(db).record(
             job.run_id,
@@ -4470,7 +4483,9 @@ def retry_backtest(backtest_id: str, db: DbSession, context: Writer) -> Backtest
             details={"backtest_id": backtest_id, "retry_count": row.retry_count},
         )
         db.commit()
-        raise HTTPException(status_code=503, detail="backtest queue unavailable") from exc
+        raise HTTPException(
+            status_code=503, detail=public_error_message("QUEUE_UNAVAILABLE")
+        ) from exc
     return _backtest_response(db, row)
 
 

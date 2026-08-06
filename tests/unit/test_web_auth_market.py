@@ -16,13 +16,14 @@ from sqlalchemy.pool import StaticPool
 from ashare_ai.api import app as app_module
 from ashare_ai.api.app import (
     _historical_bundle_source_run,
+    _idempotency_fingerprint,
     _market_session_calendar_cache,
     _market_session_status,
     app,
 )
 from ashare_ai.api.auth import hash_password
 from ashare_ai.api.dependencies import get_db
-from ashare_ai.api.schemas import MarketSessionStatus
+from ashare_ai.api.schemas import MarketSessionStatus, ResearchRequest
 from ashare_ai.core.config import Settings
 from ashare_ai.core.time import SHANGHAI
 from ashare_ai.market.service import (
@@ -35,6 +36,8 @@ from ashare_ai.market.service import (
 )
 from ashare_ai.storage.models import (
     ActiveModelConfiguration,
+    ApiIdempotencyKey,
+    AuditEvent,
     BacktestRun,
     Base,
     JobRun,
@@ -1690,6 +1693,131 @@ def test_research_submission_prepares_frozen_manifest_and_deduplicates(monkeypat
         assert portfolio.status_code == 200
         assert portfolio.json()["research_only"] is True
         assert "少于 15 只" in portfolio.json()["message"]
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+
+def test_research_enqueue_unavailable_returns_chinese_503(monkeypatch) -> None:
+    session, _, _ = _database()
+    pipeline = PreparedPipeline(session)
+
+    def raise_queue(*args, **kwargs):
+        raise RuntimeError("redis connection refused at 127.0.0.1:6379")
+
+    monkeypatch.setattr("ashare_ai.api.app.load_pipeline", lambda: pipeline)
+    monkeypatch.setattr("ashare_ai.api.app.enqueue_research", raise_queue)
+    monkeypatch.setattr("ashare_ai.api.app._manual_research_date", lambda value, now: value)
+    monkeypatch.setattr("ashare_ai.api.app._research_readiness_wait", lambda _date, _now: None)
+
+    def override_db():
+        yield session
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        client = TestClient(app)
+        client.post(
+            "/api/v1/auth/login",
+            json={"username": "alice", "password": "alice-password"},
+        )
+        csrf = client.cookies.get("ashare_csrf")
+        response = client.post(
+            "/api/v1/research/runs",
+            json={
+                "trading_date": "2026-07-14",
+                "scope": "CUSTOM",
+                "symbols": ["600519.SH"],
+                "total_budget": 1_000_000,
+                "per_symbol_budget": 80_000,
+            },
+            headers={"x-csrf-token": csrf, "Idempotency-Key": "queue-down-research"},
+        )
+        assert response.status_code == 503
+        assert response.json()["detail"] == "任务队列暂时不可用，请稍后重试。"
+        run = session.get(JobRun, "prepared-run")
+        assert run is not None and run.status == "FAILED"
+        assert run.error_message == "任务队列暂时不可用，请稍后重试。"
+        event = (
+            session.query(AuditEvent)
+            .filter(AuditEvent.event_type == "RESEARCH_ENQUEUE_FAILED")
+            .one()
+        )
+        assert event.details["error_type"] == "RuntimeError"
+        assert "redis" not in response.text
+        assert "127.0.0.1" not in response.text
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+
+def test_research_submission_conflict_marks_orphan_in_chinese(monkeypatch) -> None:
+    session, _, user = _database()
+    pipeline = PreparedPipeline(session)
+    monkeypatch.setattr("ashare_ai.api.app.load_pipeline", lambda: pipeline)
+    monkeypatch.setattr("ashare_ai.api.app._manual_research_date", lambda value, now: value)
+    monkeypatch.setattr("ashare_ai.api.app._research_readiness_wait", lambda _date, _now: None)
+    # Simulate the concurrent-submission race: the replay lookup sees no row,
+    # but the ApiIdempotencyKey insert collides on commit.
+    monkeypatch.setattr("ashare_ai.api.app._find_idempotency", lambda *args, **kwargs: None)
+
+    payload = {
+        "trading_date": "2026-07-14",
+        "scope": "CUSTOM",
+        "symbols": ["600519.SH"],
+        "total_budget": 1_000_000,
+        "per_symbol_budget": 80_000,
+        "max_stock_price": 500,
+        "supreme_mode": False,
+    }
+    fingerprint = _idempotency_fingerprint(
+        user.user_id,
+        "/api/v1/research/runs",
+        "dedup-key",
+        ResearchRequest(**payload).model_dump(mode="json"),
+    )
+    key_sha256, request_sha256 = fingerprint
+    session.add(
+        ApiIdempotencyKey(
+            user_id=user.user_id,
+            route="/api/v1/research/runs",
+            key_sha256=key_sha256,
+            request_sha256=request_sha256,
+            resource_type="RESEARCH_RUN",
+            resource_id="prepared-run",
+            created_at=datetime.now(UTC),
+        )
+    )
+    session.commit()
+
+    def override_db():
+        yield session
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        client = TestClient(app)
+        client.post(
+            "/api/v1/auth/login",
+            json={"username": "alice", "password": "alice-password"},
+        )
+        csrf = client.cookies.get("ashare_csrf")
+        response = client.post(
+            "/api/v1/research/runs",
+            json=payload,
+            headers={"x-csrf-token": csrf, "Idempotency-Key": "dedup-key"},
+        )
+        assert response.status_code == 409
+        assert response.json()["detail"] == "研究提交冲突，请稍后重试。"
+        orphan = session.get(JobRun, "prepared-run")
+        assert orphan is not None
+        assert orphan.status == "FAILED"
+        assert orphan.error_message == "重复的研究请求已合并，无需再次提交。"
+        event = (
+            session.query(AuditEvent)
+            .filter(AuditEvent.event_type == "RESEARCH_DEDUPLICATED")
+            .one()
+        )
+        assert event.details["winner_run_id"] is None
+        assert "redis" not in response.text
     finally:
         app.dependency_overrides.clear()
         session.close()

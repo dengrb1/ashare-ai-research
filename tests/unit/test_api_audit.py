@@ -212,6 +212,95 @@ def test_backtest_submission_is_idempotent_and_audited(monkeypatch) -> None:
         session.close()
 
 
+def test_backtest_enqueue_unavailable_returns_chinese_503(monkeypatch) -> None:
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    session = Session(engine, expire_on_commit=False)
+    _add_backtest_snapshot(session)
+    _override_authenticated_admin(session)
+
+    def raise_queue(*args, **kwargs):
+        raise RuntimeError("redis connection refused at 127.0.0.1:6379")
+
+    monkeypatch.setattr("ashare_ai.api.app.enqueue_backtest", raise_queue)
+    payload = {
+        "name": "fixed snapshot",
+        "start_date": "2025-01-01",
+        "end_date": "2025-12-31",
+        "snapshot_ids": ["snapshot-1"],
+        "config": {"seed": 42},
+    }
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/api/v1/backtests", json=payload, headers={"Idempotency-Key": "queue-down-1"}
+        )
+        assert response.status_code == 503
+        assert response.json()["detail"] == "任务队列暂时不可用，请稍后重试。"
+        job = session.query(JobRun).filter(JobRun.run_type == "BACKTEST").one()
+        backtest = session.query(BacktestRun).one()
+        assert job.status == "FAILED"
+        assert job.error_message == "任务队列暂时不可用，请稍后重试。"
+        assert backtest.status == "FAILED"
+        event = (
+            session.query(AuditEvent)
+            .filter(AuditEvent.event_type == "BACKTEST_ENQUEUE_FAILED")
+            .one()
+        )
+        assert event.details["error_type"] == "RuntimeError"
+        # The public response never leaks the exception text or endpoint.
+        assert "redis" not in response.text
+        assert "127.0.0.1" not in response.text
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+
+def test_worker_written_chinese_error_surfaces_through_the_api(monkeypatch) -> None:
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    session = Session(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    session.add(
+        JobRun(
+            run_id="failed-research",
+            user_id="legacy-test-admin",
+            run_type="DAILY",
+            trading_date=date(2026, 7, 14),
+            decision_at=now,
+            status="FAILED",
+            idempotency_key="failed-research-key",
+            manifest={},
+            input_hash="0" * 64,
+            started_at=now,
+            completed_at=now,
+            error_message="必要的基准数据未在安全期限内完成同步，本次研究未完成。",
+        )
+    )
+    session.commit()
+    _override_authenticated_admin(session)
+    try:
+        client = TestClient(app)
+        response = client.get("/api/v1/research/runs/failed-research")
+        assert response.status_code == 200
+        assert response.json()["error_message"] == (
+            "必要的基准数据未在安全期限内完成同步，本次研究未完成。"
+        )
+        # Sanitizer keeps the fixed copy verbatim and adds nothing.
+        assert response.json()["status"] == "FAILED"
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+
 def test_agent_cost_and_evidence_are_persisted(tmp_path) -> None:
     engine = create_engine("sqlite+pysqlite://")
     Base.metadata.create_all(engine)

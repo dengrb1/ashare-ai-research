@@ -12,12 +12,12 @@ from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from ashare_ai.core.config import get_settings
-from ashare_ai.core.security import safe_error_message
 from ashare_ai.core.system_settings import (
     SystemConfigurationService,
     SystemRuntimeSettings,
     get_effective_settings,
 )
+from ashare_ai.core.user_errors import public_error_message
 from ashare_ai.notifications.service import NotificationService
 from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.orchestration.daily import Pipeline, load_pipeline
@@ -126,7 +126,7 @@ def _retry_waiting_research(
             # not begun yet.
             run.status = "FAILED"
             run.active_research_key = None
-            run.error_message = "benchmark data did not synchronize before the next trading session"
+            run.error_message = public_error_message("DATA_READINESS_TIMEOUT")
             run.completed_at = current
             AuditLogger(session).record(
                 run_id, "DATA_READINESS_TIMEOUT", "Benchmark data wait expired",
@@ -169,7 +169,7 @@ def mark_research_failed(
             return
         run.status = "FAILED"
         run.active_research_key = None
-        run.error_message = safe_error_message(error)
+        run.error_message = public_error_message("RESEARCH_FAILED")
         run.completed_at = datetime.now(UTC)
         AuditLogger(session).record(
             run_id,
@@ -375,7 +375,7 @@ def execute_research_job(
                         except Exception as calendar_error:
                             run.status = "FAILED"
                             run.active_research_key = None
-                            run.error_message = "authoritative trading calendar unavailable"
+                            run.error_message = public_error_message("TRADING_CALENDAR_UNAVAILABLE")
                             run.completed_at = now
                             AuditLogger(session).record(
                                 run_id,
@@ -420,9 +420,7 @@ def execute_research_job(
                         return {"run_id": run_id, "status": "DATA_READINESS_WAITING"}
                     run.status = "FAILED"
                     run.active_research_key = None
-                    run.error_message = (
-                        "benchmark data did not synchronize before the next trading session"
-                    )
+                    run.error_message = public_error_message("DATA_READINESS_TIMEOUT")
                     run.completed_at = now
                     AuditLogger(session).record(
                         run_id,
