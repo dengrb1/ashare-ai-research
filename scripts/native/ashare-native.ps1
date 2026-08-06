@@ -65,7 +65,10 @@ function Write-AtomicText([string]$path, [string]$content) {
     New-Item -ItemType Directory -Force -Path $directory | Out-Null
     $temporary = "$path.$PID.$([Guid]::NewGuid().ToString('N')).tmp"
     try {
-        Set-Content -LiteralPath $temporary -Value $content -Encoding UTF8
+        # UTF-8 without BOM: PowerShell 5.1 Set-Content -Encoding UTF8 prepends a BOM,
+        # which breaks consumers like Redis's config parser or python-dotenv on the
+        # first line (the BOM becomes part of the first key/directive).
+        [System.IO.File]::WriteAllText($temporary, [string]$content, [System.Text.UTF8Encoding]::new($false))
         Move-Item -LiteralPath $temporary -Destination $path -Force
     } finally {
         if (Test-Path -LiteralPath $temporary) {
@@ -496,13 +499,23 @@ function Find-Executable([string]$root, [string]$name) {
 
 function New-RandomHex([int]$bytes = 24) {
     $buffer = New-Object byte[] $bytes
-    [Security.Cryptography.RandomNumberGenerator]::Fill($buffer)
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($buffer)
+    } finally {
+        $rng.Dispose()
+    }
     return ([BitConverter]::ToString($buffer) -replace "-", "").ToLowerInvariant()
 }
 
 function ConvertTo-FernetKey {
     $buffer = New-Object byte[] 32
-    [Security.Cryptography.RandomNumberGenerator]::Fill($buffer)
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($buffer)
+    } finally {
+        $rng.Dispose()
+    }
     return [Convert]::ToBase64String($buffer).Replace("+", "-").Replace("/", "_")
 }
 
@@ -531,7 +544,7 @@ function Ensure-NativeServiceAccount([string]$pythonRoot) {
     if ($LASTEXITCODE -ne 0) {
         throw "could not create or update the native service account; run install from an elevated PowerShell"
     }
-    Set-Content -LiteralPath $passwordPath -Value $password -Encoding UTF8
+    [System.IO.File]::WriteAllText($passwordPath, $password, [System.Text.UTF8Encoding]::new($false))
     $principal = "{0}\{1}" -f $env:COMPUTERNAME, $accountName
     $grant = "{0}:(OI)(CI)M" -f $principal
     & icacls.exe $script:Root /grant:r $grant /C | Out-Null
@@ -551,11 +564,17 @@ function Ensure-NativeServiceAccount([string]$pythonRoot) {
 function Protect-NativeRuntime {
     $currentPrincipal = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     $servicePrincipal = "{0}\{1}" -f $env:COMPUTERNAME, (Get-NativeServiceAccountName)
+    # icacls drops an inheritable "(OI)(CI)" grant when it lands on a leaf FILE,
+    # which leaves files with an EMPTY DACL (everyone denied) once the inherited
+    # ACEs are stripped by /inheritance:r. Grant each principal BOTH an
+    # inheritable form (applied to directories, inherited by future children)
+    # and a plain form (applied to existing leaf files); icacls keeps the right
+    # one per object type.
     $rules = @(
-        ("{0}:(OI)(CI)F" -f $currentPrincipal),
-        ("{0}:(OI)(CI)F" -f $servicePrincipal),
-        "*S-1-5-18:(OI)(CI)F",
-        "*S-1-5-32-544:(OI)(CI)F"
+        ("{0}:(OI)(CI)F" -f $currentPrincipal), ("{0}:F" -f $currentPrincipal),
+        ("{0}:(OI)(CI)F" -f $servicePrincipal), ("{0}:F" -f $servicePrincipal),
+        "*S-1-5-18:(OI)(CI)F", "*S-1-5-18:F",
+        "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-32-544:F"
     )
     & icacls.exe $script:Root /inheritance:r /grant:r $rules /T /C | Out-Null
     if ($LASTEXITCODE -ne 0) {
@@ -621,15 +640,16 @@ NUMEXPR_NUM_THREADS=1
 ARROW_IO_THREADS=1
 PYTHONUNBUFFERED=1
 "@
-    Set-Content -LiteralPath $script:EnvPath -Value $envText.Trim() -Encoding UTF8
-    Set-Content -LiteralPath (Join-Path $script:Root "config\postgres-password.txt") -Value $postgresPassword -Encoding UTF8
-    Set-Content -LiteralPath (Join-Path $script:Root "config\redis-password.txt") -Value $redisPassword -Encoding UTF8
-    Set-Content -LiteralPath (Join-Path $script:Root "config\admin-credentials.txt") -Value ("username=$AdminUsername`npassword=$adminPassword") -Encoding UTF8
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::WriteAllText($script:EnvPath, $envText.Trim(), $utf8NoBom)
+    [System.IO.File]::WriteAllText((Join-Path $script:Root "config\postgres-password.txt"), $postgresPassword, $utf8NoBom)
+    [System.IO.File]::WriteAllText((Join-Path $script:Root "config\redis-password.txt"), $redisPassword, $utf8NoBom)
+    [System.IO.File]::WriteAllText((Join-Path $script:Root "config\admin-credentials.txt"), ("username=$AdminUsername`npassword=$adminPassword"), $utf8NoBom)
 }
 
 function Write-NativeSearxSettings([string]$redisPassword) {
     $settingsPath = Join-Path $script:Root "config\searxng-settings.yml"
-    @"
+    $settings = @"
 use_default_settings: true
 
 server:
@@ -647,7 +667,10 @@ search:
   formats:
     - html
     - json
-"@ | Set-Content -LiteralPath $settingsPath -Encoding UTF8
+"@
+    # UTF-8 without BOM: Set-Content -Encoding UTF8 would prepend a BOM and PyYAML
+    # would parse the first key as "﻿use_default_settings".
+    [System.IO.File]::WriteAllText($settingsPath, $settings, [System.Text.UTF8Encoding]::new($false))
 }
 
 function Invoke-NativePython([string[]]$arguments) {
@@ -657,7 +680,16 @@ function Invoke-NativePython([string[]]$arguments) {
     }
     Push-Location $script:Root
     try {
-        & $python @arguments
+        $oldEap = $ErrorActionPreference
+        try {
+            # venv Python prints warnings to stderr; under EAP=Stop those become a
+            # terminating NativeCommandError even when the command succeeds. The
+            # explicit exit-code check below is the real gate.
+            $ErrorActionPreference = "Continue"
+            & $python @arguments
+        } finally {
+            $ErrorActionPreference = $oldEap
+        }
         if ($LASTEXITCODE -ne 0) {
             throw "native Python command failed with exit code $LASTEXITCODE"
         }
@@ -840,7 +872,14 @@ function Get-NativeTaskArguments {
     $controllerDirectory = Join-Path $script:Root "controller"
     New-Item -ItemType Directory -Force -Path $controllerDirectory | Out-Null
     $scriptPath = Join-Path $controllerDirectory "ashare-native.ps1"
-    Copy-Item -Force -LiteralPath (Join-Path $script:ScriptRoot "ashare-native.ps1") -Destination $scriptPath
+    # When this script is already running from the controller copy, ScriptRoot
+    # IS the controller directory and the source equals the destination; copying
+    # a file onto itself fails with a sharing violation (the running file is
+    # locked). Skip the self-copy in that case.
+    $controllerSource = Join-Path $script:ScriptRoot "ashare-native.ps1"
+    if ([IO.Path]::GetFullPath($controllerSource) -ne [IO.Path]::GetFullPath($scriptPath)) {
+        Copy-Item -Force -LiteralPath $controllerSource -Destination $scriptPath
+    }
     $lockPath = Join-Path $script:ScriptRoot "dependencies.lock.json"
     if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
         Copy-Item -Force -LiteralPath $lockPath -Destination (Join-Path $controllerDirectory "dependencies.lock.json")
@@ -891,9 +930,13 @@ function Register-NativeWatchdogTask {
     $trigger = New-ScheduledTaskTrigger -AtStartup
     $servicePrincipal = "{0}\{1}" -f $env:COMPUTERNAME, (Get-NativeServiceAccountName)
     $servicePassword = Read-NativeServicePassword
-    $principal = New-ScheduledTaskPrincipal -UserId $servicePrincipal -LogonType Password -RunLevel Limited
+    # Register-ScheduledTask splits credentials (-User/-Password) and the
+    # principal object (-Principal) across two mutually exclusive parameter
+    # sets in Windows PowerShell 5.1; passing both yields AmbiguousParameterSet.
+    # The -User/-Password form stores the service account password and yields a
+    # password (TASK_LOGON_PASSWORD) principal, which is what the watchdog needs.
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 365)
-    Register-ScheduledTask -TaskName $script:WatchdogTaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -User $servicePrincipal -Password $servicePassword -Force | Out-Null
+    Register-ScheduledTask -TaskName $script:WatchdogTaskName -Action $action -Trigger $trigger -Settings $settings -User $servicePrincipal -Password $servicePassword -RunLevel Limited -Force | Out-Null
     Write-AtomicText $script:TaskNamePath $script:WatchdogTaskName
     Write-NativeEvent "registered limited service-account watchdog task $($script:WatchdogTaskName)"
 }
@@ -998,9 +1041,47 @@ function Start-ManagedProcess([string]$name, [string]$filePath, [string[]]$argum
         if ($credential) {
             $startOptions.Credential = $credential
             $startOptions.LoadUserProfile = $true
-        }
-        if ($environment.Count -gt 0) {
-            $startOptions.Environment = $environment
+            if ($environment.Count -gt 0) {
+                # PowerShell 5.1 Start-Process -Credential launches the child with
+                # the TARGET USER's default environment, NOT the caller's — so env
+                # vars set above would never reach the real process (verified: the
+                # service account's own PATH/USERNAME appear in the child, and a
+                # caller-set variable is missing). Start-Process -Environment is
+                # PS 6+ only. Workaround: run a launcher .ps1 as the service
+                # account that sets each variable inside its own process, then
+                # runs the real command as a direct synchronous child. The
+                # launcher PID is the tracked pid, so Stop-NativeProcessTree still
+                # tears down the whole tree, and the redirected stdout/stderr
+                # handles pass through to the child.
+                $launcher = Join-Path $script:Root ("config\launch-{0}.ps1" -f $name)
+                $lines = @('$ErrorActionPreference = "Stop"')
+                foreach ($key in $environment.Keys) {
+                    $value = ([string]$environment[$key]).Replace("'", "''")
+                    $lines += ('$env:{0} = ''{1}''' -f $key, $value)
+                }
+                $escapedFile = $filePath.Replace("'", "''")
+                $argList = @()
+                foreach ($argument in $arguments) { $argList += ("'" + $argument.Replace("'", "''") + "'") }
+                # Invoking a GUI-subsystem exe (pythonw.exe) with the & operator does
+                # NOT block — PowerShell starts it asynchronously and the launcher
+                # would exit, orphaning the service and leaving a dead tracked PID.
+                # Start-Process -PassThru keeps the launcher alive as the real parent
+                # so Stop-NativeProcessTree can still tear the tree down. Redirect the
+                # inner process's stdout/stderr to dedicated files too: pythonw has no
+                # console, so without a redirect the service's output vanishes (run8's
+                # api failed with zero output anywhere, hiding the failure entirely).
+                $innerOut = Join-Path $script:Root ("logs\{0}.inner.out.log" -f $name)
+                $innerErr = Join-Path $script:Root ("logs\{0}.inner.err.log" -f $name)
+                if ($argList.Count -gt 0) {
+                    $lines += ("`$p = Start-Process -FilePath '{0}' -ArgumentList {1} -RedirectStandardOutput '{2}' -RedirectStandardError '{3}' -PassThru -WindowStyle Hidden" -f $escapedFile, ($argList -join ", "), $innerOut.Replace("'", "''"), $innerErr.Replace("'", "''"))
+                } else {
+                    $lines += ("`$p = Start-Process -FilePath '{0}' -RedirectStandardOutput '{1}' -RedirectStandardError '{2}' -PassThru -WindowStyle Hidden" -f $escapedFile, $innerOut.Replace("'", "''"), $innerErr.Replace("'", "''"))
+                }
+                $lines += "`$p.WaitForExit()"
+                Write-AtomicText $launcher ($lines -join "`r`n")
+                $startOptions.FilePath = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+                $startOptions.ArgumentList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $launcher)
+            }
         }
         $process = Start-Process @startOptions
     } finally {
@@ -1034,19 +1115,32 @@ function Test-ManagedProcess($service) {
 }
 
 function Wait-PostgresReady([string]$pgIsReady) {
-    for ($attempt = 1; $attempt -le 30; $attempt++) {
-        & $pgIsReady -h 127.0.0.1 -p $script:PostgresPort -U ashare 2>$null | Out-Null
-        if ($LASTEXITCODE -eq 0) {
-            return
+    $oldEap = $ErrorActionPreference
+    try {
+        # pg_isready exits 2 (with text on stdout) while Postgres is still booting;
+        # native stderr would otherwise raise a terminating NativeCommandError here.
+        $ErrorActionPreference = "Continue"
+        for ($attempt = 1; $attempt -le 30; $attempt++) {
+            & $pgIsReady -h 127.0.0.1 -p $script:PostgresPort -U ashare 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                return
+            }
+            Start-Sleep -Seconds 1
         }
-        Start-Sleep -Seconds 1
+    } finally {
+        $ErrorActionPreference = $oldEap
     }
     throw "PostgreSQL did not become ready on port $script:PostgresPort"
 }
 
 function Wait-RedisReady([string]$redisCli, [string]$password) {
     $oldRedisAuth = $env:REDISCLI_AUTH
+    $oldEap = $ErrorActionPreference
     try {
+        # Connection-refused writes to redis-cli stderr; under EAP=Stop that becomes
+        # a terminating NativeCommandError (even with 2>$null) and kills the retry
+        # loop on the first attempt while Redis is still starting.
+        $ErrorActionPreference = "Continue"
         $env:REDISCLI_AUTH = $password
         for ($attempt = 1; $attempt -le 30; $attempt++) {
             $reply = & $redisCli -h 127.0.0.1 -p $script:RedisPort ping 2>$null
@@ -1056,6 +1150,7 @@ function Wait-RedisReady([string]$redisCli, [string]$password) {
             Start-Sleep -Seconds 1
         }
     } finally {
+        $ErrorActionPreference = $oldEap
         if ($null -eq $oldRedisAuth) { Remove-Item Env:REDISCLI_AUTH -ErrorAction SilentlyContinue }
         else { $env:REDISCLI_AUTH = $oldRedisAuth }
     }
@@ -1274,7 +1369,13 @@ function Invoke-StartCore([switch]$ForWatchdog) {
         $pgIsReady = Join-Path $paths.postgres_bin "pg_isready.exe"
         if (-not (Test-Path (Join-Path $pgData "PG_VERSION"))) {
             $pgPasswordFile = Join-Path $script:Root "config\postgres-password.txt"
-            & $initdb -D $pgData -U ashare --pwfile=$pgPasswordFile --encoding=UTF8 --locale=C
+            $oldInitdbEap = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = "Continue"
+                & $initdb -D $pgData -U ashare --pwfile=$pgPasswordFile --encoding=UTF8 --locale=C
+            } finally {
+                $ErrorActionPreference = $oldInitdbEap
+            }
             if ($LASTEXITCODE -ne 0) { throw "PostgreSQL initdb failed" }
         }
         if (-not (Test-Path -LiteralPath $postgres -PathType Leaf)) { throw "postgres.exe is missing" }
@@ -1296,7 +1397,12 @@ function Invoke-StartCore([switch]$ForWatchdog) {
         $createdb = Join-Path $paths.postgres_bin "createdb.exe"
         $psql = Join-Path $paths.postgres_bin "psql.exe"
         $oldPgPassword = $env:PGPASSWORD
+        $oldPgEap = $ErrorActionPreference
         try {
+            # createdb reports "database already exists" on stderr; under EAP=Stop
+            # that is a terminating NativeCommandError that would skip the psql
+            # fallback below even though $LASTEXITCODE is the intended signal.
+            $ErrorActionPreference = "Continue"
             $env:PGPASSWORD = (Get-Content (Join-Path $script:Root "config\postgres-password.txt") -Raw).Trim()
             & $createdb -h 127.0.0.1 -p $script:PostgresPort -U ashare ashare 2>$null
             $createdbExit = $LASTEXITCODE
@@ -1305,6 +1411,7 @@ function Invoke-StartCore([switch]$ForWatchdog) {
                 if ($LASTEXITCODE -ne 0) { throw "PostgreSQL database creation failed" }
             }
         } finally {
+            $ErrorActionPreference = $oldPgEap
             if ($null -eq $oldPgPassword) { Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue }
             else { $env:PGPASSWORD = $oldPgPassword }
         }
@@ -1312,7 +1419,19 @@ function Invoke-StartCore([switch]$ForWatchdog) {
         $redisConfig = Join-Path $script:Root "config\redis.conf"
         $redisPassword = (Get-Content (Join-Path $script:Root "config\redis-password.txt") -Raw).Trim()
         $redisCli = Join-Path $paths.redis_bin "redis-cli.exe"
-        @("bind 127.0.0.1", "port $script:RedisPort", "protected-mode yes", "requirepass $redisPassword", "dir `"$($script:Root.Replace('\', '/'))/data/redis`"", "appendonly yes", "appendfsync everysec") | Set-Content -LiteralPath $redisConfig -Encoding UTF8
+        $redisConfLines = @(
+            "bind 127.0.0.1",
+            "port $script:RedisPort",
+            "protected-mode yes",
+            "requirepass $redisPassword",
+            "dir `"$($script:Root.Replace('\', '/'))/data/redis`"",
+            "appendonly yes",
+            "appendfsync everysec"
+        )
+        # WriteAllLines emits UTF-8 without BOM; Set-Content -Encoding UTF8 would
+        # prepend a BOM and Redis would reject the first directive ("unknown conf
+        # file parameter : bind") and exit immediately.
+        [System.IO.File]::WriteAllLines($redisConfig, $redisConfLines, [System.Text.UTF8Encoding]::new($false))
         Assert-NativePortFree $script:RedisPort
         $services += Start-ManagedProcess "redis" (Join-Path $paths.redis_bin "redis-server.exe") @($redisConfig) $script:Root @{} "redis" $null $serviceCredential
         Write-NativeEvent "redis process started pid=$($services[-1].pid)"
@@ -1361,10 +1480,19 @@ function Invoke-StartCore([switch]$ForWatchdog) {
             if ($service.role -eq "postgres") {
                 $pgCtl = Join-Path $paths.postgres_bin "pg_ctl.exe"
                 $pgData = Join-Path $script:Root "data\postgres"
-                & $pgCtl -D $pgData -m immediate stop 2>$null | Out-Null
+                $oldStopEap = $ErrorActionPreference
+                try {
+                    $ErrorActionPreference = "Continue"
+                    & $pgCtl -D $pgData -m immediate stop 2>$null | Out-Null
+                } finally {
+                    $ErrorActionPreference = $oldStopEap
+                }
             }
-            $process = Get-Process -Id ([int]$service.pid) -ErrorAction SilentlyContinue
-            if ($process) { Stop-Process -Id $process.Id -Force }
+            # Teardown the full wrapper tree: the tracked pid is the launcher-wrapper
+            # process whose child is the real service process. A single Stop-Process
+            # on the wrapper would orphan that child (seen live: searxng pythonw
+            # outlived its killed wrapper after run8's failed start).
+            Stop-NativeProcessTree ([int]$service.pid)
         }
         Write-State @()
         throw
@@ -1383,7 +1511,13 @@ function Invoke-StopCore {
         if ($service.role -eq "postgres" -and $null -ne $paths) {
             $pgCtl = Join-Path $paths.postgres_bin "pg_ctl.exe"
             $pgData = Join-Path $script:Root "data\postgres"
-            & $pgCtl -D $pgData -m fast stop 2>$null | Out-Null
+            $oldStopEap = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = "Continue"
+                & $pgCtl -D $pgData -m fast stop 2>$null | Out-Null
+            } finally {
+                $ErrorActionPreference = $oldStopEap
+            }
             if ($LASTEXITCODE -eq 0) { Write-Host ("Stopped {0} (graceful)" -f $service.name) }
         }
         $process = Get-Process -Id ([int]$service.pid) -ErrorAction SilentlyContinue
@@ -1393,6 +1527,7 @@ function Invoke-StopCore {
         }
     }
     Write-State @()
+    Remove-Item -Path (Join-Path $script:Root "config\launch-*.ps1") -Force -ErrorAction SilentlyContinue
     Write-NativeEvent "native runtime stopped"
 }
 
