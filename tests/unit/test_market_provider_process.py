@@ -10,7 +10,13 @@ from typing import Any
 import pytest
 
 from ashare_ai.market.akshare_worker import handle_request
-from ashare_ai.market.service import AKShareMarketProvider, _number, _PriorityGate
+from ashare_ai.market.service import (
+    AKShareMarketProvider,
+    MarketDataService,
+    _AKShareInProcessProvider,
+    _number,
+    _PriorityGate,
+)
 
 
 class _Output:
@@ -222,3 +228,70 @@ def test_market_number_rejects_non_finite_values() -> None:
     assert _number(float("nan")) is None
     assert _number(float("inf")) is None
     assert _number(float("-inf")) is None
+
+
+def test_in_process_daily_klines_fall_back_to_sina_when_eastmoney_disconnects(
+    monkeypatch,
+) -> None:
+    class Frame:
+        def tail(self, limit: int) -> Frame:
+            assert limit == 10
+            return self
+
+        def to_dict(self, *, orient: str) -> list[dict[str, Any]]:
+            assert orient == "records"
+            return [
+                {
+                    "date": date(2026, 8, 6),
+                    "open": 9.28,
+                    "high": 9.35,
+                    "low": 9.16,
+                    "close": 9.29,
+                    "volume": 67232905,
+                    "amount": 621683353,
+                    "turnover": 0.002,
+                }
+            ]
+
+    class SDK:
+        def stock_zh_a_hist(self, **_kwargs: Any) -> None:
+            raise ConnectionError("upstream reset")
+
+        def stock_zh_a_daily(self, **kwargs: Any) -> Frame:
+            assert kwargs["symbol"] == "sh600000"
+            assert kwargs["adjust"] == ""
+            return Frame()
+
+    provider = _AKShareInProcessProvider()
+    monkeypatch.setattr(provider, "_sdk", lambda: SDK())
+
+    rows = provider.klines("600000.SH", "daily", None, None, 10, "raw")
+
+    assert rows[0]["timestamp"].startswith("2026-08-06")
+    assert rows[0]["close"] == 9.29
+
+
+def test_calendar_uses_isolated_retry_after_primary_failure(monkeypatch) -> None:
+    class Primary:
+        source = "akshare"
+
+        def sessions(self, _start: date, _end: date) -> tuple[date, ...]:
+            raise RuntimeError("provider returned an error")
+
+    primary = Primary()
+    service = MarketDataService(primary=primary, redis_client=None)  # type: ignore[arg-type]
+    expected = (date(2026, 8, 6),)
+
+    class Isolated:
+        def __init__(self, *, timeout_seconds: float) -> None:
+            assert timeout_seconds > 0
+
+        def sessions(self, _start: date, _end: date) -> tuple[date, ...]:
+            return expected
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("ashare_ai.market.service.AKShareMarketProvider", Isolated)
+
+    assert service._fetch_calendar() == expected

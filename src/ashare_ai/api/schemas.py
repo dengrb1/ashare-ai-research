@@ -367,6 +367,27 @@ class RuntimeModeResponse(BaseModel):
     reason: str
 
 
+RUNTIME_IDENTITY_MODES = ("task", "account", "system")
+
+
+def _supported_runtime_identity_modes() -> list[Literal["task", "account", "system"]]:
+    return ["task", "account"]
+
+
+class RuntimeIdentityRequest(BaseModel):
+    mode: Literal["task", "account", "system"]
+
+
+class RuntimeIdentityResponse(BaseModel):
+    mode: Literal["task", "account", "system"] | None = None
+    applicable: bool
+    platform: Literal["windows", "linux", "docker"]
+    supported_modes: list[Literal["task", "account", "system"]] = Field(
+        default_factory=_supported_runtime_identity_modes
+    )
+    note: str | None = None
+
+
 class EnergySavingResponse(BaseModel):
     enabled: bool
     active: bool
@@ -747,9 +768,7 @@ class AIChatMessageResponse(OrmResponse):
     cache_policy: Literal["GROK", "OPENAI", "COMPATIBLE"] = "COMPATIBLE"
     context_budget_status: Literal[
         "WITHIN_BUDGET", "HISTORY_TRIMMED", "COMPACTED", "CONTEXT_TOO_LARGE"
-    ] = (
-        "WITHIN_BUDGET"
-    )
+    ] = "WITHIN_BUDGET"
     error_code: str | None = None
     request_id: str | None = None
     streaming_mode: Literal["STREAMING", "DEGRADED", "CACHED"] = "STREAMING"

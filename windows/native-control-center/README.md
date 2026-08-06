@@ -4,8 +4,7 @@
 AshareAI，默认运行目录是该目录下的 runtime；两个目录都可以单独浏览选择。
 管理器从源码目录启动时会自动回退到用户本地的 AshareAI/runtime，避免污染源码树。
 
-本目录存放 Windows 原生管理器和单文件安装包构建脚本。当前为测试版本，可能不稳定，
-不建议直接用于生产环境。管理器使用系统自带
+本目录存放 Windows 原生管理器和单文件安装包构建脚本。管理器使用系统自带
 .NET Framework WinForms 编译，不需要安装 .NET SDK。安装后的运行方式不依赖
 Docker 或 WSL。
 
@@ -23,6 +22,9 @@ Docker 或 WSL。
 - `AshareAI.NativeControlCenter.Cli.exe`：命令行管理器。
 - `ashareai.cmd`：命令提示符/PowerShell 友好的 CLI 包装器。
 - `dist\AshareAI-Setup.exe`：单文件 Windows 安装包。
+
+GitHub Actions 会在每次分支推送和 `main` Pull Request 上构建同一安装包，并同时
+上传 `AshareAI-Setup.exe.sha256`。安装前应校验 SHA-256 与同一工作流产物一致。
 
 ## GUI 与命令行
 

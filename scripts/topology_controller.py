@@ -27,9 +27,7 @@ class Controller:
         self.state_path = self.secrets / "topology-controller.state"
         self.edge_state_path = self.secrets / "topology-controller.edge.state"
 
-    def _docker(
-        self, *args: str, env_extra: dict[str, str] | None = None
-    ) -> str:
+    def _docker(self, *args: str, env_extra: dict[str, str] | None = None) -> str:
         env = {**os.environ, **env_extra} if env_extra else None
         result = subprocess.run(
             ["docker", *args],
@@ -92,12 +90,12 @@ class Controller:
         return {
             "EDGE_DOMAIN": str(desired.get("edge_domain") or ""),
             "EDGE_ACME_EMAIL": str(desired.get("edge_acme_email") or ""),
-            "EDGE_ACME_CA_SERVER": str(
-                desired.get("edge_acme_ca_server") or "letsencrypt"
-            ),
+            "EDGE_ACME_CA_SERVER": str(desired.get("edge_acme_ca_server") or "letsencrypt"),
             "EDGE_FRPC_ENABLED": "true" if bool(desired.get("edge_frpc_enabled")) else "false",
             "EDGE_GATEWAY_CONFIG_DIR": config_dir,
-            "EDGE_GATEWAY_SOURCE_DIR": str(desired.get("edge_gateway_source_dir") or "./docker/edge-gateway"),
+            "EDGE_GATEWAY_SOURCE_DIR": str(
+                desired.get("edge_gateway_source_dir") or "./docker/edge-gateway"
+            ),
             "EDGE_GATEWAY_CONFIG_SHA256": str(desired.get("edge_gateway_config_sha256") or ""),
             "EDGE_GATEWAY_CONFIG_FILE": f"{config_dir}/managed.conf",
             "EDGE_FRPC_CONFIG_FILE": f"{config_dir}/frpc.toml",
@@ -121,7 +119,10 @@ class Controller:
             if not directory.is_absolute():
                 directory = self.root / directory
             directory.mkdir(parents=True, exist_ok=True)
-            for filename, content in (("frpc.toml", config.get("frpc_toml")), ("managed.conf", config.get("nginx_conf"))):
+            for filename, content in (
+                ("frpc.toml", config.get("frpc_toml")),
+                ("managed.conf", config.get("nginx_conf")),
+            ):
                 if not isinstance(content, str):
                     raise RuntimeError(f"edge-gateway {filename} is missing")
                 target = directory / filename
@@ -190,7 +191,9 @@ class Controller:
                     self._write_edge_config(edge_values, edge_config)
                     # A saved TOML is the authoritative FRP enablement switch
                     # for the dedicated gateway page.
-                    edge_values["EDGE_FRPC_ENABLED"] = "true" if str(edge_config.get("frpc_toml") or "").strip() else "false"
+                    edge_values["EDGE_FRPC_ENABLED"] = (
+                        "true" if str(edge_config.get("frpc_toml") or "").strip() else "false"
+                    )
                     self._docker(
                         *base,
                         "--profile",
@@ -204,8 +207,18 @@ class Controller:
                     )
                     applied = urllib.request.Request(
                         "http://127.0.0.1:8000/api/internal/edge-gateway-applied",
-                        data=json.dumps({"configuration_id": edge_config.get("configuration_id"), "sha256": edge_config.get("config_sha256"), "status": "APPLIED", "message": None}).encode(),
-                        headers={"Content-Type": "application/json", "X-Topology-Controller-Token": token},
+                        data=json.dumps(
+                            {
+                                "configuration_id": edge_config.get("configuration_id"),
+                                "sha256": edge_config.get("config_sha256"),
+                                "status": "APPLIED",
+                                "message": None,
+                            }
+                        ).encode(),
+                        headers={
+                            "Content-Type": "application/json",
+                            "X-Topology-Controller-Token": token,
+                        },
                         method="POST",
                     )
                     with urllib.request.urlopen(applied, timeout=10):

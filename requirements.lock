@@ -111,7 +111,7 @@ coverage[toml]==7.15.1
     # via pytest-cov
 cronsim==2.7
     # via pydocket
-cryptography==49.0.0
+cryptography==50.0.0
     # via
     #   ashare-ai-research (pyproject.toml)
     #   prefect

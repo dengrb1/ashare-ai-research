@@ -352,7 +352,9 @@ def test_auto_restart_enabled_is_versioned_and_restorable() -> None:
     assert service.public_view(session)["sources"]["auto_restart_enabled"] == "environment"
 
 
-def test_system_settings_api_requires_admin_csrf_and_is_idempotent(monkeypatch) -> None:
+def test_system_settings_api_requires_admin_csrf_and_is_idempotent(
+    monkeypatch, tmp_path
+) -> None:
     engine = create_engine(
         "sqlite+pysqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
     )
@@ -398,6 +400,7 @@ def test_system_settings_api_requires_admin_csrf_and_is_idempotent(monkeypatch) 
         "ashare_ai.api.app.get_market_data_service", lambda: _NoopMarketDataService()
     )
     monkeypatch.setattr("ashare_ai.api.app.reset_market_data_service", lambda: None)
+    monkeypatch.setattr("ashare_ai.api.app._native_runtime_root", lambda: tmp_path)
     unlock_redis = _UnlockRedis()
     monkeypatch.setattr(
         "ashare_ai.api.system_settings_unlock._redis_client", lambda: unlock_redis
@@ -506,6 +509,37 @@ def test_system_settings_api_requires_admin_csrf_and_is_idempotent(monkeypatch) 
             json={"mode": "SUPREME"},
             headers=mode_headers,
         ).json()["mode"] == "SUPREME"
+        identity_headers = {
+            "x-csrf-token": csrf,
+            "X-System-Settings-Unlock": unlocked.json()["unlock_token"],
+            "Idempotency-Key": "runtime-identity-once",
+        }
+        assert client.put(
+            "/api/v1/admin/runtime-identity",
+            json={"mode": "task"},
+            headers={"x-csrf-token": csrf},
+        ).status_code == 403
+        assert client.put(
+            "/api/v1/admin/runtime-identity",
+            json={"mode": "system"},
+            headers=identity_headers,
+        ).status_code == 422
+        first_identity = client.put(
+            "/api/v1/admin/runtime-identity",
+            json={"mode": "account"},
+            headers=identity_headers,
+        )
+        second_identity = client.put(
+            "/api/v1/admin/runtime-identity",
+            json={"mode": "account"},
+            headers=identity_headers,
+        )
+        assert first_identity.status_code == second_identity.status_code == 200
+        assert first_identity.json()["mode"] == second_identity.json()["mode"] == "account"
+        assert first_identity.json()["supported_modes"] == ["task", "account"]
+        assert '"mode": "account"' in (
+            tmp_path / "config" / "runtime-identity.json"
+        ).read_text(encoding="utf-8")
         assert client.put(
             "/api/v1/admin/system-settings",
             json={"market_cache_seconds": 24},

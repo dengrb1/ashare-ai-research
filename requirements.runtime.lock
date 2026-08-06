@@ -78,7 +78,7 @@ colorama==0.4.6
     #   -c requirements.lock
     #   click
     #   tqdm
-cryptography==49.0.0
+cryptography==50.0.0
     # via
     #   -c requirements.lock
     #   ashare-ai-research (pyproject.toml)

@@ -28,6 +28,22 @@ describe('API security and market adapters', () => {
     expect(init?.method).toBe('POST')
   })
 
+  it('protects native runtime identity changes with unlock and idempotency headers', async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse({
+      mode: 'task', applicable: true, platform: 'windows', supported_modes: ['task', 'account'],
+    }))
+
+    const idempotencyKey = '6ad5bd2a-13bc-4fd3-b3c7-d81c42c7513d'
+    await api.saveRuntimeIdentity('task', 'unlock-token', idempotencyKey)
+
+    const [, init] = vi.mocked(fetch).mock.calls[0]
+    const headers = new Headers(init?.headers)
+    expect(init?.method).toBe('PUT')
+    expect(headers.get('X-System-Settings-Unlock')).toBe('unlock-token')
+    expect(headers.get('Idempotency-Key')).toBe(idempotencyKey)
+    expect(JSON.parse(String(init?.body))).toEqual({ mode: 'task' })
+  })
+
   it('uses the focused quote endpoint and persists refresh settings through the narrow API', async () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(jsonResponse({ symbol: '600519.SH', price: 21.8, status: { source: 'sina', collected_at: '2026-07-20T00:00:00Z', cached_at: '2026-07-20T00:00:00Z', delayed: false, stale: false } }))

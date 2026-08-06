@@ -18,21 +18,32 @@ depends_on = None
 def upgrade() -> None:
     with op.batch_alter_table("user_asset_states") as batch:
         batch.add_column(
-            sa.Column("stop_loss_monitor_enabled", sa.Boolean(), nullable=False, server_default=sa.true())
+            sa.Column(
+                "stop_loss_monitor_enabled", sa.Boolean(), nullable=False, server_default=sa.true()
+            )
         )
         batch.add_column(
             sa.Column("buy_monitor_enabled", sa.Boolean(), nullable=False, server_default=sa.true())
         )
     with op.batch_alter_table("active_model_configuration") as batch:
         batch.add_column(
-            sa.Column("structured_output_supported", sa.Boolean(), nullable=False, server_default=sa.false())
+            sa.Column(
+                "structured_output_supported",
+                sa.Boolean(),
+                nullable=False,
+                server_default=sa.false(),
+            )
         )
         batch.add_column(
-            sa.Column("streaming_supported", sa.Boolean(), nullable=False, server_default=sa.false())
+            sa.Column(
+                "streaming_supported", sa.Boolean(), nullable=False, server_default=sa.false()
+            )
         )
     with op.batch_alter_table("ai_chat_messages") as batch:
         batch.add_column(
-            sa.Column("streaming_mode", sa.String(length=16), nullable=False, server_default="STREAMING")
+            sa.Column(
+                "streaming_mode", sa.String(length=16), nullable=False, server_default="STREAMING"
+            )
         )
         batch.add_column(
             sa.Column("data_status", sa.JSON(), nullable=False, server_default=sa.text("'{}'"))
@@ -108,14 +119,23 @@ def upgrade() -> None:
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("entry_low", sa.Numeric(18, 6), nullable=False),
         sa.Column("entry_high", sa.Numeric(18, 6), nullable=False),
-        sa.Column("score_run_id", sa.String(length=36), sa.ForeignKey("job_runs.run_id"), nullable=True),
-        sa.Column("trade_plan_id", sa.String(length=36), sa.ForeignKey("trade_plans.plan_id"), nullable=True),
+        sa.Column(
+            "score_run_id", sa.String(length=36), sa.ForeignKey("job_runs.run_id"), nullable=True
+        ),
+        sa.Column(
+            "trade_plan_id",
+            sa.String(length=36),
+            sa.ForeignKey("trade_plans.plan_id"),
+            nullable=True,
+        ),
         sa.Column("rationale", sa.JSON(), nullable=False, server_default=sa.text("'{}'")),
         sa.Column("triggered_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("error_code", sa.String(length=48), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.UniqueConstraint("user_id", "symbol", "effective_date", name="uq_buy_monitor_user_symbol_date"),
+        sa.UniqueConstraint(
+            "user_id", "symbol", "effective_date", name="uq_buy_monitor_user_symbol_date"
+        ),
     )
     op.create_index(
         "ix_buy_monitor_active", "buy_entry_monitors", ["status", "effective_date", "expires_at"]

@@ -5,7 +5,9 @@ import base64
 import hmac
 import json
 import logging
+import os
 import shutil
+import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, date, datetime, timedelta
@@ -149,6 +151,8 @@ from ashare_ai.api.schemas import (
     RunClearRequest,
     RunListResponse,
     RunResponse,
+    RuntimeIdentityRequest,
+    RuntimeIdentityResponse,
     RuntimeModeRequest,
     RuntimeModeResponse,
     ScoreResponse,
@@ -389,9 +393,7 @@ def _runtime_mode_response(db: Session | None = None) -> RuntimeModeResponse:
     )
     policy = runtime_mode_policy(settings)
     market = get_market_data_service()
-    status_payload = (
-        market.status() if callable(getattr(market, "status", None)) else {}
-    )
+    status_payload = market.status() if callable(getattr(market, "status", None)) else {}
     after_close = is_after_close()
     if after_close and policy.auto_close_after_close:
         reason = "AFTER_CLOSE_RECLAIMED"
@@ -414,6 +416,37 @@ def _runtime_mode_response(db: Session | None = None) -> RuntimeModeResponse:
         market_provider_max_queue=policy.market_provider_max_queue,
         reason=reason,
     )
+
+
+def _native_runtime_root() -> Path | None:
+    """Runtime root for native (non-Docker) installs, or None under Docker."""
+    web_root = get_settings().native_web_root
+    if web_root is None:
+        return None
+    return Path(web_root).resolve().parent
+
+
+def _read_runtime_identity_mode(root: Path | None) -> str | None:
+    if root is None:
+        return None
+    path = root / "config" / "runtime-identity.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    mode = payload.get("mode") if isinstance(payload, dict) else None
+    return mode if mode in ("task", "account", "system") else None
+
+
+def _runtime_identity_response(root: Path | None) -> RuntimeIdentityResponse:
+    platform_name: Literal["windows", "linux"] = "windows" if sys.platform == "win32" else "linux"
+    if root is None:
+        return RuntimeIdentityResponse(mode=None, applicable=False, platform="docker")
+    mode = cast(Literal["task", "account", "system"], _read_runtime_identity_mode(root) or "task")
+    note = None
+    if mode == "system":
+        note = "当前配置使用已停用的高权限模式，请切换到任务计划方式或专用账户"
+    return RuntimeIdentityResponse(mode=mode, applicable=True, platform=platform_name, note=note)
 
 
 def _idempotency_fingerprint(
@@ -1570,9 +1603,7 @@ def mark_all_notifications_read(
 
 
 @app.delete("/api/v1/notifications/{notification_id}", status_code=204)
-def delete_notification(
-    notification_id: str, db: DbSession, context: Writer
-) -> Response:
+def delete_notification(notification_id: str, db: DbSession, context: Writer) -> Response:
     from ashare_ai.storage.models import NotificationRow
 
     row = db.scalar(
@@ -2519,7 +2550,7 @@ def _system_worker_snapshot(
     try:
         import redis
 
-        client = redis.Redis.from_url(get_settings().redis_url, decode_responses=True)
+        client: Any = redis.Redis.from_url(get_settings().redis_url, decode_responses=True)
         heartbeats = read_heartbeats(client)
         queues = {
             name: {
@@ -2610,7 +2641,11 @@ def topology_desired(request: Request, db: DbSession) -> dict[str, object]:
     )
     return {
         "research_execution_mode": runtime.settings.research_execution_mode,
-        "edge_gateway_enabled": bool(edge_config["enabled"]) if edge_config.get("version", 0) else runtime.settings.edge_gateway_enabled,
+        "edge_gateway_enabled": (
+            bool(edge_config["enabled"])
+            if edge_config.get("version", 0)
+            else runtime.settings.edge_gateway_enabled
+        ),
         "edge_gateway_config_sha256": edge_config.get("config_sha256"),
         "edge_domain": runtime.settings.edge_domain,
         "edge_acme_email": runtime.settings.edge_acme_email,
@@ -2629,7 +2664,9 @@ def topology_desired(request: Request, db: DbSession) -> dict[str, object]:
     }
 
 
-def _edge_gateway_response(db: Session, *, reveal: bool = False) -> EdgeGatewayConfigurationResponse:
+def _edge_gateway_response(
+    db: Session, *, reveal: bool = False
+) -> EdgeGatewayConfigurationResponse:
     return EdgeGatewayConfigurationResponse.model_validate(
         EdgeGatewayConfigurationService().public_view(db, reveal=reveal)
     )
@@ -2691,8 +2728,14 @@ def put_edge_gateway(
     _admin(context)
     require_settings_unlock(context, unlock_token)
     body = payload.model_dump(mode="json")
-    fingerprint = _idempotency_fingerprint(context.user.user_id, "/api/v1/admin/edge-gateway", idempotency_key, body)
-    replay = _find_idempotency(db, user_id=context.user.user_id, route="/api/v1/admin/edge-gateway", fingerprint=fingerprint)
+    route = "/api/v1/admin/edge-gateway"
+    fingerprint = _idempotency_fingerprint(context.user.user_id, route, idempotency_key, body)
+    replay = _find_idempotency(
+        db,
+        user_id=context.user.user_id,
+        route=route,
+        fingerprint=fingerprint,
+    )
     if replay is not None:
         return _edge_gateway_response(db, reveal=True)
     try:
@@ -2704,7 +2747,14 @@ def put_edge_gateway(
             frpc_toml=payload.frpc_toml,
             user_id=context.user.user_id,
         )
-        _remember_idempotency(db, user_id=context.user.user_id, route="/api/v1/admin/edge-gateway", fingerprint=fingerprint, resource_type="EDGE_GATEWAY_CONFIGURATION", resource_id=result.get("configuration_id") or "environment")
+        _remember_idempotency(
+            db,
+            user_id=context.user.user_id,
+            route=route,
+            fingerprint=fingerprint,
+            resource_type="EDGE_GATEWAY_CONFIGURATION",
+            resource_id=result.get("configuration_id") or "environment",
+        )
         db.commit()
         return EdgeGatewayConfigurationResponse.model_validate(result)
     except EdgeGatewayError as exc:
@@ -2748,12 +2798,20 @@ def edge_gateway_internal_config(request: Request, db: DbSession) -> dict[str, o
 
 
 @app.post("/api/internal/edge-gateway-applied")
-def edge_gateway_applied(request: Request, payload: EdgeGatewayAppliedRequest, db: DbSession) -> dict[str, bool]:
+def edge_gateway_applied(
+    request: Request, payload: EdgeGatewayAppliedRequest, db: DbSession
+) -> dict[str, bool]:
     expected = get_settings().topology_controller_token
     received = request.headers.get("X-Topology-Controller-Token", "")
     if not expected or not hmac.compare_digest(received, expected):
         raise HTTPException(status_code=403, detail="topology controller is not authorized")
-    EdgeGatewayConfigurationService().mark_applied(db, payload.configuration_id, payload.sha256, payload.status, payload.message)
+    EdgeGatewayConfigurationService().mark_applied(
+        db,
+        payload.configuration_id,
+        payload.sha256,
+        payload.status,
+        payload.message,
+    )
     db.commit()
     return {"ok": True}
 
@@ -2812,9 +2870,7 @@ async def test_model_settings(
     _admin(context)
     service = ModelConfigurationService()
     try:
-        result = await service.probe(
-            _model_draft(payload), db, include_streaming=True
-        )
+        result = await service.probe(_model_draft(payload), db, include_streaming=True)
         service.persist_probe_logs(db, result.diagnostics)
         db.commit()
         return ModelProbeResponse(**result.__dict__)
@@ -2878,9 +2934,7 @@ def put_runtime_mode(
     require_settings_unlock(context, unlock_token)
     body = payload.model_dump(mode="json")
     route = "/api/v1/admin/runtime/mode"
-    fingerprint = _idempotency_fingerprint(
-        context.user.user_id, route, idempotency_key, body
-    )
+    fingerprint = _idempotency_fingerprint(context.user.user_id, route, idempotency_key, body)
     replay = _find_idempotency(
         db,
         user_id=context.user.user_id,
@@ -2925,6 +2979,78 @@ def get_system_resources(context: Current) -> SystemResourcesResponse:
         return SystemResourcesResponse.model_validate(sample_runtime_resources(workers))
     except Exception as exc:
         raise HTTPException(status_code=503, detail="runtime resources unavailable") from exc
+
+
+@app.get("/api/v1/admin/runtime-identity", response_model=RuntimeIdentityResponse)
+def get_runtime_identity(context: Current) -> RuntimeIdentityResponse:
+    _admin(context)
+    return _runtime_identity_response(_native_runtime_root())
+
+
+@app.put("/api/v1/admin/runtime-identity", response_model=RuntimeIdentityResponse)
+def put_runtime_identity(
+    payload: RuntimeIdentityRequest,
+    db: DbSession,
+    context: Writer,
+    idempotency_key: IdempotencyKey = None,
+    unlock_token: SystemSettingsUnlockToken = None,
+) -> RuntimeIdentityResponse:
+    _admin(context)
+    require_settings_unlock(context, unlock_token)
+    if idempotency_key is None:
+        raise HTTPException(status_code=400, detail="Idempotency-Key is required")
+    if payload.mode == "system":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "SYSTEM/root mode is not supported because PostgreSQL refuses privileged execution"
+            ),
+        )
+    root = _native_runtime_root()
+    if root is None:
+        raise HTTPException(
+            status_code=400,
+            detail="runtime identity is only configurable on a native installation",
+        )
+    route = "/api/v1/admin/runtime-identity"
+    fingerprint = _idempotency_fingerprint(
+        context.user.user_id,
+        route,
+        idempotency_key,
+        payload.model_dump(mode="json"),
+    )
+    replay = _find_idempotency(
+        db,
+        user_id=context.user.user_id,
+        route=route,
+        fingerprint=fingerprint,
+    )
+    if replay is not None:
+        return _runtime_identity_response(root)
+    path = root / "config" / "runtime-identity.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = (
+        json.dumps(
+            {"mode": payload.mode, "updated_at": datetime.now(UTC).isoformat()},
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n"
+    )
+    temporary = path.with_name(f".runtime-identity.{uuid4().hex}.tmp")
+    temporary.write_text(content, encoding="utf-8")
+    os.replace(temporary, path)
+    _remember_idempotency(
+        db,
+        user_id=context.user.user_id,
+        route=route,
+        fingerprint=fingerprint,
+        resource_type="RUNTIME_IDENTITY",
+        resource_id=payload.mode,
+    )
+    db.commit()
+    logger.info("administrator changed runtime identity mode=%s", payload.mode)
+    return _runtime_identity_response(root)
 
 
 @app.get("/api/v1/admin/energy-saving", response_model=EnergySavingResponse)
@@ -4601,9 +4727,7 @@ def market_klines(
     try:
         normalized_adjustment = normalize_adjustment(adjust)
     except ValueError as exc:
-        raise HTTPException(
-            status_code=422, detail="adjust must be raw or hfq"
-        ) from exc
+        raise HTTPException(status_code=422, detail="adjust must be raw or hfq") from exc
     try:
         kwargs: dict[str, Any] = {
             "limit": limit,

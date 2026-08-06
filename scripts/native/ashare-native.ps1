@@ -18,7 +18,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$script:NativeVersion = "2026.08.06.2"
+$script:NativeVersion = "2026.08.06.3"
 $script:PostgresPort = 55432
 $script:RedisPort = 56379
 $script:ApiPort = 58000
@@ -519,74 +519,272 @@ function ConvertTo-FernetKey {
     return [Convert]::ToBase64String($buffer).Replace("+", "-").Replace("/", "_")
 }
 
-function Protect-NativeRuntime([string]$pythonRoot = $null) {
-    $currentPrincipal = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-    # icacls drops an inheritable "(OI)(CI)" grant when it lands on a leaf FILE,
-    # which leaves files with an EMPTY DACL (everyone denied) once the inherited
-    # ACEs are stripped by /inheritance:r. Grant each principal BOTH an
-    # inheritable form (applied to directories, inherited by future children)
-    # and a plain form (applied to existing leaf files); icacls keeps the right
-    # one per object type. NETWORK SERVICE (*S-1-5-20) gets full control because
-    # the services and the watchdog run under that built-in unprivileged account
-    # (PostgreSQL refuses any administrative token), with no dedicated account.
-    $rules = @(
-        ("{0}:(OI)(CI)F" -f $currentPrincipal), ("{0}:F" -f $currentPrincipal),
-        "*S-1-5-18:(OI)(CI)F", "*S-1-5-18:F",
-        "*S-1-5-20:(OI)(CI)F", "*S-1-5-20:F",
-        "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-32-544:F"
-    )
-    & icacls.exe $script:Root /inheritance:r /grant:r $rules /T /C | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "could not restrict the native runtime directory ACL"
+function Get-NativeIdentityMode {
+    # Where the watchdog and service processes run. Values: "task" (built-in
+    # NETWORK SERVICE on Windows / current user on Linux — default), or
+    # "account" (dedicated local account).
+    # Stored in config/runtime-identity.json so the web settings API and the
+    # native controllers share one source of truth.
+    $path = Join-Path $script:Root "config\runtime-identity.json"
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+        try {
+            $value = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+            if ($value.mode -in @("task", "account")) { return [string]$value.mode }
+        } catch { }
     }
-    if ($pythonRoot -and (Test-Path -LiteralPath $pythonRoot -PathType Container)) {
-        # The base interpreter can live outside the runtime (a per-user Python
-        # install under the profile); NETWORK SERVICE needs read+execute on it to
-        # run the services. /grant:r here only touches the NETWORK SERVICE ACE,
-        # it does not reset inheritance on the user's Python directory.
-        & icacls.exe $pythonRoot "/grant:r" "*S-1-5-20:(OI)(CI)RX" /C | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "could not grant NETWORK SERVICE access to the host Python runtime"
-        }
-    }
+    return "task"
 }
 
-function Remove-NativeLegacyServiceAccount {
-    # Upgrade cleanup from the password-account era: this runtime previously ran
-    # every service under the local account AshareAIService and the watchdog task
-    # with password logon (which also required a SeBatchLogonRight grant). Fresh
-    # installs never create the account, so this is a no-op for them. Order
-    # matters on an upgrade: stop and unregister the old password task BEFORE
-    # deleting the account, or the task's stored credential keeps the account
-    # busy and fails. The watchdog task is re-registered as NETWORK SERVICE by
-    # Register-NativeWatchdogTask.
-    $accountName = "AshareAIService"
-    try { Stop-ScheduledTask -TaskName $script:WatchdogTaskName -ErrorAction SilentlyContinue } catch { }
-    Unregister-ScheduledTask -TaskName $script:WatchdogTaskName -Confirm:$false -ErrorAction SilentlyContinue
+function Get-NativeServiceAccountName {
+    return "AshareAIService"
+}
+
+function Ensure-NativeServiceAccount([string]$pythonRoot) {
+    $accountName = Get-NativeServiceAccountName
+    $passwordPath = Join-Path $script:Root "config\service-password.txt"
+    $password = if (Test-Path -LiteralPath $passwordPath -PathType Leaf) {
+        (Get-Content -LiteralPath $passwordPath -Raw).Trim()
+    } else {
+        $null
+    }
+    if ([string]::IsNullOrWhiteSpace($password) -or $password.Length -gt 14) {
+        # net.exe asks a Y/N prompt when the password exceeds 14 characters (LAN
+        # Manager compatibility) and reads that answer from the console, NOT from
+        # redirected stdin, so it hangs under a scripted install ("没有提供有效
+        # 的响应"). Keep the account password at most 14 characters
+        # ("A" + 10 hex + "!a1") to avoid the prompt entirely.
+        $password = "A$(New-RandomHex 5)!a1"
+    }
     # EAP=Stop turns REDIRECTED native stderr into a terminating
     # NativeCommandError in PS 5.1 (same idiom as Wait-PostgresReady). "Account
-    # not found" is the normal fresh-install/idempotent case, so probe and delete
-    # with EAP dropped to Continue and gate everything on $LASTEXITCODE.
+    # not found" is the normal create case, so probe and update with EAP dropped
+    # to Continue and gate everything on $LASTEXITCODE.
     $oldEap = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
         & net.exe user $accountName 2>$null | Out-Null
         $accountExists = $LASTEXITCODE -eq 0
         if ($accountExists) {
-            & net.exe user $accountName "/delete" 2>$null | Out-Null
-            if ($LASTEXITCODE -ne 0) {
-                throw "could not remove the legacy native service account; run install from an elevated PowerShell"
-            }
-            Write-NativeEvent "removed legacy native service account $accountName"
+            & net.exe user $accountName $password "/active:yes" "/passwordchg:no" "/expires:never" | Out-Null
+        } else {
+            & net.exe user $accountName $password "/add" "/active:yes" "/passwordchg:no" "/expires:never" | Out-Null
         }
     } finally {
         $ErrorActionPreference = $oldEap
     }
+    if ($LASTEXITCODE -ne 0) {
+        throw "could not create or update the native service account; run install from an elevated PowerShell"
+    }
+    [System.IO.File]::WriteAllText($passwordPath, $password, [System.Text.UTF8Encoding]::new($false))
+    return $accountName
+}
+
+function Read-NativeServiceCredential {
+    $accountName = Get-NativeServiceAccountName
+    $passwordPath = Join-Path $script:Root "config\service-password.txt"
+    if (-not (Test-Path -LiteralPath $passwordPath -PathType Leaf)) {
+        throw "native service account is missing; run install first"
+    }
+    $password = (Get-Content -LiteralPath $passwordPath -Raw).Trim()
+    if ([string]::IsNullOrWhiteSpace($password)) {
+        throw "native service account password is empty"
+    }
+    $principal = "{0}\{1}" -f $env:COMPUTERNAME, $accountName
+    $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+    return [PSCredential]::new($principal, $securePassword)
+}
+
+function Read-NativeServicePassword {
+    $passwordPath = Join-Path $script:Root "config\service-password.txt"
+    if (-not (Test-Path -LiteralPath $passwordPath -PathType Leaf)) {
+        throw "native service account is missing; run install first"
+    }
+    $password = (Get-Content -LiteralPath $passwordPath -Raw).Trim()
+    if ([string]::IsNullOrWhiteSpace($password)) {
+        throw "native service account password is empty"
+    }
+    return $password
+}
+
+function Ensure-NativeBatchLogonRight {
+    # Register-ScheduledTask -User/-Password stores the credential but does NOT
+    # grant "Log on as a batch job" (SeBatchLogonRight); without it the task
+    # fails 0x80070569 (ERROR_LOGON_TYPE_NOT_GRANTED). Grant idempotently via
+    # LsaAddAccountRights. Only used in account mode.
+    $accountName = Get-NativeServiceAccountName
+    $csharp = @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class NativeBatchLogon
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LSA_UNICODE_STRING
+    {
+        public ushort Length;
+        public ushort MaximumLength;
+        public IntPtr Buffer;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LSA_OBJECT_ATTRIBUTES
+    {
+        public int Length;
+        public IntPtr RootDirectory;
+        public IntPtr ObjectName;
+        public uint Attributes;
+        public IntPtr SecurityDescriptor;
+        public IntPtr SecurityQualityOfService;
+    }
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern uint LsaOpenPolicy(IntPtr SystemName, ref LSA_OBJECT_ATTRIBUTES ObjectAttributes, uint DesiredAccess, out IntPtr PolicyHandle);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern uint LsaAddAccountRights(IntPtr PolicyHandle, byte[] AccountSid, LSA_UNICODE_STRING[] UserRights, uint CountOfRights);
+    [DllImport("advapi32.dll")]
+    private static extern int LsaClose(IntPtr ObjectHandle);
+    [DllImport("advapi32.dll")]
+    private static extern uint LsaNtStatusToWinError(uint Status);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool LookupAccountName(string lpSystemName, string lpAccountName, byte[] Sid, ref uint cbSid, StringBuilder ReferencedDomainName, ref uint cchReferencedDomainName, out int peUse);
+
+    public static void Grant(string accountName)
+    {
+        byte[] sid = new byte[1024];
+        uint cbSid = (uint)sid.Length;
+        StringBuilder domain = new StringBuilder(256);
+        uint cbDomain = (uint)domain.Capacity;
+        int use;
+        if (!LookupAccountName(null, accountName, sid, ref cbSid, domain, ref cbDomain, out use))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        Array.Resize(ref sid, (int)cbSid);
+        LSA_OBJECT_ATTRIBUTES attrs = new LSA_OBJECT_ATTRIBUTES();
+        attrs.Length = Marshal.SizeOf(typeof(LSA_OBJECT_ATTRIBUTES));
+        IntPtr policy;
+        // LsaAddAccountRights needs POLICY_CREATE_ACCOUNT; POLICY_ALL_ACCESS covers
+        // it and is available to an elevated admin token.
+        const uint POLICY_ALL_ACCESS = 0xF0FFF;
+        uint status = LsaOpenPolicy(IntPtr.Zero, ref attrs, POLICY_ALL_ACCESS, out policy);
+        if (status != 0)
+            throw new Win32Exception((int)LsaNtStatusToWinError(status));
+        try
+        {
+            LSA_UNICODE_STRING[] rights = new LSA_UNICODE_STRING[1];
+            rights[0].Buffer = Marshal.StringToHGlobalUni("SeBatchLogonRight");
+            rights[0].Length = (ushort)("SeBatchLogonRight".Length * 2);
+            rights[0].MaximumLength = (ushort)(("SeBatchLogonRight".Length + 1) * 2);
+            uint st = LsaAddAccountRights(policy, sid, rights, 1);
+            Marshal.FreeHGlobal(rights[0].Buffer);
+            if (st != 0)
+                throw new Win32Exception((int)LsaNtStatusToWinError(st));
+        }
+        finally
+        {
+            LsaClose(policy);
+        }
+    }
+}
+'@
+    if (-not ("NativeBatchLogon" -as [type])) {
+        Add-Type -TypeDefinition $csharp -ErrorAction Stop
+    }
+    [NativeBatchLogon]::Grant($accountName)
+    Write-NativeEvent "granted SeBatchLogonRight to $accountName"
+}
+
+function Protect-NativeRuntime([string]$pythonRoot = $null, [string]$mode = "task") {
+    $currentPrincipal = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    # icacls drops an inheritable "(OI)(CI)" grant when it lands on a leaf FILE,
+    # which leaves files with an EMPTY DACL (everyone denied) once the inherited
+    # ACEs are stripped by /inheritance:r. Grant each principal BOTH an
+    # inheritable form (applied to directories, inherited by future children)
+    # and a plain form (applied to existing leaf files); icacls keeps the right
+    # one per object type. SYSTEM (*S-1-5-18) and NETWORK SERVICE (*S-1-5-20) are
+    # always granted; account mode additionally grants the dedicated service
+    # account (PostgreSQL refuses any administrative token, so the process
+    # identity must be unprivileged).
+    $rules = @(
+        ("{0}:(OI)(CI)F" -f $currentPrincipal), ("{0}:F" -f $currentPrincipal),
+        "*S-1-5-18:(OI)(CI)F", "*S-1-5-18:F",
+        "*S-1-5-20:(OI)(CI)F", "*S-1-5-20:F",
+        "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-32-544:F"
+    )
+    if ($mode -eq "account") {
+        $servicePrincipal = "{0}\{1}" -f $env:COMPUTERNAME, (Get-NativeServiceAccountName)
+        $rules += @(("{0}:(OI)(CI)F" -f $servicePrincipal), ("{0}:F" -f $servicePrincipal))
+    }
+    & icacls.exe $script:Root /inheritance:r /grant:r $rules /T /C | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "could not restrict the native runtime directory ACL"
+    }
+    if ($pythonRoot -and (Test-Path -LiteralPath $pythonRoot -PathType Container)) {
+        # The base interpreter can live outside the runtime (a per-user Python
+        # install under the profile); the service identity needs read+execute on
+        # it to run the services. /grant:r here only touches the listed ACEs, it
+        # does not reset inheritance on the user's Python directory.
+        $pythonGrants = @("*S-1-5-20:(OI)(CI)RX")
+        if ($mode -eq "account") {
+            $servicePrincipal = "{0}\{1}" -f $env:COMPUTERNAME, (Get-NativeServiceAccountName)
+            $pythonGrants += ("{0}:(OI)(CI)RX" -f $servicePrincipal)
+        }
+        & icacls.exe $pythonRoot "/grant:r" $pythonGrants /C | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "could not grant the service identity access to the host Python runtime"
+        }
+    }
+}
+
+function Remove-NativeLegacyServiceAccount {
+    # Only meaningful when the dedicated account exists (leaving account mode):
+    # the watchdog task's stored password references that account, so the task
+    # must be unregistered before the account is deleted. When the account does
+    # not exist (task/system mode), this is a no-op — the task is left untouched
+    # and Register-NativeWatchdogTask re-registers it with the mode's principal
+    # (-Force replaces the principal without an unregister, avoiding a window
+    # where the watchdog task briefly does not exist).
+    $accountName = "AshareAIService"
+    $oldEap = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & net.exe user $accountName 2>$null | Out-Null
+        $accountExists = $LASTEXITCODE -eq 0
+    } finally {
+        $ErrorActionPreference = $oldEap
+    }
+    if ($accountExists) {
+        try { Stop-ScheduledTask -TaskName $script:WatchdogTaskName -ErrorAction SilentlyContinue } catch { }
+        Unregister-ScheduledTask -TaskName $script:WatchdogTaskName -Confirm:$false -ErrorAction SilentlyContinue
+        & net.exe user $accountName "/delete" 2>$null | Out-Null
+        Write-NativeEvent "removed native service account $accountName"
+    }
     $passwordPath = Join-Path $script:Root "config\service-password.txt"
     if (Test-Path -LiteralPath $passwordPath -PathType Leaf) {
         Remove-Item -LiteralPath $passwordPath -Force
-        Write-NativeEvent "removed legacy native service password file"
+        Write-NativeEvent "removed native service password file"
     }
+}
+
+function Apply-NativeIdentity([string]$pythonRoot = $null) {
+    # Reconcile the account / ACLs / watchdog task to the mode chosen in the web
+    # system settings (config/runtime-identity.json). Idempotent; runs on every
+    # elevated install / repair / start so a mode change takes effect on the next
+    # administrator command.
+    $mode = Get-NativeIdentityMode
+    if (-not $pythonRoot) {
+        $pathsFile = Join-Path $script:Root "config\native-paths.json"
+        if (Test-Path -LiteralPath $pathsFile -PathType Leaf) {
+            $paths = Get-Content -Raw -LiteralPath $pathsFile | ConvertFrom-Json
+            if ($paths.python_exe) { $pythonRoot = Split-Path -Parent ([string]$paths.python_exe) }
+        }
+    }
+    if ($mode -eq "account") {
+        Ensure-NativeServiceAccount $pythonRoot
+        Ensure-NativeBatchLogonRight
+    } else {
+        Remove-NativeLegacyServiceAccount
+    }
+    Protect-NativeRuntime $pythonRoot $mode
+    Register-NativeWatchdogTask
+    Write-NativeEvent "applied native identity mode $mode"
 }
 
 function Write-NativeEnv([string]$postgresPassword, [string]$redisPassword, [string]$adminPassword, [string]$fernetKey) {
@@ -912,17 +1110,31 @@ function Get-NativeTaskSummary([switch]$Fast) {
 }
 
 function Register-NativeWatchdogTask {
+    $mode = Get-NativeIdentityMode
     $powerShell = Get-NativePowerShellPath
     $action = New-ScheduledTaskAction -Execute $powerShell -Argument (Get-NativeTaskArguments) -WorkingDirectory $script:Root
     $trigger = New-ScheduledTaskTrigger -AtStartup
-    # Run the watchdog as the built-in NETWORK SERVICE account: unprivileged (so
-    # the PostgreSQL children it launches are accepted), passwordless, works at
-    # boot. TASK_LOGON_SERVICE_ACCOUNT needs no password and no SeBatchLogonRight.
-    $servicePrincipal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\NETWORK SERVICE" -LogonType ServiceAccount -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 365)
-    Register-ScheduledTask -TaskName $script:WatchdogTaskName -Action $action -Trigger $trigger -Settings $settings -Principal $servicePrincipal -Force | Out-Null
+    switch ($mode) {
+        "account" {
+            # Dedicated local account with password logon; needs the
+            # SeBatchLogonRight grant from Ensure-NativeBatchLogonRight.
+            $servicePrincipal = "{0}\{1}" -f $env:COMPUTERNAME, (Get-NativeServiceAccountName)
+            $servicePassword = Read-NativeServicePassword
+            Register-ScheduledTask -TaskName $script:WatchdogTaskName -Action $action -Trigger $trigger -Settings $settings -User $servicePrincipal -Password $servicePassword -RunLevel Limited -Force | Out-Null
+            Write-NativeEvent "registered account watchdog task $($script:WatchdogTaskName)"
+        }
+        default {
+            # Built-in NETWORK SERVICE account (default): unprivileged (so the
+            # PostgreSQL children it launches are accepted), passwordless, works
+            # at boot. TASK_LOGON_SERVICE_ACCOUNT needs no password and no
+            # SeBatchLogonRight.
+            $servicePrincipal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\NETWORK SERVICE" -LogonType ServiceAccount -RunLevel Highest
+            Register-ScheduledTask -TaskName $script:WatchdogTaskName -Action $action -Trigger $trigger -Settings $settings -Principal $servicePrincipal -Force | Out-Null
+            Write-NativeEvent "registered NETWORK SERVICE watchdog task $($script:WatchdogTaskName)"
+        }
+    }
     Write-AtomicText $script:TaskNamePath $script:WatchdogTaskName
-    Write-NativeEvent "registered NETWORK SERVICE watchdog task $($script:WatchdogTaskName)"
 }
 
 function Ensure-NativeWatchdogTask {
@@ -1005,7 +1217,7 @@ function Test-NativeRuntimeHealthyFast($services) {
     return $true
 }
 
-function Start-ManagedProcess([string]$name, [string]$filePath, [string[]]$arguments, [string]$workingDirectory, [hashtable]$environment = @{}, [string]$role = $name, [string]$embeddedIn = $null) {
+function Start-ManagedProcess([string]$name, [string]$filePath, [string[]]$arguments, [string]$workingDirectory, [hashtable]$environment = @{}, [string]$role = $name, [string]$embeddedIn = $null, [PSCredential]$credential = $null) {
     $old = @{}
     foreach ($key in $environment.Keys) {
         $old[$key] = (Get-Item -Path ("Env:{0}" -f $key) -ErrorAction SilentlyContinue).Value
@@ -1013,9 +1225,10 @@ function Start-ManagedProcess([string]$name, [string]$filePath, [string[]]$argum
     }
     try {
         $logBase = Join-Path $script:Root ("logs\{0}" -f $name)
-        # No -Credential: the child inherits the caller's process AND environment,
-        # so the env vars set above reach the real process directly (the
-        # launch-*.ps1 wrapper that existed for the service-account case is gone).
+        # Without -Credential (task mode) the child inherits the caller's
+        # process AND environment, so the env vars set above reach the real
+        # process directly. Account mode passes a credential and goes through the
+        # launcher wrapper below.
         $startOptions = @{
             FilePath = $filePath
             ArgumentList = $arguments
@@ -1024,6 +1237,51 @@ function Start-ManagedProcess([string]$name, [string]$filePath, [string[]]$argum
             RedirectStandardError = "$logBase.err.log"
             WindowStyle = "Hidden"
             PassThru = $true
+        }
+        if ($credential) {
+            $startOptions.Credential = $credential
+            $startOptions.LoadUserProfile = $true
+            if ($environment.Count -gt 0) {
+                # PowerShell 5.1 Start-Process -Credential launches the child with
+                # the TARGET USER's default environment, NOT the caller's — so env
+                # vars set above would never reach the real process (verified: the
+                # service account's own PATH/USERNAME appear in the child, and a
+                # caller-set variable is missing). Start-Process -Environment is
+                # PS 6+ only. Workaround: run a launcher .ps1 as the service
+                # account that sets each variable inside its own process, then
+                # runs the real command as a direct synchronous child. The
+                # launcher PID is the tracked pid, so Stop-NativeProcessTree still
+                # tears down the whole tree, and the redirected stdout/stderr
+                # handles pass through to the child.
+                $launcher = Join-Path $script:Root ("config\launch-{0}.ps1" -f $name)
+                $lines = @('$ErrorActionPreference = "Stop"')
+                foreach ($key in $environment.Keys) {
+                    $value = ([string]$environment[$key]).Replace("'", "''")
+                    $lines += ('$env:{0} = ''{1}''' -f $key, $value)
+                }
+                $escapedFile = $filePath.Replace("'", "''")
+                $argList = @()
+                foreach ($argument in $arguments) { $argList += ("'" + $argument.Replace("'", "''") + "'") }
+                # Invoking a GUI-subsystem exe (pythonw.exe) with the & operator does
+                # NOT block — PowerShell starts it asynchronously and the launcher
+                # would exit, orphaning the service and leaving a dead tracked PID.
+                # Start-Process -PassThru keeps the launcher alive as the real parent
+                # so Stop-NativeProcessTree can still tear the tree down. Redirect the
+                # inner process's stdout/stderr to dedicated files too: pythonw has no
+                # console, so without a redirect the service's output vanishes (run8's
+                # api failed with zero output anywhere, hiding the failure entirely).
+                $innerOut = Join-Path $script:Root ("logs\{0}.inner.out.log" -f $name)
+                $innerErr = Join-Path $script:Root ("logs\{0}.inner.err.log" -f $name)
+                if ($argList.Count -gt 0) {
+                    $lines += ("`$p = Start-Process -FilePath '{0}' -ArgumentList {1} -RedirectStandardOutput '{2}' -RedirectStandardError '{3}' -PassThru -WindowStyle Hidden" -f $escapedFile, ($argList -join ", "), $innerOut.Replace("'", "''"), $innerErr.Replace("'", "''"))
+                } else {
+                    $lines += ("`$p = Start-Process -FilePath '{0}' -RedirectStandardOutput '{1}' -RedirectStandardError '{2}' -PassThru -WindowStyle Hidden" -f $escapedFile, $innerOut.Replace("'", "''"), $innerErr.Replace("'", "''"))
+                }
+                $lines += "`$p.WaitForExit()"
+                Write-AtomicText $launcher ($lines -join "`r`n")
+                $startOptions.FilePath = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+                $startOptions.ArgumentList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $launcher)
+            }
         }
         $process = Start-Process @startOptions
     } finally {
@@ -1053,10 +1311,12 @@ function Wait-NativeHttp([string]$uri) {
 }
 
 function Wait-NativeStartupReady {
-    # The watchdog task (NETWORK SERVICE) brings the stack up asynchronously
-    # after Start-ScheduledTask; the first loop can take a while because it runs
+    # The watchdog task brings the stack up asynchronously after
+    # Start-ScheduledTask; the first loop can take a while because it runs
     # migrations and waits for PostgreSQL. Poll until the tracked services are
     # alive and the API answers, mirroring Invoke-StartCore's readiness checks.
+    # Load the configured ports first: the api may be on a Reconcile-shifted port.
+    [void](Get-NativePortsFromFile)
     $deadline = [DateTime]::UtcNow.AddSeconds(180)
     while ([DateTime]::UtcNow -lt $deadline) {
         $services = @(Read-State)
@@ -1251,9 +1511,7 @@ function Invoke-Install {
         version = $script:NativeVersion
     } | ConvertTo-Json -Depth 8))
     Write-NativePortConfig
-    Remove-NativeLegacyServiceAccount
-    Protect-NativeRuntime (Split-Path -Parent $pythonExecutablePath)
-    Register-NativeWatchdogTask
+    Apply-NativeIdentity (Split-Path -Parent $pythonExecutablePath)
     $secretFile = Join-Path $script:Root "config\admin-credentials.txt"
     Write-Host "Native installation is ready at $script:Root"
     Write-Host "The generated administrator credentials are stored in $secretFile"
@@ -1267,14 +1525,12 @@ function Invoke-StartCore([switch]$ForWatchdog) {
     $pathsFile = Join-Path $script:Root "config\native-paths.json"
     if (-not (Test-Path -LiteralPath $pathsFile -PathType Leaf)) { throw "native paths are missing; run install first" }
     $paths = Get-Content -Raw -LiteralPath $pathsFile | ConvertFrom-Json
-    if (-not $paths.postgres_port -or -not $paths.redis_port -or -not $paths.api_port -or -not $paths.searxng_port) {
+    # native-ports.json is the single authoritative port store (Write-NativePortConfig
+    # keeps native-paths.json's *_port fields in sync, but StartCore must not read
+    # them back — a stale paths snapshot would pin the api to a drifted port).
+    if (-not (Get-NativePortsFromFile)) {
         throw "native port configuration is missing; run install first"
     }
-    [void](Get-NativePortsFromFile)
-    $script:PostgresPort = [int]$paths.postgres_port
-    $script:RedisPort = [int]$paths.redis_port
-    $script:ApiPort = [int]$paths.api_port
-    $script:SearxngPort = [int]$paths.searxng_port
     $pythonExecutable = if ($paths.python_exe -and (Test-Path -LiteralPath $paths.python_exe -PathType Leaf)) {
         [string]$paths.python_exe
     } else {
@@ -1310,6 +1566,9 @@ function Invoke-StartCore([switch]$ForWatchdog) {
     Write-NativeEvent "starting native process group"
     Reconcile-NativePorts
     $paths = Get-Content -Raw -LiteralPath $pathsFile | ConvertFrom-Json
+    # account mode launches every service with -Credential (independent of the
+    # caller's identity); task mode inherits the watchdog's identity.
+    $serviceCredential = if ((Get-NativeIdentityMode) -eq "account") { Read-NativeServiceCredential } else { $null }
     $envValues = @{}
     Get-Content -LiteralPath $script:EnvPath | Where-Object { $_ -match "^(?<key>[A-Z0-9_]+)=(?<value>.*)$" } | ForEach-Object { $envValues[$Matches.key] = $Matches.value }
     # The Windows venv launcher keeps a second process alive. Long-lived native
@@ -1351,7 +1610,7 @@ function Invoke-StartCore([switch]$ForWatchdog) {
             "-c", "effective_cache_size=128MB"
         )
         Assert-NativePortFree $script:PostgresPort
-        $services += Start-ManagedProcess "postgres" $postgres $postgresArguments $script:Root @{} "postgres" $null
+        $services += Start-ManagedProcess "postgres" $postgres $postgresArguments $script:Root @{} "postgres" $null $serviceCredential
         Write-NativeEvent "postgres process started pid=$($services[-1].pid)"
         Wait-PostgresReady $pgIsReady
         Assert-NativePortOwned $script:PostgresPort $services
@@ -1394,7 +1653,7 @@ function Invoke-StartCore([switch]$ForWatchdog) {
         # file parameter : bind") and exit immediately.
         [System.IO.File]::WriteAllLines($redisConfig, $redisConfLines, [System.Text.UTF8Encoding]::new($false))
         Assert-NativePortFree $script:RedisPort
-        $services += Start-ManagedProcess "redis" (Join-Path $paths.redis_bin "redis-server.exe") @($redisConfig) $script:Root @{} "redis" $null
+        $services += Start-ManagedProcess "redis" (Join-Path $paths.redis_bin "redis-server.exe") @($redisConfig) $script:Root @{} "redis" $null $serviceCredential
         Write-NativeEvent "redis process started pid=$($services[-1].pid)"
         Wait-RedisReady $redisCli $redisPassword
         Assert-NativePortOwned $script:RedisPort $services
@@ -1407,7 +1666,7 @@ function Invoke-StartCore([switch]$ForWatchdog) {
         $searxEnv.GIT_CONFIG_GLOBAL = (Join-Path $script:Root "config\gitconfig")
         $searxPython = $pythonWindowlessExecutable
         Assert-NativePortFree $script:SearxngPort
-        $services += Start-ManagedProcess "searxng" $searxPython @("-m", "searx.webapp") $paths.searxng_root $searxEnv "searxng" $null
+        $services += Start-ManagedProcess "searxng" $searxPython @("-m", "searx.webapp") $paths.searxng_root $searxEnv "searxng" $null $serviceCredential
         Write-NativeEvent "searxng process started pid=$($services[-1].pid)"
         Wait-NativeHttp "http://127.0.0.1:$script:SearxngPort/healthz"
         Assert-NativePortOwned $script:SearxngPort $services
@@ -1421,16 +1680,16 @@ function Invoke-StartCore([switch]$ForWatchdog) {
         New-Item -ItemType Directory -Force -Path $apiEnv.EDGE_GATEWAY_SOURCE_DIR | Out-Null
         New-Item -ItemType Directory -Force -Path $apiEnv.EDGE_GATEWAY_LOG_DIR | Out-Null
         Assert-NativePortFree $script:ApiPort
-        $services += Start-ManagedProcess "api" $searxPython @("-m", "ashare_ai.cli", "api", "--host", "127.0.0.1", "--port", "$script:ApiPort") $script:Root $apiEnv "api" $null
+        $services += Start-ManagedProcess "api" $searxPython @("-m", "ashare_ai.cli", "api", "--host", "127.0.0.1", "--port", "$script:ApiPort") $script:Root $apiEnv "api" $null $serviceCredential
         Write-NativeEvent "api process started pid=$($services[-1].pid)"
         Wait-NativeHttp "http://127.0.0.1:$script:ApiPort/api/v1/health"
         Assert-NativePortOwned $script:ApiPort $services
         $services += [pscustomobject]@{ name = "web"; role = "web"; pid = $services[-1].pid; embedded_in = "api"; started_at = [DateTime]::UtcNow.ToString("o") }
-        $services += Start-ManagedProcess "job-worker" $searxPython @("-m", "ashare_ai.orchestration.serial_worker") $script:Root $envValues "job-worker" $null
-        $services += Start-ManagedProcess "exit-advice-worker" $searxPython @("-m", "ashare_ai.orchestration.exit_advice_worker") $script:Root $envValues "exit-advice-worker" $null
+        $services += Start-ManagedProcess "job-worker" $searxPython @("-m", "ashare_ai.orchestration.serial_worker") $script:Root $envValues "job-worker" $null $serviceCredential
+        $services += Start-ManagedProcess "exit-advice-worker" $searxPython @("-m", "ashare_ai.orchestration.exit_advice_worker") $script:Root $envValues "exit-advice-worker" $null $serviceCredential
         if ($ResearchMode -eq "DUAL" -and $ResearchWorkers -gt 0) {
             for ($index = 1; $index -le $ResearchWorkers; $index++) {
-                $services += Start-ManagedProcess ("research-worker-{0}" -f $index) $searxPython @("-m", "ashare_ai.orchestration.research_worker") $script:Root $envValues "research-worker" $null
+                $services += Start-ManagedProcess ("research-worker-{0}" -f $index) $searxPython @("-m", "ashare_ai.orchestration.research_worker") $script:Root $envValues "research-worker" $null $serviceCredential
             }
         }
         Write-State $services
@@ -1494,23 +1753,35 @@ function Invoke-StopCore {
 function Invoke-Start([switch]$ForWatchdog) {
     $mutex = Enter-NativeManagementLock
     try {
+        if (-not $ForWatchdog) {
+            # Reconcile the account/task/ACL to the mode chosen in the web
+            # settings, so a mode change takes effect on this start.
+            Apply-NativeIdentity
+        }
         Set-NativeDesiredState "RUNNING"
         Write-NativeEvent "native runtime start requested"
         if ($ForWatchdog) {
-            # Only the watchdog (running as NETWORK SERVICE) may launch the
-            # service processes. An interactive shell is typically elevated, and
-            # PostgreSQL refuses to boot under an administrative token, so the
-            # inline start must never run from the caller's identity.
+            # Only the watchdog (running as the mode's task identity) may launch
+            # the service processes for task mode. An interactive shell
+            # is typically elevated, and PostgreSQL refuses to boot under an
+            # administrative token, so the inline start must never run from the
+            # caller's identity.
             Invoke-StartCore -ForWatchdog:$true
+        } elseif ((Get-NativeIdentityMode) -eq "account") {
+            # account mode launches every service with -Credential, so the
+            # caller's identity never leaks into the services; inline start is fine.
+            Invoke-StartCore -ForWatchdog:$false
         }
     } finally {
         Exit-NativeMutex $mutex
     }
     if (-not $ForWatchdog) {
-        # Flip desired state and let the NETWORK SERVICE watchdog task bring the
-        # stack up, then wait for readiness before reporting.
+        # Flip desired state and let the watchdog task bring the stack up (or
+        # start services inline in account mode), then wait for readiness.
         Start-NativeWatchdogTask
-        Wait-NativeStartupReady
+        if ((Get-NativeIdentityMode) -ne "account") {
+            Wait-NativeStartupReady
+        }
     }
 }
 
@@ -1540,7 +1811,7 @@ function Invoke-Repair {
         Set-NativeDesiredState "STOPPED"
         if (-not (Get-NativePortsFromFile)) { throw "native port configuration is missing; run install first" }
         Reconcile-NativePorts
-        Ensure-NativeWatchdogTask
+        Apply-NativeIdentity
         Write-NativeEvent "native runtime configuration repaired"
         Write-Host "Native runtime management is repaired"
     } finally {
@@ -1550,7 +1821,10 @@ function Invoke-Repair {
 
 function Invoke-Watchdog {
     Assert-ExternalRoot
-    Ensure-NativeWatchdogTask
+    # No Ensure-NativeWatchdogTask here: the watchdog was launched BY the task,
+    # so the task is registered by definition, and re-registering at runtime would
+    # fail for account mode (the service account cannot write to the Task Scheduler
+    # store). Registration/application happens on elevated install/start/repair.
     $mutex = New-NativeMutex $script:WatchdogMutexName
     try {
         try {
@@ -1623,6 +1897,7 @@ function Invoke-Status {
     $report | Add-Member -NotePropertyName watchdog_task -NotePropertyValue $task
     $report | Add-Member -NotePropertyName watchdog -NotePropertyValue $watchdog
     $report | Add-Member -NotePropertyName installation -NotePropertyValue $installation
+    $report | Add-Member -NotePropertyName identity_mode -NotePropertyValue (Get-NativeIdentityMode)
     if ($Json) { $report | ConvertTo-Json -Depth 10 -Compress:$Fast; return }
     if ($services.Count -eq 0) { Write-Host "Native runtime is stopped"; return }
     $report.services | Format-Table service, role, pid, healthy, working_set_mib, embedded_in -AutoSize
@@ -1630,6 +1905,7 @@ function Invoke-Status {
     Write-Host ("Ports: postgres={0}, redis={1}, api={2}, searxng={3}" -f $script:PostgresPort, $script:RedisPort, $script:ApiPort, $script:SearxngPort)
     $watchdogStatus = if ($watchdog) { $watchdog.status } else { "MISSING" }
     Write-Host ("Watchdog task: {0} ({1}); process: {2}" -f $task.task_name, $task.state, $watchdogStatus)
+    Write-Host ("Identity mode: {0}" -f $report.identity_mode)
     Write-Host ("Process-group working set: {0} MiB" -f $report.total_working_set_mib)
 }
 

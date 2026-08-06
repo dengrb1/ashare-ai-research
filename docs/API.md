@@ -158,6 +158,7 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 模型诊断日志 | GET | `/api/v1/admin/model-settings/logs` | 管理员；脱敏探测状态与错误 |
 | 系统设置 | GET/PUT/DELETE | `/api/v1/admin/system-settings` | 管理员；PUT 幂等、写入 |
 | API 运行模式 | PUT | `/api/v1/admin/runtime/mode` | 管理员；解锁、幂等、写入 |
+| 本机服务身份 | GET/PUT | `/api/v1/admin/runtime-identity` | 管理员；仅原生安装可写，PUT 需解锁与幂等键 |
 | 系统设置 | DELETE | `/api/v1/admin/system-settings/{field}` | 管理员、写入 |
 | 系统设置解锁 | POST | `/api/v1/admin/system-settings/unlock` | 管理员、写入；当前账户密码二次验证 |
 | 系统资源 | GET | `/api/v1/admin/system-resources` | 管理员；运行环境只读指标 |
@@ -475,6 +476,13 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 `GET /api/v1/admin/model-settings/logs?limit=50` 返回最近模型探测日志，`limit` 范围为 1–200。每项包含 `model`、`purpose`、`protocol`、`endpoint_path`、`request_mode`、`outcome`、`http_status`、`error_code`、`message`、`duration_ms`、`header_presence` 和 `created_at`。日志不保存 API Key、Authorization 值、Prompt 或上游完整响应正文；`header_presence` 只表示必要请求头是否已生成。
 
 ### 系统设置中心
+
+原生安装可通过 `GET /api/v1/admin/runtime-identity` 读取看门狗与服务运行身份。Docker
+部署返回 `applicable=false`、`platform="docker"`，身份由 Compose 管理。Windows 与 Linux
+原生安装可选择 `task`（默认非特权任务身份）或 `account`（专用非特权账户）；高权限的
+`system` 模式已停用，因为 PostgreSQL 拒绝以 SYSTEM/root 权限运行。修改时必须携带当前
+管理员的 `X-System-Settings-Unlock` 和 `Idempotency-Key`，配置会原子写入原生运行目录的
+`config/runtime-identity.json`，并在下一次管理员执行 `start`、`install` 或 `repair` 时生效。
 
 ### API 运行模式
 

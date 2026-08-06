@@ -6,6 +6,9 @@ on:
       - "**"
     tags:
       - "v*"
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -20,6 +23,42 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
+  quality:
+    name: Test and static analysis
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip && python -m pip install ".[dev]"
+
+      - name: Run Python checks
+        run: |
+          python -m ruff check .
+          python -m mypy src
+          python -m pytest tests/unit -q
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Run web checks
+        working-directory: web
+        run: |
+          npm ci
+          npm test -- --run
+          npm run build
+
   docker:
     name: Build ${{ matrix.image_name }} image
     strategy:
@@ -129,3 +168,42 @@ jobs:
           path: dist/${{ matrix.binary }}
           if-no-files-found: error
           retention-days: 14
+
+  windows-installer:
+    name: Build Windows native installer
+    runs-on: windows-2022
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build native installer
+        shell: pwsh
+        run: .\windows\native-control-center\build.ps1
+
+      - name: Smoke-test native CLI
+        shell: pwsh
+        run: .\windows\native-control-center\AshareAI.NativeControlCenter.Cli.exe --help
+
+      - name: Write installer checksum
+        shell: pwsh
+        run: |
+          $setup = Resolve-Path .\windows\native-control-center\dist\AshareAI-Setup.exe
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $setup).Hash.ToLowerInvariant()
+          "$hash  AshareAI-Setup.exe" | Set-Content -Encoding ascii .\windows\native-control-center\dist\AshareAI-Setup.exe.sha256
+
+      - name: Upload Windows installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ashare-ai-windows-installer-${{ github.sha }}
+          path: |
+            windows/native-control-center/dist/AshareAI-Setup.exe
+            windows/native-control-center/dist/AshareAI-Setup.exe.sha256
+          if-no-files-found: error
+          retention-days: 30

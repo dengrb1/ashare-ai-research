@@ -30,7 +30,11 @@ def _kline(symbol: str, index: int) -> dict:
 
 
 def payload(kline_count: int) -> dict:
-    return {"id": "req-bench", "ok": True, "items": [_kline("600519.SH", i) for i in range(kline_count)]}
+    return {
+        "id": "req-bench",
+        "ok": True,
+        "items": [_kline("600519.SH", i) for i in range(kline_count)],
+    }
 
 
 def bench(name: str, obj: dict, *, dumps: callable, runs: int = 30) -> float:
@@ -47,7 +51,9 @@ def bench(name: str, obj: dict, *, dumps: callable, runs: int = 30) -> float:
 
 
 def stdlib_dumps(obj: dict) -> bytes:
-    return json.dumps(obj, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+    return json.dumps(obj, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode(
+        "utf-8"
+    )
 
 
 def orjson_dumps(obj: dict) -> bytes:
@@ -69,7 +75,10 @@ if __name__ == "__main__":
     near_cap = payload(near_cap_count)
     shapes["near-8MiB cap"] = near_cap
 
-    print(f"near-8MiB payload: {near_cap_count} klines, stdlib size={len(stdlib_dumps(near_cap))/1048576:.2f} MiB\n")
+    print(
+        f"near-8MiB payload: {near_cap_count} klines, "
+        f"stdlib size={len(stdlib_dumps(near_cap)) / 1048576:.2f} MiB\n"
+    )
     for shape, obj in shapes.items():
         stdlib_ms = bench(f"stdlib {shape}", obj, dumps=stdlib_dumps)
         orjson_ms = bench(f"orjson {shape}", obj, dumps=orjson_dumps)

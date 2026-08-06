@@ -82,6 +82,16 @@ export interface SystemResources {
   warnings: string[]
 }
 
+export type RuntimeIdentityMode = 'task' | 'account' | 'system'
+
+export interface RuntimeIdentity {
+  mode: RuntimeIdentityMode | null
+  applicable: boolean
+  platform: 'windows' | 'linux' | 'docker'
+  supported_modes: RuntimeIdentityMode[]
+  note?: string | null
+}
+
 export interface SystemSettingsUnlock {
   unlock_token: string
   expires_at: string

@@ -262,6 +262,7 @@ class Controller:
             },
             "watchdog": watchdog if isinstance(watchdog, dict) else None,
             "installation": self.installation(),
+            "identity_mode": self.get_identity_mode(),
         }
 
     @staticmethod
@@ -283,8 +284,63 @@ class Controller:
                     values[key] = value
         return values
 
+    def get_identity_mode(self) -> str:
+        # Shared with the Windows controller and the web settings API:
+        # config/runtime-identity.json -> "task" | "account".
+        value = read_json(self.config / "runtime-identity.json", {})
+        if isinstance(value, dict) and value.get("mode") in ("task", "account"):
+            return str(value["mode"])
+        return "task"
+
+    def identity_invocation(self, command: list[str]) -> list[str]:
+        """Prefix a process command with the mode's identity wrapper.
+
+        - task (default): run as the invoking user, no wrapper.
+        - account: run as the dedicated unprivileged user 'ashareai' via setpriv
+          (root) or sudo -E (preserves the caller environment for the target).
+        """
+        mode = self.get_identity_mode()
+        if mode == "task":
+            return command
+        if mode == "account":
+            if os.geteuid() == 0:
+                return [
+                    "setpriv",
+                    "--reuid",
+                    "ashareai",
+                    "--regid",
+                    "ashareai",
+                    "--init-groups",
+                    *command,
+                ]
+            sudo = find_binary("sudo")
+            if sudo:
+                return [sudo, "-E", "-u", "ashareai", *command]
+            raise NativeError("account mode requires root or sudo to run services as 'ashareai'")
+        return command
+
+    def ensure_identity(self) -> None:
+        # Create the dedicated account-mode user and make the runtime writable by
+        # it. Only possible as root; a non-root install leaves this to the admin.
+        if self.get_identity_mode() != "account" or os.geteuid() != 0:
+            return
+        if subprocess.run(["id", "ashareai"], check=False, capture_output=True).returncode != 0:
+            subprocess.run(
+                [
+                    "useradd",
+                    "--system",
+                    "--no-create-home",
+                    "--shell",
+                    "/usr/sbin/nologin",
+                    "ashareai",
+                ],
+                check=True,
+            )
+        subprocess.run(["chown", "-R", "ashareai:ashareai", str(self.root)], check=False)
+
     def install(self) -> None:
         self.initialize()
+        self.ensure_identity()
         python = find_binary("python3.12", "python3.11", "python3") or sys.executable
         if not python:
             raise NativeError("Python 3.11 or 3.12 is required")
@@ -459,18 +515,23 @@ class Controller:
             if not (pg_data / "PG_VERSION").is_file():
                 initdb = str(Path(postgres).parent / "initdb")
                 subprocess.run(
-                    [initdb, "-D", str(pg_data), "-U", "ashare", "--auth=trust"], check=True
+                    self.identity_invocation(
+                        [initdb, "-D", str(pg_data), "-U", "ashare", "--auth=trust"]
+                    ),
+                    check=True,
                 )
             subprocess.run(
-                [
-                    postgres,
-                    "-D",
-                    str(pg_data),
-                    "-o",
-                    f"-p {ports['postgres']} -h 127.0.0.1",
-                    "-w",
-                    "start",
-                ],
+                self.identity_invocation(
+                    [
+                        postgres,
+                        "-D",
+                        str(pg_data),
+                        "-o",
+                        f"-p {ports['postgres']} -h 127.0.0.1",
+                        "-w",
+                        "start",
+                    ]
+                ),
                 check=True,
             )
             postgres_pid = int(
@@ -495,31 +556,35 @@ class Controller:
                 redis_lines.append(f"requirepass {environment['REDIS_PASSWORD']}")
             atomic_write(redis_config, "\n".join(redis_lines) + "\n")
             redis_args = [redis, str(redis_config)]
-            self.start_process("redis", redis_args, environment, services)
+            self.start_process("redis", self.identity_invocation(redis_args), environment, services)
             subprocess.run(
-                [python, "-m", "ashare_ai.cli", "migrate"],
+                self.identity_invocation([python, "-m", "ashare_ai.cli", "migrate"]),
                 cwd=self.source_root,
                 env=environment,
                 check=True,
             )
             self.start_process(
                 "searxng",
-                [python, "-m", "searx.webapp", "--port", str(ports["searxng"])],
+                self.identity_invocation(
+                    [python, "-m", "searx.webapp", "--port", str(ports["searxng"])]
+                ),
                 environment,
                 services,
             )
             self.start_process(
                 "api",
-                [
-                    python,
-                    "-m",
-                    "ashare_ai.cli",
-                    "api",
-                    "--host",
-                    "127.0.0.1",
-                    "--port",
-                    str(ports["api"]),
-                ],
+                self.identity_invocation(
+                    [
+                        python,
+                        "-m",
+                        "ashare_ai.cli",
+                        "api",
+                        "--host",
+                        "127.0.0.1",
+                        "--port",
+                        str(ports["api"]),
+                    ]
+                ),
                 environment,
                 services,
             )
@@ -534,13 +599,15 @@ class Controller:
             )
             self.start_process(
                 "job-worker",
-                [python, "-m", "ashare_ai.orchestration.serial_worker"],
+                self.identity_invocation([python, "-m", "ashare_ai.orchestration.serial_worker"]),
                 environment,
                 services,
             )
             self.start_process(
                 "exit-advice-worker",
-                [python, "-m", "ashare_ai.orchestration.exit_advice_worker"],
+                self.identity_invocation(
+                    [python, "-m", "ashare_ai.orchestration.exit_advice_worker"]
+                ),
                 environment,
                 services,
             )

@@ -4,7 +4,7 @@ import { Link, Navigate } from 'react-router'
 import { ApiError, api } from '../api'
 import { ErrorNotice, formatTime, Loading, Panel, StatusPill } from '../components/Ui'
 import { useAuth } from '../context/AuthContext'
-import type { SystemResources, SystemSettings, SystemSettingsDraft } from '../types'
+import type { RuntimeIdentity, SystemResources, SystemSettings, SystemSettingsDraft } from '../types'
 
 type FieldKind = 'number' | 'text' | 'checkbox'
 type Field = { key: string; label: string; kind: FieldKind; hint?: string }
@@ -85,6 +85,10 @@ export function SystemSettingsPage() {
   const [resourceError, setResourceError] = useState('')
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
+  const [runtimeIdentity, setRuntimeIdentity] = useState<RuntimeIdentity | null>(null)
+  const [identityError, setIdentityError] = useState('')
+  const [identityMessage, setIdentityMessage] = useState('')
+  const [identitySaving, setIdentitySaving] = useState(false)
   const [clock, setClock] = useState(Date.now())
   const unlocked = Boolean(unlockToken) && new Date(unlockExpiresAt).getTime() > clock
 
@@ -115,12 +119,21 @@ export function SystemSettingsPage() {
     }
   }, [])
 
+  const loadRuntimeIdentity = useCallback(async () => {
+    try {
+      setRuntimeIdentity(await api.runtimeIdentity())
+    } catch (reason) {
+      setIdentityError(reason instanceof Error ? reason.message : '运行方式加载失败')
+    }
+  }, [])
+
   useEffect(() => {
     if (!isAdmin) return
     void loadSettings()
       .catch((reason) => setError(reason instanceof Error ? reason.message : '系统设置加载失败'))
       .finally(() => setLoading(false))
-  }, [isAdmin, loadSettings])
+    void loadRuntimeIdentity()
+  }, [isAdmin, loadSettings, loadRuntimeIdentity])
 
   useEffect(() => {
     if (!isAdmin) return
@@ -231,6 +244,22 @@ export function SystemSettingsPage() {
     } finally { setBusy(false) }
   }
 
+  async function saveRuntimeIdentity(event: FormEvent) {
+    event.preventDefault()
+    if (!runtimeIdentity?.mode) return
+    setIdentitySaving(true); setIdentityError(''); setIdentityMessage('')
+    try {
+      const next = await api.saveRuntimeIdentity(runtimeIdentity.mode, unlockToken)
+      setRuntimeIdentity(next)
+      setIdentityMessage('运行方式已保存，将在下次以管理员身份执行 start / install / repair 时生效。')
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.code === 'SYSTEM_SETTINGS_LOCKED') {
+        lock(); setUnlockOpen(true)
+      }
+      setIdentityError(reason instanceof Error ? reason.message : '保存运行方式失败')
+    } finally { setIdentitySaving(false) }
+  }
+
   function renderFields(fields: Field[]) {
     return fields.map((field) => <label key={field.key} className={field.kind === 'checkbox' ? 'system-checkbox' : ''}>{field.label}
       {field.kind === 'checkbox'
@@ -268,6 +297,19 @@ export function SystemSettingsPage() {
         <p className="resource-collected">采集于 {formatTime(resources?.collected_at)} · {resources?.scope || '—'}</p>
       </>}
       <ErrorNotice message={resourceError} />
+    </Panel>
+
+    <Panel title="看门狗与服务运行方式" eyebrow="RUNTIME IDENTITY" className="runtime-identity-panel">
+      {runtimeIdentity === null ? <Loading /> : runtimeIdentity.applicable ? <form className="run-form runtime-identity-form" onSubmit={saveRuntimeIdentity}>
+        <div className="identity-options">
+          <label className={runtimeIdentity.mode === 'task' ? 'selected' : ''}><input type="radio" name="runtime-identity" value="task" disabled={!unlocked || identitySaving} checked={runtimeIdentity.mode === 'task'} onChange={() => setRuntimeIdentity((previous) => previous ? { ...previous, mode: 'task' } : previous)} /><span><strong>任务计划方式</strong><small>{runtimeIdentity.platform === 'windows' ? '默认推荐 · 使用内置 NETWORK SERVICE，无密码且不新建用户' : '默认推荐 · 以当前非特权身份运行，无需额外账户'}</small></span></label>
+          <label className={runtimeIdentity.mode === 'account' ? 'selected' : ''}><input type="radio" name="runtime-identity" value="account" disabled={!unlocked || identitySaving} checked={runtimeIdentity.mode === 'account'} onChange={() => setRuntimeIdentity((previous) => previous ? { ...previous, mode: 'account' } : previous)} /><span><strong>专用账户</strong><small>{runtimeIdentity.platform === 'windows' ? '创建 AshareAIService 本地账户，由它运行看门狗任务' : '创建 ashareai 非特权用户并由它运行服务'}</small></span></label>
+        </div>
+        {runtimeIdentity.note && <div className="snapshot-isolation">{runtimeIdentity.note}</div>}
+        <div className="identity-save-row"><small className="form-hint">保存后，以管理员身份执行 start、install 或 repair 生效。</small><button className="primary" disabled={!unlocked || identitySaving}>{identitySaving ? '保存中…' : '保存运行方式'}</button></div>
+      </form> : <div className="runtime-identity-docker"><Server size={18} /><div><strong>当前由 Docker Compose 管理</strong><p>容器服务身份和重启策略由 Compose 配置控制，本机看门狗选项不适用于此部署。</p></div></div>}
+      <ErrorNotice message={identityError} />
+      {identityMessage && <div className="snapshot-isolation">{identityMessage}</div>}
     </Panel>
 
     <div className={`system-settings-lock-note ${unlocked ? 'unlocked' : ''}`}><ShieldCheck size={17} /><span>{unlocked ? '已通过当前管理员密码验证，保存与恢复操作已启用。' : '只读监控模式。解锁后才能修改、保存或恢复系统设置。'}</span></div>

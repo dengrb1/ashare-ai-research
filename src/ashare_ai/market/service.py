@@ -119,6 +119,14 @@ def normalize_symbol(value: str) -> str:
     return str(canonical_symbol(value))
 
 
+def _sina_provider_symbol(value: str) -> str:
+    code, exchange = normalize_symbol(value).split(".", 1)
+    prefix = {"SH": "sh", "SZ": "sz", "BJ": "bj"}.get(exchange)
+    if prefix is None:
+        raise ValueError(f"unsupported Sina exchange: {exchange}")
+    return f"{prefix}{code}"
+
+
 def normalize_adjustment(value: str) -> str:
     adjustment = ADJUSTMENTS.get(str(value).casefold())
     if adjustment is None:
@@ -476,13 +484,25 @@ class _AKShareInProcessProvider:
         adjustment = normalize_adjustment(adjustment)
         if period == "daily":
             effective_start = start or effective_end - timedelta(days=max(limit * 2, 365))
-            frame = sdk.stock_zh_a_hist(
-                symbol=code,
-                period="daily",
-                start_date=effective_start.strftime("%Y%m%d"),
-                end_date=effective_end.strftime("%Y%m%d"),
-                adjust="hfq" if adjustment == "hfq" else "",
-            )
+            try:
+                frame = sdk.stock_zh_a_hist(
+                    symbol=code,
+                    period="daily",
+                    start_date=effective_start.strftime("%Y%m%d"),
+                    end_date=effective_end.strftime("%Y%m%d"),
+                    adjust="hfq" if adjustment == "hfq" else "",
+                )
+            except Exception:
+                # Eastmoney commonly resets connections from Docker egress IPs.
+                # AKShare's Sina endpoint is independent and returns equivalent
+                # daily OHLC data, so keep the isolated provider usable without
+                # leaking the upstream exception across the process boundary.
+                frame = sdk.stock_zh_a_daily(
+                    symbol=_sina_provider_symbol(symbol),
+                    start_date=effective_start.strftime("%Y%m%d"),
+                    end_date=effective_end.strftime("%Y%m%d"),
+                    adjust="hfq" if adjustment == "hfq" else "",
+                )
         else:
             effective_start = start or effective_end - timedelta(days=max(5, limit // 20 + 1))
             frame = sdk.stock_zh_a_hist_min_em(
@@ -494,23 +514,27 @@ class _AKShareInProcessProvider:
             )
         bars = []
         for item in frame.tail(limit).to_dict(orient="records"):
-            open_price = _number(item.get("开盘"))
-            high = _number(item.get("最高"))
-            low = _number(item.get("最低"))
-            close = _number(item.get("收盘"))
-            volume = _number(item.get("成交量"))
+            open_price = _number(item.get("开盘", item.get("open")))
+            high = _number(item.get("最高", item.get("high")))
+            low = _number(item.get("最低", item.get("low")))
+            close = _number(item.get("收盘", item.get("close")))
+            volume = _number(item.get("成交量", item.get("volume")))
             if not _valid_ohlc(open_price, high, low, close) or volume is None or volume < 0:
                 continue
             bars.append(
                 {
-                    "timestamp": _timestamp(item.get("时间", item.get("日期"))).isoformat(),
+                    "timestamp": _timestamp(
+                        item.get("时间", item.get("日期", item.get("date")))
+                    ).isoformat(),
                     "open": open_price,
                     "high": high,
                     "low": low,
                     "close": close,
                     "volume": volume,
-                    "amount": _number(item.get("成交额")),
-                    "turnover_rate": _number(item.get("换手率")),
+                    "amount": _number(item.get("成交额", item.get("amount"))),
+                    "turnover_rate": _number(
+                        item.get("换手率", item.get("turnover"))
+                    ),
                 }
             )
         return bars
@@ -831,11 +855,7 @@ class SinaMarketProvider:
 
     @staticmethod
     def _provider_symbol(symbol: str) -> str:
-        code, exchange = normalize_symbol(symbol).split(".", 1)
-        prefix = {"SH": "sh", "SZ": "sz", "BJ": "bj"}.get(exchange)
-        if prefix is None:
-            raise ValueError(f"unsupported Sina exchange: {exchange}")
-        return f"{prefix}{code}"
+        return _sina_provider_symbol(symbol)
 
     def quotes(self, symbols: list[str]) -> list[dict[str, Any]]:
         requested = {
@@ -1258,7 +1278,13 @@ class MarketDataService:
     def _fetch_calendar(self) -> tuple[date, ...]:
         provider_sessions = getattr(self.primary, "sessions", None)
         if callable(provider_sessions) and self._provider_allowed(self.primary):
-            return tuple(provider_sessions(_CALENDAR_FULL_START, _CALENDAR_FULL_END))
+            try:
+                return tuple(provider_sessions(_CALENDAR_FULL_START, _CALENDAR_FULL_END))
+            except Exception:
+                # A failed AKShare request can leave the reusable child alive but
+                # tied to a broken upstream connection. Recreate it once below.
+                if isinstance(self.primary, AKShareMarketProvider):
+                    self.primary.close()
         # Calendar reads are rare and must not make the lightweight API retain
         # the AKShare runtime after the request completes.
         isolated = AKShareMarketProvider(timeout_seconds=self.settings.market_timeout_seconds)

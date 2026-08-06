@@ -200,6 +200,8 @@ export const api = {
   listModels: (payload: ModelSettingsDraft) => request<{ models: string[] }>('/admin/model-settings/models', { method: 'POST', body: JSON.stringify(payload) }),
   systemSettings: () => request<SystemSettings>('/admin/system-settings'),
   systemResources: () => request<SystemResources>('/admin/system-resources'),
+  runtimeIdentity: () => request<import('./types').RuntimeIdentity>('/admin/runtime-identity'),
+  saveRuntimeIdentity: (mode: import('./types').RuntimeIdentityMode, unlockToken: string, idempotencyKey = crypto.randomUUID()) => request<import('./types').RuntimeIdentity>('/admin/runtime-identity', { method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey, 'X-System-Settings-Unlock': unlockToken }, body: JSON.stringify({ mode }) }),
   health: () => request<HealthStatus>('/health'),
   unlockSystemSettings: (password: string) => request<SystemSettingsUnlock>('/admin/system-settings/unlock', { method: 'POST', body: JSON.stringify({ password }) }),
   saveSystemSettings: (payload: SystemSettingsDraft, unlockToken: string, idempotencyKey: string = crypto.randomUUID()) => request<SystemSettings>('/admin/system-settings', { method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey, 'X-System-Settings-Unlock': unlockToken }, body: JSON.stringify(payload) }),

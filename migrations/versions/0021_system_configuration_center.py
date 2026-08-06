@@ -9,7 +9,6 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-
 revision = "0021_system_configuration_center"
 down_revision = "0020_operation_job_runs"
 branch_labels = None
