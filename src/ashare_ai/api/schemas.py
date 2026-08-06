@@ -215,6 +215,7 @@ class SystemSettingsRequest(BaseModel):
     market_hedge_delay_seconds: float | None = Field(default=None, ge=0.1, le=3.0)
     api_runtime_mode: Literal["LIGHTWEIGHT", "SUPREME"] | None = None
     api_runtime_auto_close: bool | None = None
+    energy_saving_enabled: bool | None = None
     financial_search_cache_seconds: int | None = Field(default=None, ge=0, le=300)
     financial_search_max_concurrency: int | None = Field(default=None, ge=1, le=32)
     financial_search_rate_limit_per_minute: int | None = Field(default=None, ge=1, le=600)
@@ -364,6 +365,16 @@ class RuntimeModeResponse(BaseModel):
     market_provider_max_workers: int = Field(ge=1)
     market_provider_max_queue: int = Field(ge=1)
     reason: str
+
+
+class EnergySavingResponse(BaseModel):
+    enabled: bool
+    active: bool
+    reason: str
+    manual_wake: bool
+    entered_at: datetime | None = None
+    updated_at: datetime | None = None
+    deep_standby_seconds: int = Field(ge=0)
 
 
 class ResourceMetricResponse(BaseModel):

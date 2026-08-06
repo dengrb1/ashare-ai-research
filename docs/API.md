@@ -161,6 +161,9 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 系统设置 | DELETE | `/api/v1/admin/system-settings/{field}` | 管理员、写入 |
 | 系统设置解锁 | POST | `/api/v1/admin/system-settings/unlock` | 管理员、写入；当前账户密码二次验证 |
 | 系统资源 | GET | `/api/v1/admin/system-resources` | 管理员；运行环境只读指标 |
+| 节能模式 | GET | `/api/v1/admin/energy-saving` | 管理员；当前节能状态只读 |
+| 节能模式 | POST | `/api/v1/admin/energy-saving/enable` | 管理员；重新启用自动进入 |
+| 节能模式 | POST | `/api/v1/admin/energy-saving/disable` | 管理员；强制唤醒一个周期 |
 | Edge Gateway | GET/PUT | `/api/v1/admin/edge-gateway` | 管理员；写入需解锁与幂等键 |
 | Edge Gateway 校验 | POST | `/api/v1/admin/edge-gateway/validate` | 管理员；结构化 Nginx/FRP 校验 |
 | Edge Gateway 回滚 | POST | `/api/v1/admin/edge-gateway/rollback` | 管理员；写入需解锁 |
@@ -501,6 +504,37 @@ curl -sS -X PUT "$BASE_URL/api/v1/admin/runtime/mode" \
 
 响应会返回 `provider_process_state`、`after_close`、缓存上限和并发上限。研究创建接口中的 `supreme_mode` 仍然只控制该次研究的数据采集并行度；它不会隐式改变 API 运行模式。
 
+### 节能模式（Energy Saving）
+
+节能模式是收盘后、当日每日研究全部完成后进入的低活动状态：Worker 停止逐秒轮询队列（深度待机，
+心跳携带 `energy_saving=true`），宿主侧拓扑控制器可根据 `/api/internal/topology-desired` 的
+`energy_saving_active` 信号停掉可选服务（`searxng`、空闲的 `job-worker` 与 `exit-advice-worker`），
+仅在夜间保留 API、Web、PostgreSQL 与 Redis。该模式**默认关闭**，需管理员在系统设置中心开启
+`energy_saving_enabled`（或环境变量）。
+
+进入条件（全部满足才进入）：`energy_saving_enabled=true`、已收盘（`is_after_close`）、且没有
+进行中的研究/回测/Trade Plan/退出建议任务。任何新任务入队、下一次定时研究派发、或管理员强制唤醒，
+都会在下一个评估周期（≤60 秒）自动退出。
+
+```bash
+# 查看当前状态
+curl -sS "$BASE_URL/api/v1/admin/energy-saving" -H "Authorization: Bearer <ACCESS_TOKEN>"
+
+# 重新启用自动进入（清除任何强制唤醒标记）
+curl -sS -X POST "$BASE_URL/api/v1/admin/energy-saving/enable" \
+  -H "Authorization: Bearer <ACCESS_TOKEN>"
+
+# 强制唤醒一个周期（Worker 立即恢复轮询；标记 12 小时后自动过期）
+curl -sS -X POST "$BASE_URL/api/v1/admin/energy-saving/disable" \
+  -H "Authorization: Bearer <ACCESS_TOKEN>"
+```
+
+响应字段：`enabled`（配置主开关）、`active`（当前是否节能）、`reason`、`manual_wake`（是否被强制
+唤醒）、`entered_at`、`updated_at`、`deep_standby_seconds`。
+
+注意：`energy_saving_enabled` 属于系统设置中心可热加载的非拓扑字段；`enable`/`disable` 是临时操作
+状态（带 TTL、可逆），不需要系统设置解锁。
+
 ### Edge Gateway 配置中心
 
 `GET /api/v1/admin/edge-gateway` 返回当前版本、结构化代理主机、配置哈希、应用状态和 `source_sync`；未携带有效 `X-System-Settings-Unlock` 时不返回 FRP 明文。服务端每次读取都会检查部署配置目录中的 `frpc.toml`/`managed.conf`，外部变更会导入新的不可变版本。`PUT` 使用当前管理员解锁令牌保存最多 32 个代理主机和 64 KiB FRP TOML，FRP 内容使用 `EDGE_GATEWAY_ENCRYPTION_KEYS` 加密，提交按 `Idempotency-Key` 去重。代理目标必须匹配 `EDGE_PROXY_TARGET_ALLOWLIST`（默认 `web`）或私有/回环 IP，禁止自定义 Nginx 指令。
@@ -508,6 +542,8 @@ curl -sS -X PUT "$BASE_URL/api/v1/admin/runtime/mode" \
 请求和响应中的 `validation_mode` 为 `STRICT` 或 `COMPATIBLE`，默认 `STRICT`。严格模式要求当前 FRP camelCase 字段；兼容模式额外接受旧版 `[common]`、snake_case 连接/代理字段和旧式代理段落名，适合 FRP 0.x 配置。两种模式都会拒绝非法 TOML、非 `127.0.0.1` 的 FRP 本地目标以及非 80/443 的网关端口，不能用来关闭安全门禁。`GET /api/v1/admin/edge-gateway/logs?limit=200` 返回最近 FRP 运行日志；日志只读取部署挂载的日志目录并脱敏 Token、密码、密钥和 Authorization 值。
 
 本机拓扑控制器使用 `GET /api/internal/edge-gateway-config` 读取已校验配置，原子写入未跟踪的 `EDGE_GATEWAY_CONFIG_DIR`，并通过 `POST /api/internal/edge-gateway-applied` 回报应用结果；两个接口只接受 `TOPOLOGY_CONTROLLER_TOKEN`，API 不访问 Docker socket。
+
+`GET /api/internal/topology-desired` 在既有拓扑字段之外新增节能信号：`energy_saving_enabled`、`energy_saving_active`、`energy_saving_since`、`energy_saving_reason`。宿主控制器可在 `energy_saving_active=true` 时停止可选服务（例如 `docker compose -p ashare-ai-src -f compose.yaml stop searxng job-worker exit-advice-worker`），在变为 `false` 后执行 `up -d` 恢复；API 自身不会访问 Docker socket。
 
 `GET /api/v1/admin/system-settings` 返回有效的公开设置、每项来源（`database|environment`）、不可变配置版本/哈希、敏感项是否已配置、环境只读状态、Worker 心跳、已加载执行模式及各队列 `pending/processing` 摘要。它绝不返回 Tushare、对象存储或模型密钥，也不返回数据库/Redis 地址、认证参数、Fernet 密钥或卷路径。Worker 心跳可以包含清洗后的内存、内存上限和 CPU 指标。
 

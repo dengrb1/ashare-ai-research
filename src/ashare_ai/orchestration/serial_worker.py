@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from ashare_ai.core import energy_saving
 from ashare_ai.core.config import get_settings
+from ashare_ai.core.energy_saving import DEEP_STANDBY_SECONDS, EVALUATION_INTERVAL_SECONDS
 from ashare_ai.core.system_settings import SystemConfigurationService, SystemRuntimeSettings
 from ashare_ai.core.time import SHANGHAI
 from ashare_ai.orchestration.isolated_job import execute_isolated
@@ -79,6 +81,25 @@ def _load_worker_runtime() -> SystemRuntimeSettings | None:
         return None
 
 
+def _energy_saving_standby(client: Any) -> int:
+    """Return deep-standby seconds when energy saving is active, else 0.
+
+    Settings are resolved fresh on every evaluation so an administrator can
+    enable the mode without restarting the worker.  Any evaluation failure
+    keeps the worker awake: an energy-saving bug must never block queue work.
+    """
+    try:
+        with SessionLocal() as session:
+            settings = SystemConfigurationService().resolve(session).settings
+            state = energy_saving.evaluate(
+                redis_client=client, session=session, settings=settings
+            )
+        return state.deep_standby_seconds
+    except Exception:
+        logger.exception("energy-saving evaluation failed; worker stays awake")
+        return 0
+
+
 def run_loop(*, max_iterations: int | None = None) -> None:
     import redis
 
@@ -96,11 +117,18 @@ def run_loop(*, max_iterations: int | None = None) -> None:
     )
     next_schedule_check = 0.0
     next_maintenance = 0.0
+    next_energy_check = 0.0
+    energy_standby = False
     iterations = 0
     while max_iterations is None or iterations < max_iterations:
-        if runtime is not None:
-            publish_heartbeat(client, role="job-worker", runtime=runtime)
         now_monotonic = time.monotonic()
+        if runtime is not None:
+            publish_heartbeat(
+                client, role="job-worker", runtime=runtime, energy_saving=energy_standby
+            )
+        if now_monotonic >= next_energy_check:
+            energy_standby = bool(_energy_saving_standby(client))
+            next_energy_check = now_monotonic + EVALUATION_INTERVAL_SECONDS
         if now_monotonic >= next_maintenance:
             return_code = execute_isolated("maintenance", "tick")
             if return_code:
@@ -114,6 +142,14 @@ def run_loop(*, max_iterations: int | None = None) -> None:
                     return_code,
                 )
             next_schedule_check = now_monotonic + seconds_until_next_tick(datetime.now(SHANGHAI))
+        if energy_standby:
+            # Deep standby: keep the scheduler and maintenance alive but stop
+            # per-second queue polling.  A new job flips the state on the next
+            # evaluation, so re-enable latency is at most one standby wake-up.
+            iterations += 1
+            if max_iterations is None or iterations < max_iterations:
+                time.sleep(DEEP_STANDBY_SECONDS)
+            continue
 
         claimed = False
         for spec, queue in queues:

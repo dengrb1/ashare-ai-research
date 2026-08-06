@@ -301,6 +301,58 @@ def test_worker_written_chinese_error_surfaces_through_the_api(monkeypatch) -> N
         session.close()
 
 
+def test_energy_saving_admin_endpoints_report_live_state(monkeypatch) -> None:
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    session = Session(engine, expire_on_commit=False)
+    _override_authenticated_admin(session)
+
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.data: dict[str, object] = {}
+
+        def get(self, key: str) -> object:
+            return self.data.get(key)
+
+        def set(self, key: str, value: str, ex: int | None = None) -> None:
+            del ex
+            self.data[key] = value
+
+        def delete(self, key: str) -> None:
+            self.data.pop(key, None)
+
+    from ashare_ai.core import energy_saving as energy_saving_module
+
+    shared_redis = FakeRedis()
+    monkeypatch.setattr("ashare_ai.api.app._redis_client", lambda: shared_redis)
+    monkeypatch.setattr(
+        "ashare_ai.api.app.get_effective_settings",
+        lambda: SimpleNamespace(energy_saving_enabled=True),
+    )
+    monkeypatch.setattr(energy_saving_module, "is_after_close", lambda now=None: True)
+    try:
+        client = TestClient(app)
+        state = client.get("/api/v1/admin/energy-saving")
+        assert state.status_code == 200
+        assert state.json()["enabled"] is True
+        assert state.json()["active"] is True
+        disabled = client.post("/api/v1/admin/energy-saving/disable")
+        assert disabled.status_code == 200
+        assert disabled.json()["active"] is False
+        assert disabled.json()["manual_wake"] is True
+        rearmed = client.post("/api/v1/admin/energy-saving/enable")
+        assert rearmed.status_code == 200
+        assert rearmed.json()["active"] is True
+        assert rearmed.json()["manual_wake"] is False
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+
 def test_agent_cost_and_evidence_are_persisted(tmp_path) -> None:
     engine = create_engine("sqlite+pysqlite://")
     Base.metadata.create_all(engine)

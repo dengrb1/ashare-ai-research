@@ -102,6 +102,7 @@ from ashare_ai.api.schemas import (
     EdgeGatewayLogsResponse,
     EdgeGatewayValidateRequest,
     EdgeGatewayValidationResponse,
+    EnergySavingResponse,
     ExitAdviceResponse,
     ExitMonitorSettingsRequest,
     HealthResponse,
@@ -170,6 +171,7 @@ from ashare_ai.api.schemas import (
 )
 from ashare_ai.api.static_web import NativeSPAStaticFiles
 from ashare_ai.api.system_settings_unlock import issue_unlock, require_settings_unlock
+from ashare_ai.core import energy_saving
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.edge_gateway import (
     EdgeGatewayConfigurationService,
@@ -2474,6 +2476,42 @@ _SYSTEM_QUEUE_KEYS = {
 }
 
 
+def _redis_client() -> Any:
+    import redis
+
+    return redis.Redis.from_url(get_settings().redis_url, decode_responses=True)
+
+
+def _energy_saving_response(db: Session) -> EnergySavingResponse:
+    try:
+        state = energy_saving.evaluate(
+            redis_client=_redis_client(),
+            session=db,
+            settings=get_effective_settings(),
+        )
+    except Exception:
+        # A diagnostic endpoint must never break when its evaluation cannot
+        # run; report the system as awake (active=False) instead.
+        return EnergySavingResponse(
+            enabled=bool(getattr(get_effective_settings(), "energy_saving_enabled", False)),
+            active=False,
+            reason="energy-saving state is unavailable",
+            manual_wake=False,
+            entered_at=None,
+            updated_at=None,
+            deep_standby_seconds=0,
+        )
+    return EnergySavingResponse(
+        enabled=state.enabled,
+        active=state.active,
+        reason=state.reason,
+        manual_wake=state.manual_wake,
+        entered_at=state.entered_at,
+        updated_at=state.updated_at,
+        deep_standby_seconds=state.deep_standby_seconds,
+    )
+
+
 def _system_worker_snapshot(
     topology_sha256: str,
 ) -> tuple[str, bool, list[dict[str, object]], dict[str, dict[str, int]]]:
@@ -2567,6 +2605,9 @@ def topology_desired(request: Request, db: DbSession) -> dict[str, object]:
     runtime = SystemConfigurationService().resolve(db)
     edge_config = EdgeGatewayConfigurationService().public_view(db)
     _, restart_required, _, _ = _system_worker_snapshot(str(runtime.topology_sha256))
+    energy_saving_state = energy_saving.evaluate(
+        redis_client=_redis_client(), session=db, settings=runtime.settings
+    )
     return {
         "research_execution_mode": runtime.settings.research_execution_mode,
         "edge_gateway_enabled": bool(edge_config["enabled"]) if edge_config.get("version", 0) else runtime.settings.edge_gateway_enabled,
@@ -2581,6 +2622,10 @@ def topology_desired(request: Request, db: DbSession) -> dict[str, object]:
         "auto_restart_enabled": runtime.settings.auto_restart_enabled,
         "restart_required": restart_required,
         "topology_sha256": runtime.topology_sha256,
+        "energy_saving_enabled": energy_saving_state.enabled,
+        "energy_saving_active": energy_saving_state.active,
+        "energy_saving_since": energy_saving_state.entered_at,
+        "energy_saving_reason": energy_saving_state.reason,
     }
 
 
@@ -2880,6 +2925,28 @@ def get_system_resources(context: Current) -> SystemResourcesResponse:
         return SystemResourcesResponse.model_validate(sample_runtime_resources(workers))
     except Exception as exc:
         raise HTTPException(status_code=503, detail="runtime resources unavailable") from exc
+
+
+@app.get("/api/v1/admin/energy-saving", response_model=EnergySavingResponse)
+def get_energy_saving(db: DbSession, context: Current) -> EnergySavingResponse:
+    _admin(context)
+    return _energy_saving_response(db)
+
+
+@app.post("/api/v1/admin/energy-saving/disable", response_model=EnergySavingResponse)
+def disable_energy_saving(db: DbSession, context: Writer) -> EnergySavingResponse:
+    """Force-wake the system for one research cycle without editing the setting."""
+    _admin(context)
+    energy_saving.force_wake(_redis_client())
+    return _energy_saving_response(db)
+
+
+@app.post("/api/v1/admin/energy-saving/enable", response_model=EnergySavingResponse)
+def enable_energy_saving(db: DbSession, context: Writer) -> EnergySavingResponse:
+    """Re-arm auto-entry, clearing any force-wake marker."""
+    _admin(context)
+    energy_saving.rearm(_redis_client())
+    return _energy_saving_response(db)
 
 
 @app.post(

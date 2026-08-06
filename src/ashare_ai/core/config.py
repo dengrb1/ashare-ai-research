@@ -57,6 +57,11 @@ class Settings(BaseSettings):
     market_hedge_delay_seconds: float = Field(default=0.5, ge=0.1, le=3.0)
     api_runtime_mode: Literal["LIGHTWEIGHT", "SUPREME"] = "LIGHTWEIGHT"
     api_runtime_auto_close: bool = True
+    # After close and once all daily research is complete, workers enter deep
+    # standby and the host-side topology controller may stop optional services
+    # (searxng, idle workers) until new work appears.  Default off: opting in
+    # never changes point-in-time research, scoring or audit semantics.
+    energy_saving_enabled: bool = False
     financial_search_provider: str = "neodata-financial-search"
     neodata_financial_search_path: Path | None = None
     neodata_financial_search_mode: Literal["auto", "cli", "embedded"] = "auto"

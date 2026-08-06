@@ -60,6 +60,7 @@ PUBLIC_SETTING_FIELDS = frozenset(
         "market_hedge_delay_seconds",
         "api_runtime_mode",
         "api_runtime_auto_close",
+        "energy_saving_enabled",
         "financial_search_cache_seconds",
         "financial_search_max_concurrency",
         "financial_search_rate_limit_per_minute",

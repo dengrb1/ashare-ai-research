@@ -25,23 +25,29 @@ def worker_id(role: str) -> str:
     return f"{role}:{host}:{os.getpid()}"
 
 
-def publish_heartbeat(client: Any, *, role: str, runtime: SystemRuntimeSettings) -> str:
+def publish_heartbeat(
+    client: Any, *, role: str, runtime: SystemRuntimeSettings, energy_saving: bool = False
+) -> str:
     return _publish_heartbeat(
         client,
         role=role,
         loaded_mode=runtime.execution_mode,
         topology_sha256=runtime.topology_sha256,
         config_sha256=runtime.config_sha256,
+        energy_saving=energy_saving,
     )
 
 
-def publish_service_heartbeat(client: Any, *, role: str) -> str:
+def publish_service_heartbeat(
+    client: Any, *, role: str, energy_saving: bool = False
+) -> str:
     return _publish_heartbeat(
         client,
         role=role,
         loaded_mode="UNKNOWN",
         topology_sha256=None,
         config_sha256=None,
+        energy_saving=energy_saving,
     )
 
 
@@ -52,6 +58,7 @@ def _publish_heartbeat(
     loaded_mode: str,
     topology_sha256: str | None,
     config_sha256: str | None,
+    energy_saving: bool = False,
 ) -> str:
     identifier = worker_id(role)
     resources = sample_current_service(service_id=identifier, role=role)
@@ -62,6 +69,7 @@ def _publish_heartbeat(
         "loaded_mode": loaded_mode,
         "topology_sha256": topology_sha256,
         "config_sha256": config_sha256,
+        "energy_saving": energy_saving,
         "last_heartbeat_at": datetime.now(UTC).isoformat(),
         "memory_used_bytes": resources["memory_used_bytes"],
         "memory_cache_bytes": resources.get("memory_cache_bytes"),
