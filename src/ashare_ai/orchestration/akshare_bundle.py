@@ -772,6 +772,7 @@ class AKShareCanonicalBundleBuilder:
         *,
         required_symbols: tuple[str, ...] = (),
         data_fetch_workers: int | None = None,
+        max_stock_price: Decimal | None = None,
     ) -> CanonicalDailyBundle:
         self.acquisition_events = []
         fetched_at = self.clock()
@@ -865,6 +866,24 @@ class AKShareCanonicalBundleBuilder:
                 security = {**security, "_tracked_only": False}
             required.append(security)
         candidates = required + list(by_symbol.values())
+        if max_stock_price is not None:
+            # A research budget price ceiling is a hard selection constraint,
+            # not a post-filter. Rank the affordable universe by turnover so a
+            # small-budget report still gets a full pool of liquid low-priced
+            # names instead of a top-turnover pool that the ceiling then
+            # collapses to near nothing. Explicitly requested (tracked)
+            # symbols are never filtered here; the point-in-time close gate in
+            # the universe stage remains the authoritative final check.
+            price_limit = Decimal(str(max_stock_price))
+            if price_limit <= 0:
+                raise ValueError("max_stock_price must be positive")
+            affordable = [
+                item
+                for item in by_symbol.values()
+                if item.get("price") is not None
+                and Decimal(str(item["price"])) <= price_limit
+            ]
+            candidates = required + affordable
         target_size = min(100, self.bundle_size + len(required))
         start_date = trading_date - timedelta(days=max(180, self.history_sessions * 2))
         fetch_workers = max(
@@ -1441,6 +1460,12 @@ class AKShareCanonicalBundleBuilder:
                     "symbol": symbol,
                     "name": name,
                     "amount": amount or Decimal("0"),
+                    # Spot reference price retained so the bundle builder can
+                    # honor a research budget price ceiling while ranking by
+                    # liquidity instead of filtering the top-turnover pool
+                    # after the fact (which collapses to almost nothing in a
+                    # market where the most-traded names are the priciest).
+                    "price": price,
                     "_canonical_source": str(item.get("_canonical_source", self.provider.source)),
                     "_is_st": is_st,
                     "_spot_suspended": is_delisting or price is None or price <= 0,

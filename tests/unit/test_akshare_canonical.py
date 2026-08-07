@@ -154,6 +154,72 @@ def test_akshare_bundle_uses_real_market_history_and_labeled_neutral_placeholder
     }
 
 
+def test_bundle_price_ceiling_selects_affordable_pool_by_turnover() -> None:
+    trading_date = date(2026, 7, 15)
+
+    class PriceSpreadProvider(Provider):
+        def securities(self):
+            return [
+                {
+                    "代码": f"{600000 + index:06d}",
+                    "名称": f"真实行情样本{index}",
+                    "最新价": 10 + index,
+                    "成交额": 1_000_000_000 - index,
+                }
+                for index in range(20)
+            ]
+
+    builder = AKShareCanonicalBundleBuilder(
+        provider=PriceSpreadProvider(trading_date),
+        clock=lambda: datetime(2026, 7, 15, 20, tzinfo=SHANGHAI),
+        bundle_size=20,
+        history_sessions=65,
+    )
+    decision_at = datetime(2026, 7, 15, 18, tzinfo=SHANGHAI)
+    bundle = builder.build(trading_date, decision_at, max_stock_price=Decimal("25"))
+    symbols = [item.symbol for item in bundle.securities]
+    # Spot prices are 10..29; a 25-yuan ceiling keeps indices 0..15 (600000..
+    # 600015) ranked by turnover, instead of a top-turnover pool the ceiling
+    # would later collapse to a handful of names.
+    assert symbols == [f"{600000 + index:06d}.SH" for index in range(16)]
+    assert len(bundle.bars) == 16 * 65
+
+
+def test_bundle_price_ceiling_keeps_explicitly_requested_symbols() -> None:
+    trading_date = date(2026, 7, 15)
+
+    class PriceSpreadProvider(Provider):
+        def securities(self):
+            return [
+                {
+                    "代码": f"{600000 + index:06d}",
+                    "名称": f"真实行情样本{index}",
+                    "最新价": 10 + index,
+                    "成交额": 1_000_000_000 - index,
+                }
+                for index in range(20)
+            ]
+
+    builder = AKShareCanonicalBundleBuilder(
+        provider=PriceSpreadProvider(trading_date),
+        clock=lambda: datetime(2026, 7, 15, 20, tzinfo=SHANGHAI),
+        bundle_size=20,
+        history_sessions=65,
+    )
+    decision_at = datetime(2026, 7, 15, 18, tzinfo=SHANGHAI)
+    bundle = builder.build(
+        trading_date,
+        decision_at,
+        max_stock_price=Decimal("25"),
+        required_symbols=("600019.SH",),  # 29 yuan, above the ceiling
+    )
+    symbols = [item.symbol for item in bundle.securities]
+    assert symbols[0] == "600019.SH"
+    assert set(symbols) == {"600019.SH"} | {
+        f"{600000 + index:06d}.SH" for index in range(16)
+    }
+
+
 def test_history_fetches_concurrently_and_preserves_candidate_order() -> None:
     trading_date = date(2026, 7, 15)
 

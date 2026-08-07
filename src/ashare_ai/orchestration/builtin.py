@@ -429,6 +429,7 @@ class BuiltinDailyBackend:
                 run_id=run_id,
                 required_symbols=tuple(manifest.get("tracked_symbols", ())),
                 data_fetch_workers=execution_profile.data_fetch_workers,
+                max_stock_price=self._research_max_stock_price(manifest),
             )
             digest = self._write_stage(run_id, "bundle", bundle)
             with self.session_factory() as session:
@@ -1812,6 +1813,7 @@ class BuiltinDailyBackend:
         run_id: str | None = None,
         required_symbols: tuple[str, ...] = (),
         data_fetch_workers: int = 1,
+        max_stock_price: Decimal | None = None,
     ) -> CanonicalDailyBundle:
         configured = os.environ.get("ASHARE_CANONICAL_BUNDLE")
         reused = self._load_reused_bundle(trading_date, decision_at, run_id=run_id)
@@ -1855,6 +1857,7 @@ class BuiltinDailyBackend:
                         decision_at,
                         required_symbols=required_symbols,
                         data_fetch_workers=data_fetch_workers,
+                        max_stock_price=max_stock_price,
                     )
                 else:
                     bundle = builder.build(
