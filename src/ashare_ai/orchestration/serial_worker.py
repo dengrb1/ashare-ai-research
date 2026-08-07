@@ -11,6 +11,7 @@ from ashare_ai.core.config import get_settings
 from ashare_ai.core.energy_saving import DEEP_STANDBY_SECONDS, EVALUATION_INTERVAL_SECONDS
 from ashare_ai.core.system_settings import SystemConfigurationService, SystemRuntimeSettings
 from ashare_ai.core.time import SHANGHAI
+from ashare_ai.observability.memory_reclaimer import reclaim_runtime_memory
 from ashare_ai.orchestration.isolated_job import execute_isolated
 from ashare_ai.orchestration.redis_queue import RedisLeasedQueue
 from ashare_ai.orchestration.runner import seconds_until_next_tick
@@ -119,6 +120,7 @@ def run_loop(*, max_iterations: int | None = None) -> None:
     next_maintenance = 0.0
     next_energy_check = 0.0
     energy_standby = False
+    previous_energy_standby = False
     iterations = 0
     while max_iterations is None or iterations < max_iterations:
         now_monotonic = time.monotonic()
@@ -129,6 +131,11 @@ def run_loop(*, max_iterations: int | None = None) -> None:
         if now_monotonic >= next_energy_check:
             energy_standby = bool(_energy_saving_standby(client))
             next_energy_check = now_monotonic + EVALUATION_INTERVAL_SECONDS
+            if energy_standby and not previous_energy_standby:
+                reclaim_runtime_memory(
+                    settings, reason="job-worker-energy-standby", force=True
+                )
+            previous_energy_standby = energy_standby
         if now_monotonic >= next_maintenance:
             return_code = execute_isolated("maintenance", "tick")
             if return_code:
@@ -171,6 +178,9 @@ def run_loop(*, max_iterations: int | None = None) -> None:
                         )
             finally:
                 queue.acknowledge(job_id)
+                reclaim_runtime_memory(
+                    settings, reason=f"job-worker-{spec.kind}-complete"
+                )
             break
         iterations += 1
         if not claimed and (max_iterations is None or iterations < max_iterations):

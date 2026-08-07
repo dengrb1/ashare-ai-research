@@ -23,6 +23,7 @@ web/node_modules/
 web/coverage/
 web/dist/
 build/
+native/**/target/
 *.egg-info/
 .pip-install.*.log
 .pip-*.log

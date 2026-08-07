@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from pytest import MonkeyPatch
+
 from ashare_ai.core.energy_saving import DEEP_STANDBY_SECONDS
 from ashare_ai.orchestration import exit_advice_worker
 
@@ -17,7 +19,7 @@ class _FakeSession:
         return None
 
 
-def test_exit_worker_executes_claim_in_isolated_child(monkeypatch) -> None:
+def test_exit_worker_executes_claim_in_isolated_child(monkeypatch: MonkeyPatch) -> None:
     events: list[object] = []
 
     class Heartbeat:
@@ -61,6 +63,12 @@ def test_exit_worker_executes_claim_in_isolated_child(monkeypatch) -> None:
         "execute_isolated",
         lambda kind, job_id: events.append((kind, job_id)) or 0,
     )
+    def reclaim_runtime_memory(
+        _settings: object, *, reason: str, force: bool = False
+    ) -> None:
+        events.append(("reclaim", reason, force))
+
+    monkeypatch.setattr(exit_advice_worker, "reclaim_runtime_memory", reclaim_runtime_memory)
     monkeypatch.setattr("redis.Redis.from_url", lambda *_args, **_kwargs: object())
 
     exit_advice_worker.run_loop(max_iterations=1)
@@ -73,11 +81,13 @@ def test_exit_worker_executes_claim_in_isolated_child(monkeypatch) -> None:
         ("exit-review", "advice-1"),
         "heartbeat-exit",
         ("ack", "advice-1"),
+        ("reclaim", "exit-worker-job-complete", False),
     ]
 
 
-def test_exit_worker_skips_polling_in_deep_standby(monkeypatch) -> None:
+def test_exit_worker_skips_polling_in_deep_standby(monkeypatch: MonkeyPatch) -> None:
     sleeps: list[float] = []
+    reclaimed: list[tuple[str, bool]] = []
 
     class Queue:
         def requeue_expired(self) -> None:
@@ -109,9 +119,16 @@ def test_exit_worker_skips_polling_in_deep_standby(monkeypatch) -> None:
         "publish_service_heartbeat",
         lambda _client, *, role, energy_saving=False: None,
     )
+    def reclaim_runtime_memory(
+        _settings: object, *, reason: str, force: bool = False
+    ) -> None:
+        reclaimed.append((reason, force))
+
+    monkeypatch.setattr(exit_advice_worker, "reclaim_runtime_memory", reclaim_runtime_memory)
     monkeypatch.setattr(exit_advice_worker, "time", FakeTime())
     monkeypatch.setattr("redis.Redis.from_url", lambda *_args, **_kwargs: object())
 
     exit_advice_worker.run_loop(max_iterations=3)
 
     assert sleeps == [DEEP_STANDBY_SECONDS, DEEP_STANDBY_SECONDS]
+    assert reclaimed == [("exit-worker-energy-standby", True)]

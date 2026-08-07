@@ -132,7 +132,7 @@ flowchart LR
 
 默认 Docker 栈包括 WebGUI、API、串行 `job-worker`、独立 `exit-advice-worker`、PostgreSQL、Redis 和仅在私有网络中可访问的 SearXNG。小型主机建议至少 2 GB 内存。
 
-API 默认使用 `LIGHTWEIGHT` 运行模式：实时行情不在 API 启动时预热 AKShare，缓存和预取并发受限，收盘后自动回收行情子进程与进程内缓存。需要更高实时行情吞吐时，可通过 `/api/v1/admin/runtime/mode` 切换到 `SUPREME`；该模式仍把 AKShare 保持在隔离子进程中，不改变研究 Worker 的执行模式。
+API 默认使用 `LIGHTWEIGHT` 运行模式：实时行情不在 API 启动时预热 AKShare，缓存和预取并发受限，收盘后自动回收行情子进程与进程内缓存。长期进程还会在收盘、隔离任务完成或进入节能待机时，按 RSS 门槛和冷却时间执行 Python GC；Linux/glibc 环境同时尝试 `malloc_trim` 将空闲 arena 归还操作系统。可用 `MEMORY_RECLAIM_ENABLED`、`MEMORY_RECLAIM_MIN_RSS_MIB` 和 `MEMORY_RECLAIM_COOLDOWN_SECONDS` 调整，默认分别为 `true`、`160` 和 `300`。需要更高实时行情吞吐时，可通过 `/api/v1/admin/runtime/mode` 切换到 `SUPREME`；该模式仍把 AKShare 保持在隔离子进程中，不改变研究 Worker 的执行模式。
 
 ## 项目结构
 
@@ -153,6 +153,7 @@ src/ashare_ai/
   reports/          可追溯日报与交易方案
   orchestration/    收盘后任务与 Worker
   api/              FastAPI 路由与共享 API 契约
+native/ashare_ai_core/ 可选 Rust 技术指标 kernel（PyO3 facade）
 web/                React + Vite 前端
 docker/             应用、数据库与 Edge Gateway 镜像
 windows/            Windows 原生管理器与安装包
@@ -175,6 +176,16 @@ docker compose -p ashare-ai-src -f compose.yaml up -d postgres redis
 .\.venv\Scripts\ashare-ai doctor
 .\.venv\Scripts\ashare-ai migrate
 ```
+
+技术指标的 Rust kernel 是可选加速路径，不改变默认纯 Python 安装。需要本地启用时，先安装
+`maturin`，再执行：
+
+```powershell
+maturin develop --manifest-path native/ashare_ai_core/Cargo.toml --features python
+$env:ASHARE_NATIVE_TECHNICAL="on"
+```
+
+未安装扩展时默认 `auto` 会回退 Python；设置 `ASHARE_NATIVE_TECHNICAL=off` 可强制使用参考实现。
 
 分别启动 API 与 Worker：
 

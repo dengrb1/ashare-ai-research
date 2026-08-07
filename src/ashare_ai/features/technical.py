@@ -15,6 +15,7 @@ from ashare_ai.core.contracts import (
     FrozenModel,
     TradeStatus,
 )
+from ashare_ai.features.native import native_technical_metrics
 
 
 class TechnicalFeatures(FrozenModel):
@@ -86,17 +87,34 @@ def extract_technical_features(
         for bar in ordered
     ]
     volumes = [float(bar.volume) for bar in ordered]
-    returns = [current / previous - 1 for previous, current in pairwise(closes)]
+    native_metrics = native_technical_metrics(closes, volumes)
+    if native_metrics is None:
+        returns = [current / previous - 1 for previous, current in pairwise(closes)]
+        period_return_5d = _period_return(closes, 5)
+        period_return_20d = _period_return(closes, 20)
+        close_to_ma20 = _close_to_average(closes, 20)
+        annualized_volatility_20d = _annualized_volatility(returns, 20)
+        volume_ratio_5_to_20 = _volume_ratio(volumes)
+        max_drawdown_60d = _max_drawdown(closes[-60:])
+    else:
+        (
+            period_return_5d,
+            period_return_20d,
+            close_to_ma20,
+            annualized_volatility_20d,
+            volume_ratio_5_to_20,
+            max_drawdown_60d,
+        ) = native_metrics
 
     value_count = sum(
         value is not None
         for value in (
-            _period_return(closes, 5),
-            _period_return(closes, 20),
-            _close_to_average(closes, 20),
-            _annualized_volatility(returns, 20),
-            _volume_ratio(volumes),
-            _max_drawdown(closes[-60:]),
+            period_return_5d,
+            period_return_20d,
+            close_to_ma20,
+            annualized_volatility_20d,
+            volume_ratio_5_to_20,
+            max_drawdown_60d,
         )
     )
     return TechnicalFeatures(
@@ -104,12 +122,12 @@ def extract_technical_features(
         trading_date=trading_date,
         decision_at=decision_at,
         observations=len(ordered),
-        return_5d=_period_return(closes, 5),
-        return_20d=_period_return(closes, 20),
-        close_to_ma20=_close_to_average(closes, 20),
-        annualized_volatility_20d=_annualized_volatility(returns, 20),
-        volume_ratio_5_to_20=_volume_ratio(volumes),
-        max_drawdown_60d=_max_drawdown(closes[-60:]),
+        return_5d=period_return_5d,
+        return_20d=period_return_20d,
+        close_to_ma20=close_to_ma20,
+        annualized_volatility_20d=annualized_volatility_20d,
+        volume_ratio_5_to_20=volume_ratio_5_to_20,
+        max_drawdown_60d=max_drawdown_60d,
         completeness=value_count / 6,
     )
 

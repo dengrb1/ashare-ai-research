@@ -1,0 +1,17 @@
+[package]
+name = "ashare_ai_core"
+version = "0.1.0"
+edition = "2021"
+description = "Optional Rust kernels for A-share research calculations"
+license = "Apache-2.0"
+
+[lib]
+name = "ashare_ai_core"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+python = ["dep:pyo3"]
+
+[dependencies]
+pyo3 = { version = "0.23", optional = true, features = ["extension-module", "abi3-py311"] }

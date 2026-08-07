@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -89,15 +89,45 @@ class ImmutableLake:
         return pa.concat_tables(tables, promote_options="default")
 
     def query(self, sql: str, manifests: Iterable[SnapshotManifest]) -> list[dict[str, Any]]:
+        """Execute a manifest-scoped query and materialize the result for compatibility."""
+        rows: list[dict[str, Any]] = []
+        for batch in self.query_batches(sql, manifests):
+            rows.extend(batch.to_pylist())
+        return rows
+
+    def query_arrow(self, sql: str, manifests: Iterable[SnapshotManifest]) -> pa.Table:
+        """Execute a manifest-scoped query and return an Arrow table.
+
+        Callers that process large results should prefer :meth:`query_batches` to avoid
+        materializing the complete result in memory.
+        """
+        batches = list(self.query_batches(sql, manifests))
+        if not batches:
+            return pa.table({})
+        return pa.Table.from_batches(batches)
+
+    def query_batches(
+        self,
+        sql: str,
+        manifests: Iterable[SnapshotManifest],
+        *,
+        batch_size: int = 65_536,
+    ) -> Iterator[pa.RecordBatch]:
+        """Yield query results as Arrow record batches.
+
+        Manifest validation happens before DuckDB opens the files, so this path has the
+        same immutability and hash guarantees as ``read_committed`` and ``query``.
+        """
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
         selected = list(manifests)
         if not selected:
             raise ValueError("DuckDB queries require one or more committed manifests")
         paths = [str(path) for path in _validated_paths(selected)]
         with duckdb.connect(":memory:") as connection:
             connection.from_parquet(paths).create_view("snapshot")
-            result = connection.execute(sql)
-            columns = [item[0] for item in result.description]
-            return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
+            reader = connection.execute(sql).fetch_record_batch(rows_per_batch=batch_size)
+            yield from reader
 
 
 def _uri_to_path(uri: str) -> Path:

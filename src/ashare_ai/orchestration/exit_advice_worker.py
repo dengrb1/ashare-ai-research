@@ -8,6 +8,7 @@ from ashare_ai.core import energy_saving
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.energy_saving import DEEP_STANDBY_SECONDS, EVALUATION_INTERVAL_SECONDS
 from ashare_ai.core.system_settings import SystemConfigurationService
+from ashare_ai.observability.memory_reclaimer import reclaim_runtime_memory
 from ashare_ai.orchestration.exit_advice_queue import build_exit_advice_queue
 from ashare_ai.orchestration.isolated_job import execute_isolated
 from ashare_ai.orchestration.worker_status import publish_service_heartbeat
@@ -44,12 +45,18 @@ def run_loop(*, max_iterations: int | None = None) -> None:
     queue = build_exit_advice_queue(client)
     next_energy_check = 0.0
     energy_standby = False
+    previous_energy_standby = False
     iterations = 0
     while max_iterations is None or iterations < max_iterations:
         now_monotonic = time.monotonic()
         if now_monotonic >= next_energy_check:
             energy_standby = bool(_energy_saving_standby(client))
             next_energy_check = now_monotonic + EVALUATION_INTERVAL_SECONDS
+            if energy_standby and not previous_energy_standby:
+                reclaim_runtime_memory(
+                    settings, reason="exit-worker-energy-standby", force=True
+                )
+            previous_energy_standby = energy_standby
         publish_service_heartbeat(
             client, role="exit-advice-worker", energy_saving=energy_standby
         )
@@ -78,6 +85,7 @@ def run_loop(*, max_iterations: int | None = None) -> None:
                     )
         finally:
             queue.acknowledge(advice_id)
+            reclaim_runtime_memory(settings, reason="exit-worker-job-complete")
         iterations += 1
 
 

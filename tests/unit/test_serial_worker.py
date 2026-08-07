@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from pytest import MonkeyPatch
+
 from ashare_ai.core.energy_saving import DEEP_STANDBY_SECONDS
 from ashare_ai.orchestration import serial_worker
 
@@ -24,7 +26,9 @@ def test_dual_job_worker_does_not_build_a_research_consumer() -> None:
     ]
 
 
-def test_serial_worker_promotes_due_delayed_jobs_before_claiming(monkeypatch) -> None:
+def test_serial_worker_promotes_due_delayed_jobs_before_claiming(
+    monkeypatch: MonkeyPatch,
+) -> None:
     events: list[str] = []
     isolated: list[tuple[str, str]] = []
 
@@ -76,9 +80,10 @@ def test_serial_worker_promotes_due_delayed_jobs_before_claiming(monkeypatch) ->
     assert isolated == [("maintenance", "tick"), ("schedule", "tick")]
 
 
-def test_serial_worker_skips_polling_in_deep_standby(monkeypatch) -> None:
+def test_serial_worker_skips_polling_in_deep_standby(monkeypatch: MonkeyPatch) -> None:
     sleeps: list[float] = []
     isolated: list[tuple[str, str]] = []
+    reclaimed: list[tuple[str, bool]] = []
     runtime = SimpleNamespace(
         execution_mode="SERIAL",
         topology_sha256="t" * 64,
@@ -105,6 +110,12 @@ def test_serial_worker_skips_polling_in_deep_standby(monkeypatch) -> None:
         serial_worker, "_energy_saving_standby", lambda _client: DEEP_STANDBY_SECONDS
     )
     monkeypatch.setattr(serial_worker, "publish_heartbeat", lambda *_args, **_kwargs: None)
+    def reclaim_runtime_memory(
+        _settings: object, *, reason: str, force: bool = False
+    ) -> None:
+        reclaimed.append((reason, force))
+
+    monkeypatch.setattr(serial_worker, "reclaim_runtime_memory", reclaim_runtime_memory)
     monkeypatch.setattr(
         serial_worker,
         "build_queues",
@@ -127,3 +138,4 @@ def test_serial_worker_skips_polling_in_deep_standby(monkeypatch) -> None:
     # research dispatch is never lost) but stops per-second queue polling.
     assert isolated == [("maintenance", "tick"), ("schedule", "tick")]
     assert sleeps == [DEEP_STANDBY_SECONDS, DEEP_STANDBY_SECONDS]
+    assert reclaimed == [("job-worker-energy-standby", True)]

@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     market_hedge_delay_seconds: float = Field(default=0.5, ge=0.1, le=3.0)
     api_runtime_mode: Literal["LIGHTWEIGHT", "SUPREME"] = "LIGHTWEIGHT"
     api_runtime_auto_close: bool = True
+    memory_reclaim_enabled: bool = True
+    memory_reclaim_min_rss_mib: int = Field(default=160, ge=32, le=4096)
+    memory_reclaim_cooldown_seconds: int = Field(default=300, ge=30, le=3600)
     # After close and once all daily research is complete, workers enter deep
     # standby and the host-side topology controller may stop optional services
     # (searxng, idle workers) until new work appears.  Default off: opting in

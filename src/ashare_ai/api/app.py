@@ -203,6 +203,7 @@ from ashare_ai.market.service import (
 from ashare_ai.notifications.push import PushConfigurationError, PushDeviceService
 from ashare_ai.notifications.service import InvalidNotificationCursor, NotificationService
 from ashare_ai.observability.audit import AuditLogger
+from ashare_ai.observability.memory_reclaimer import reclaim_runtime_memory
 from ashare_ai.observability.runtime_resources import sample_runtime_resources
 from ashare_ai.orchestration.backtest_jobs import enqueue_backtest
 from ashare_ai.orchestration.daily import load_pipeline
@@ -368,6 +369,18 @@ def _reconcile_market_runtime(now: datetime | None = None) -> None:
         release = getattr(market, "release_after_close", None)
         if callable(release):
             release()
+        get_financial_search_service.cache_clear()
+        with _market_session_calendar_cache_lock:
+            _market_session_calendar_cache.clear()
+        report = reclaim_runtime_memory(settings, reason="api-after-close")
+        if report.attempted:
+            logger.debug(
+                "process memory reclaimed reason=%s bytes=%s objects=%s allocator_trimmed=%s",
+                report.reason,
+                report.reclaimed_bytes,
+                report.collected_objects,
+                report.allocator_trimmed,
+            )
         return
     if policy.mode == "SUPREME" and not market.start():
         logger.warning("supreme market provider warmup failed; fallbacks remain available")

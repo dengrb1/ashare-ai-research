@@ -43,6 +43,44 @@ def test_lake_reads_only_committed_manifests(tmp_path) -> None:
     assert result == [{"symbol": "600000.SH", "close": 10.0}]
 
 
+def test_lake_streams_query_results_as_arrow_batches(tmp_path) -> None:
+    lake = ImmutableLake(tmp_path / "lake")
+    snapshot = lake.write_snapshot(
+        dataset="daily_bar",
+        source="fixture",
+        schema_version="1",
+        adapter_version="1",
+        fetched_at=datetime(2026, 7, 14, 18, tzinfo=TZ),
+        rows=[{"symbol": f"600{i:03d}.SH", "close": float(i)} for i in range(5)],
+    ).model_copy(update={"status": SnapshotStatus.COMMITTED})
+
+    batches = list(
+        lake.query_batches(
+            "SELECT symbol, close FROM snapshot ORDER BY symbol",
+            [snapshot],
+            batch_size=2,
+        )
+    )
+    assert [batch.num_rows for batch in batches] == [2, 2, 1]
+    assert [row for batch in batches for row in batch.to_pylist()] == [
+        {"symbol": f"600{i:03d}.SH", "close": float(i)} for i in range(5)
+    ]
+    result = lake.query_arrow("SELECT close FROM snapshot ORDER BY close", [snapshot]).to_pylist()
+    assert result == [
+        {"close": float(i)} for i in range(5)
+    ]
+    empty = lake.query_arrow(
+        "SELECT close FROM snapshot WHERE close > 100", [snapshot]
+    ).to_pylist()
+    assert empty == []
+
+
+def test_lake_rejects_invalid_query_batch_size(tmp_path) -> None:
+    lake = ImmutableLake(tmp_path / "lake")
+    with pytest.raises(ValueError, match="batch_size must be positive"):
+        list(lake.query_batches("SELECT 1", [], batch_size=0))
+
+
 def test_snapshot_registration_is_idempotent_after_commit(tmp_path) -> None:
     engine = create_engine("sqlite+pysqlite://")
     Base.metadata.create_all(engine)
