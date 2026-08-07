@@ -213,7 +213,7 @@ class NeoDataFinancialSearchProvider:
     def _search_cli(self, query: str) -> dict[str, Any]:
         if self.script_path is None:
             raise RuntimeError("NeoData query.py is unavailable")
-        flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
         try:
             completed = subprocess.run(
                 [
