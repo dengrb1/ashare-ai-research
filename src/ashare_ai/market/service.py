@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import queue
@@ -11,6 +12,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import suppress
@@ -58,6 +60,8 @@ _CALENDAR_FULL_END = date(2100, 1, 1)
 # service request gate on one shared constant so they cannot drift apart.
 MAX_CALENDAR_RANGE_DAYS = 40_200
 MAX_CALENDAR_ITEMS = 65_536
+
+logger = logging.getLogger(__name__)
 
 
 def _calendar_range(values: object, start_date: date, end_date: date) -> tuple[date, ...]:
@@ -1229,6 +1233,10 @@ class MarketDataService:
                 self._provider_max_queue,
             )
         )
+        # Stale-while-revalidate bookkeeping: at most one background refresh per
+        # cache key, so sustained stale polls never stack unbounded threads.
+        self._background_refreshing: set[str] = set()
+        self._background_guard = threading.Lock()
 
     def start(self) -> bool:
         if isinstance(self.primary, AKShareMarketProvider):
@@ -1242,6 +1250,8 @@ class MarketDataService:
             self.primary.close()
         with self._cache_guard:
             self._cache.clear()
+        with self._background_guard:
+            self._background_refreshing.clear()
         with self._guard:
             self._locks.clear()
 
@@ -1576,6 +1586,32 @@ class MarketDataService:
         cached_at = datetime.fromisoformat(record["cached_at"])
         return (now - cached_at).total_seconds() <= self.settings.market_stale_seconds
 
+    def _spawn_background_refresh(self, key: str, work: Callable[[], object]) -> None:
+        """Run ``work()`` in a daemon thread, at most one per cache key.
+
+        ``work`` is a full ``force_refresh`` market call that reuses the existing
+        lock + single-flight claim + cache write path, so a stale value is
+        refreshed in place without ever blocking the caller on the provider
+        network.  The per-key guard keeps sustained stale polls from stacking
+        unbounded threads.
+        """
+
+        with self._background_guard:
+            if key in self._background_refreshing:
+                return
+            self._background_refreshing.add(key)
+
+        def runner() -> None:
+            try:
+                work()
+            except Exception:
+                logger.debug("background market refresh failed key=%s", key, exc_info=True)
+            finally:
+                with self._background_guard:
+                    self._background_refreshing.discard(key)
+
+        threading.Thread(target=runner, name="market-swr", daemon=True).start()
+
     def quotes(
         self, symbols: list[str], *, force_refresh: bool = False
     ) -> list[dict[str, Any]]:
@@ -1611,6 +1647,18 @@ class MarketDataService:
             and self._fresh(cached, now)
             and len(selected(cached)) == len(normalized)
         ):
+            return selected(cached, cache_hit=True)
+        # Stale-while-revalidate: serve the last-known snapshot immediately and
+        # refresh it in the background so a poll never blocks on the provider.
+        if (
+            not force_refresh
+            and cached is not None
+            and self._usable_stale(cached, now)
+            and len(selected(cached)) == len(normalized)
+        ):
+            self._spawn_background_refresh(
+                key, lambda: self.quotes(normalized, force_refresh=True)
+            )
             return selected(cached, cache_hit=True)
         with self._lock(key):
             now = self.clock()
@@ -1735,6 +1783,13 @@ class MarketDataService:
 
         if not force_refresh and cached is not None and self._fresh(cached, now):
             return cached_item(cached, cache_hit=True)
+        # Stale-while-revalidate: serve the last-known quote instantly and
+        # refresh in the background instead of blocking the caller.
+        if not force_refresh and cached is not None and self._usable_stale(cached, now):
+            self._spawn_background_refresh(
+                f"quote:{normalized}", lambda: self.quote(normalized, force_refresh=True)
+            )
+            return cached_item(cached, cache_hit=True)
         with self._lock(key):
             now = self.clock()
             cached = self._get(key, now)
@@ -1839,6 +1894,25 @@ class MarketDataService:
         now = self.clock()
         cached = self._get(key, now)
         if not force_refresh and cached is not None and self._fresh(cached, now):
+            return _mark_kline_cache_hit(
+                _filter_kline_range(cast(dict[str, Any], cached["value"]), start, end, limit)
+            )
+        # Stale-while-revalidate: serve the last-known K-line series instantly
+        # and refresh it in the background instead of blocking the caller.
+        if not force_refresh and cached is not None and self._usable_stale(cached, now):
+            self._spawn_background_refresh(
+                key,
+                lambda: self.klines(
+                    symbol,
+                    period,
+                    limit=limit,
+                    start=start,
+                    end=end,
+                    force_refresh=True,
+                    background=True,
+                    adjustment=adjustment,
+                ),
+            )
             return _mark_kline_cache_hit(
                 _filter_kline_range(cast(dict[str, Any], cached["value"]), start, end, limit)
             )

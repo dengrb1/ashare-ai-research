@@ -55,6 +55,15 @@ class Settings(BaseSettings):
     market_stale_seconds: int = Field(default=900, ge=15, le=86_400)
     market_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
     market_hedge_delay_seconds: float = Field(default=0.5, ge=0.1, le=3.0)
+    # Server-side market warmup: during trading hours the job-worker periodically
+    # pre-fetches the union of every user's watchlist/positions (bounded) into the
+    # shared market cache so first page loads do not wait on the provider network.
+    market_warmup_enabled: bool = True
+    market_warmup_interval_minutes: int = Field(default=5, ge=1, le=120)
+    market_warmup_max_symbols: int = Field(default=50, ge=1, le=50)
+    market_warmup_index_symbols: str = ""
+    market_warmup_kline_limit: int = Field(default=160, ge=20, le=1200)
+    market_warmup_debounce_seconds: int = Field(default=300, ge=15, le=3600)
     api_runtime_mode: Literal["LIGHTWEIGHT", "SUPREME"] = "LIGHTWEIGHT"
     api_runtime_auto_close: bool = True
     memory_reclaim_enabled: bool = True

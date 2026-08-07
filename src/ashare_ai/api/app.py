@@ -8,11 +8,12 @@ import logging
 import os
 import shutil
 import sys
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 from typing import Annotated, Any, Literal, NoReturn, cast
 from uuid import uuid4
 
@@ -196,6 +197,7 @@ from ashare_ai.core.system_settings import (
 from ashare_ai.core.time import SHANGHAI, market_session
 from ashare_ai.core.user_errors import public_error_message
 from ashare_ai.market.service import (
+    MAX_PREFETCH_SYMBOLS,
     get_market_data_service,
     normalize_adjustment,
     reset_market_data_service,
@@ -325,6 +327,11 @@ SystemSettingsUnlockToken = Annotated[str | None, Header(alias="X-System-Setting
 
 _market_session_calendar_cache: dict[date, tuple[date, ...]] = {}
 _market_session_calendar_cache_lock = Lock()
+
+# Debounce server-side warmup per user so repeated bootstrap calls (app opens,
+# native client wake, web navigation) do not each re-warm the same symbols.
+_bootstrap_warm_at: dict[str, float] = {}
+_bootstrap_warm_guard = Lock()
 
 # Bound the number of symbols a single quote request may ask for; the market
 # service scans a full-market snapshot per request, so this prevents one
@@ -953,10 +960,71 @@ def asset_state(db: DbSession, context: Current) -> AssetStateResponse:
     return AssetStateResponse.model_validate(UserAssetService(db).get(context.user.user_id))
 
 
+def _warm_user_market(user_id: str) -> None:
+    """Fire-and-forget warm of the caller's watchlist/positions after bootstrap.
+
+    Runs in a daemon thread with its own database session so the request is never
+    delayed; debounced per user so repeated bootstrap calls (app open, native
+    client wake, web navigation) do not each re-warm the same symbols.
+    """
+
+    settings = get_settings()
+    if not settings.market_warmup_enabled:
+        return
+    with _bootstrap_warm_guard:
+        now_monotonic = time.monotonic()
+        if (
+            now_monotonic - _bootstrap_warm_at.get(user_id, 0.0)
+            < settings.market_warmup_debounce_seconds
+        ):
+            return
+        # Bounded memory: once the table grows, drop entries whose debounce
+        # window has passed so it never tracks every user who ever logged in.
+        if len(_bootstrap_warm_at) >= 1024:
+            expired = [
+                key
+                for key, value in _bootstrap_warm_at.items()
+                if now_monotonic - value >= settings.market_warmup_debounce_seconds
+            ]
+            for key in expired:
+                del _bootstrap_warm_at[key]
+        _bootstrap_warm_at[user_id] = now_monotonic
+
+    def runner() -> None:
+        try:
+            with SessionLocal() as session:
+                assets = UserAssetService(session).get(user_id)
+            symbols = sorted(
+                {
+                    str(item).strip()
+                    for item in assets["watchlist"]
+                    if isinstance(item, str) and item.strip()
+                }
+                | {
+                    str(position["symbol"]).strip()
+                    for position in assets["positions"]
+                    if position.get("symbol") is not None
+                }
+            )[: MAX_PREFETCH_SYMBOLS]
+            if not symbols:
+                return
+            get_market_data_service().prefetch(
+                symbols,
+                periods=["day"],
+                limit=160,
+                include_quotes=True,
+            )
+        except Exception:
+            logger.debug("bootstrap market warm failed user=%s", user_id, exc_info=True)
+
+    Thread(target=runner, name="market-warm-user", daemon=True).start()
+
+
 @app.get("/api/v1/app/bootstrap", response_model=AppBootstrapResponse)
 def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
     """Return the stable, authenticated initialization contract for native clients."""
     assets = AssetStateResponse.model_validate(UserAssetService(db).get(context.user.user_id))
+    _warm_user_market(context.user.user_id)
     return AppBootstrapResponse(
         server_time=datetime.now(UTC),
         user=_user_response(context.user),

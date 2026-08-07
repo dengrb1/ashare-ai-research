@@ -11,6 +11,7 @@ from ashare_ai.core.config import get_settings
 from ashare_ai.core.energy_saving import DEEP_STANDBY_SECONDS, EVALUATION_INTERVAL_SECONDS
 from ashare_ai.core.system_settings import SystemConfigurationService, SystemRuntimeSettings
 from ashare_ai.core.time import SHANGHAI
+from ashare_ai.market.warmup import warm_market_if_due
 from ashare_ai.observability.memory_reclaimer import reclaim_runtime_memory
 from ashare_ai.orchestration.isolated_job import execute_isolated
 from ashare_ai.orchestration.redis_queue import RedisLeasedQueue
@@ -149,6 +150,11 @@ def run_loop(*, max_iterations: int | None = None) -> None:
                     return_code,
                 )
             next_schedule_check = now_monotonic + seconds_until_next_tick(datetime.now(SHANGHAI))
+        # Warm the shared market cache (quotes + daily klines for the union of
+        # watchlists/positions) during trading hours.  The gate is cheap when
+        # disabled/after close and the actual fetch runs in a background thread,
+        # so this never delays queue polling or other scheduled work.
+        warm_market_if_due()
         if energy_standby:
             # Deep standby: keep the scheduler and maintenance alive but stop
             # per-second queue polling.  A new job flips the state on the next

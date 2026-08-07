@@ -7,6 +7,17 @@
       "runtimeArgs": ["run", "dev"],
       "cwd": "F:/code/ashare-ai-src/web",
       "port": 5173
+    },
+    {
+      "name": "ashare-web-native-proxy",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": ["/c", "set VITE_API_PROXY_TARGET=http://127.0.0.1:58000 && npm run dev"],
+      "cwd": "F:/code/ashare-ai-src/web",
+      "port": 5173
+    },
+    {
+      "name": "ashare-native-live",
+      "url": "http://127.0.0.1:58000"
     }
   ]
 }

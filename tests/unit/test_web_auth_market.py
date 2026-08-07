@@ -142,6 +142,15 @@ def test_lagging_hfq_daily_series_is_completed_from_current_sina_close() -> None
     assert result["status"]["delayed"] is False
 
 
+def _wait_until(predicate, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError("condition not met within timeout")
+
+
 class QuoteProvider:
     source = "akshare"
 
@@ -802,7 +811,6 @@ def test_quote_cache_is_shared_across_disjoint_symbol_sets_and_degrades_stale() 
     provider = QuoteProvider()
     current = [datetime(2026, 7, 15, 2, tzinfo=UTC)]
     settings = Settings(
-        redis_url="redis://127.0.0.1:1/0",
         market_cache_seconds=15,
         market_stale_seconds=60,
         market_timeout_seconds=1,
@@ -812,16 +820,24 @@ def test_quote_cache_is_shared_across_disjoint_symbol_sets_and_degrades_stale() 
         fallback=EmptyFallback(),
         settings=settings,
         clock=lambda: current[0],
+        redis_client=None,
     )
     assert service.quotes(["600000.SH"])[0]["price"] == 10
     assert service.quotes(["000001.SZ"])[0]["price"] == 12
     assert provider.calls == 1
     current[0] += timedelta(seconds=16)
     provider.fail = True
+    # Stale-while-revalidate serves the shared snapshot instantly.
     stale = service.quotes(["600000.SH"])
-    assert stale[0]["status"]["delayed"] is True
-    assert stale[0]["status"]["stale"] is True
-    assert provider.calls == 2
+    assert stale[0]["price"] == 10
+    assert stale[0]["status"]["cache_hit"] is True
+    # The background refresh observes the outage and marks the shared record so
+    # subsequent reads surface the degradation.
+    _wait_until(
+        lambda: service.quotes(["600000.SH"])[0]["status"].get("delayed") is True
+    )
+    degraded = service.quotes(["600000.SH"])
+    assert degraded[0]["status"]["stale"] is True
 
 
 def test_quote_cache_older_than_stale_limit_is_not_reused() -> None:
@@ -1205,8 +1221,10 @@ def test_daily_kline_uses_independent_five_minute_cache() -> None:
     service.klines("600519.SH", "day", limit=160)
     assert provider.kline_calls["600519.SH"] == 1
     current[0] += timedelta(seconds=2)
+    # Cache expired: stale-while-revalidate serves it instantly and refreshes in
+    # the background, so the provider is still called exactly once more.
     service.klines("600519.SH", "day", limit=160)
-    assert provider.kline_calls["600519.SH"] == 2
+    _wait_until(lambda: provider.kline_calls.get("600519.SH", 0) == 2)
 
 
 def _daily_bar(close: float = 10.5) -> list[dict[str, object]]:
@@ -1480,12 +1498,17 @@ def test_kline_timeout_degrades_to_recent_cache() -> None:
     provider.delay = 0.2
     settings.market_timeout_seconds = 0.01
 
+    # Stale-while-revalidate serves the last-known series instantly.
     stale = service.klines("600519.SH", "day", limit=160)
-
     assert stale["bars"]
-    assert stale["status"]["delayed"] is True
-    assert stale["status"]["stale"] is True
-    assert "timeout" in stale["status"]["message"]
+    assert stale["status"]["cache_hit"] is True
+
+    # A forced refresh surfaces the upstream timeout as a degraded series.
+    degraded = service.klines("600519.SH", "day", limit=160, force_refresh=True)
+    assert degraded["bars"]
+    assert degraded["status"]["delayed"] is True
+    assert degraded["status"]["stale"] is True
+    assert "timeout" in degraded["status"]["message"]
 
 
 def test_prefetch_api_requires_auth_csrf_and_returns_indexed_results(monkeypatch) -> None:
