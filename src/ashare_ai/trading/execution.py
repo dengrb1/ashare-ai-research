@@ -185,9 +185,17 @@ class DailyExecutionModel:
     ) -> tuple[ExecutionResult, ...]:
         consumed_volume: dict[str, int] = defaultdict(int)
         results: list[ExecutionResult] = []
-        ordered = sorted(
-            orders,
-            key=lambda order: (0 if order.side == Side.SELL else 1, order.symbol, order.order_id),
+        ordered = (
+            orders
+            if len(orders) < 2
+            else sorted(
+                orders,
+                key=lambda order: (
+                    0 if order.side == Side.SELL else 1,
+                    order.symbol,
+                    order.order_id,
+                ),
+            )
         )
         for order in ordered:
             bar = bars.get(order.symbol)
@@ -209,6 +217,31 @@ class DailyExecutionModel:
             results.append(result)
         return tuple(results)
 
+    def execute_order(
+        self,
+        *,
+        order: Order,
+        bar: ExecutionBar,
+        rule: TradingRule,
+        account: AccountState,
+        next_trading_date: date,
+        adv_amount: Decimal,
+        volatility: float,
+        reference_open: Decimal | None = None,
+    ) -> ExecutionResult:
+        """Execute one optimizer order without allocating sort/context containers."""
+        return self._execute_one(
+            order=order,
+            bar=bar,
+            rule=rule,
+            account=account,
+            next_trading_date=next_trading_date,
+            adv_amount=adv_amount,
+            volatility=volatility,
+            already_consumed_volume=0,
+            reference_open=reference_open,
+        )
+
     def _execute_one(
         self,
         *,
@@ -220,6 +253,7 @@ class DailyExecutionModel:
         adv_amount: Decimal,
         volatility: float,
         already_consumed_volume: int,
+        reference_open: Decimal | None = None,
     ) -> ExecutionResult:
         if bar.trade_status != TradeStatus.TRADING or bar.volume <= 0:
             return self._reject(order, RejectReason.SUSPENDED)
@@ -261,14 +295,17 @@ class DailyExecutionModel:
             return self._reject(order, RejectReason.PARTICIPATION_LIMIT)
         fill_quantity = min(order.quantity, available_capacity)
 
+        execution_open = reference_open if reference_open is not None else bar.open
         slippage_bps = self._slippage_bps(
             order=order,
-            reference_price=bar.open,
+            reference_price=execution_open,
             adv_amount=adv_amount,
             volatility=volatility,
         )
         direction = Decimal("1") if order.side == Side.BUY else Decimal("-1")
-        fill_price = bar.open * (Decimal("1") + direction * slippage_bps / Decimal("10000"))
+        fill_price = execution_open * (
+            Decimal("1") + direction * slippage_bps / Decimal("10000")
+        )
         if band.upper is not None:
             fill_price = min(fill_price, band.upper)
         if band.lower is not None:
@@ -335,7 +372,7 @@ class DailyExecutionModel:
             transfer_fee=transfer_fee,
             total_fee=total_fee,
             slippage_bps=slippage_bps,
-            slippage_cost=abs(fill_price - bar.open) * fill_quantity,
+            slippage_cost=abs(fill_price - execution_open) * fill_quantity,
             market_volume=bar.volume,
             participation_rate=Decimal(fill_quantity) / Decimal(bar.volume),
         )

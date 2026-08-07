@@ -42,6 +42,9 @@ def test_compose_declares_low_memory_control_plane() -> None:
     assert "healthcheck" in services["redis"]
     assert ".env.docker" in services["api"]["env_file"]
     assert "host.docker.internal:host-gateway" in services["job-worker"]["extra_hosts"]
+    assert services["searxng"]["profiles"] == ["search"]
+    assert "searxng" not in services["api"]["depends_on"]
+    assert "searxng" not in services["job-worker"]["depends_on"]
     web_loopback = "${WEB_BIND_ADDRESS:-127.0.0.1}"
     api_loopback = "${API_BIND_ADDRESS:-127.0.0.1}"
     service_loopback = "${SERVICE_BIND_ADDRESS:-127.0.0.1}"
@@ -142,8 +145,8 @@ def test_local_and_docker_environment_templates_are_separated() -> None:
     assert "MODEL_SETTINGS_ENCRYPTION_KEYS=" in local
     assert "MARKET_KLINE_CACHE_SECONDS=300" in local
     assert "MARKET_PREFETCH_MAX_WORKERS=4" in docker
-    assert "AKSHARE_FETCH_MAX_ATTEMPTS=2" in local
-    assert "AKSHARE_FETCH_BACKOFF_SECONDS=1" in docker
+    assert "AKSHARE_FETCH_MAX_ATTEMPTS=3" in local
+    assert "AKSHARE_FETCH_BACKOFF_SECONDS=5" in docker
 
 
 def test_container_install_uses_dependency_lock() -> None:

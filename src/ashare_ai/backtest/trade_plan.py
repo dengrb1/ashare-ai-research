@@ -7,6 +7,7 @@ from enum import StrEnum
 from itertools import product
 from math import sqrt
 from statistics import fmean, pstdev
+from typing import NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -18,10 +19,21 @@ from ashare_ai.trading.execution import (
     ExecutionConfig,
     Order,
     OrderStatus,
+    PositionLot,
 )
 from ashare_ai.trading.rules import TradingRule
 
 OPTIMIZER_VERSION = "trade-plan-grid-oos-v1"
+
+
+class _PreparedBuy(NamedTuple):
+    buy_index: int
+    entry_price: Decimal
+    quantity: int
+    cash_after_buy: Decimal
+    acquired_date: date
+    sellable_date: date
+    unit_cost: Decimal
 
 
 class TradePlanOutcome(StrEnum):
@@ -352,6 +364,10 @@ def optimize_trade_strategy(
     training_calendar = calendar[:training_count]
     validation_calendar = calendar[training_count:]
     execution = DailyExecutionModel(execution_config)
+    buy_cache: dict[tuple[date, Decimal, int], _PreparedBuy | None] = {}
+    exit_cache: dict[tuple[object, ...], float | None] = {}
+    metrics_cache: dict[tuple[float, ...], StrategyMetrics] = {}
+    path_cache: dict[tuple[date, Decimal, int], tuple[tuple[date, ExecutionBar, Decimal], ...]] = {}
     passing: list[tuple[OptimizedStrategy, tuple[float, float, float]]] = []
     for values in product(
         entry_discounts,
@@ -378,6 +394,10 @@ def optimize_trade_strategy(
             execution=execution,
             parameters=parameters,
             entry_step_sessions=entry_step_sessions,
+            buy_cache=buy_cache,
+            exit_cache=exit_cache,
+            metrics_cache=metrics_cache,
+            path_cache=path_cache,
         )
         validation = _simulate_parameter_set(
             symbol=symbol,
@@ -389,6 +409,10 @@ def optimize_trade_strategy(
             execution=execution,
             parameters=parameters,
             entry_step_sessions=entry_step_sessions,
+            buy_cache=buy_cache,
+            exit_cache=exit_cache,
+            metrics_cache=metrics_cache,
+            path_cache=path_cache,
         )
         if (
             validation.net_return <= 0
@@ -439,6 +463,12 @@ def _simulate_parameter_set(
     execution: DailyExecutionModel,
     parameters: StrategyParameters,
     entry_step_sessions: int = 10,
+    buy_cache: dict[tuple[date, Decimal, int], _PreparedBuy | None] | None = None,
+    exit_cache: dict[tuple[object, ...], float | None] | None = None,
+    metrics_cache: dict[tuple[float, ...], StrategyMetrics] | None = None,
+    path_cache: dict[
+        tuple[date, Decimal, int], tuple[tuple[date, ExecutionBar, Decimal], ...]
+    ] | None = None,
 ) -> StrategyMetrics:
     returns: list[float] = []
     fill_count = 0
@@ -453,36 +483,46 @@ def _simulate_parameter_set(
             volatilities=volatilities,
             execution=execution,
             parameters=parameters,
+            buy_cache=buy_cache,
+            exit_cache=exit_cache,
+            path_cache=path_cache,
         )
         if outcome is None:
             continue
         fill_count += 1
         returns.append(outcome)
+    returns_key = tuple(returns)
+    if metrics_cache is not None and returns_key in metrics_cache:
+        return metrics_cache[returns_key]
     if not returns:
-        return StrategyMetrics(
+        metrics = StrategyMetrics(
             net_return=0,
             sharpe=0,
             maximum_drawdown=0,
             completed_trades=0,
             fill_count=0,
         )
-    mean_return = fmean(returns)
-    deviation = pstdev(returns) if len(returns) > 1 else 0.0
-    sharpe = mean_return / deviation * sqrt(25.2) if deviation > 0 else 0.0
-    equity = 1.0
-    peak = 1.0
-    max_drawdown = 0.0
-    for value in returns:
-        equity *= 1 + value
-        peak = max(peak, equity)
-        max_drawdown = max(max_drawdown, (peak - equity) / peak)
-    return StrategyMetrics(
-        net_return=round(equity - 1, 8),
-        sharpe=round(sharpe, 8),
-        maximum_drawdown=round(max_drawdown, 8),
-        completed_trades=len(returns),
-        fill_count=fill_count,
-    )
+    else:
+        mean_return = fmean(returns)
+        deviation = pstdev(returns) if len(returns) > 1 else 0.0
+        sharpe = mean_return / deviation * sqrt(25.2) if deviation > 0 else 0.0
+        equity = 1.0
+        peak = 1.0
+        max_drawdown = 0.0
+        for value in returns:
+            equity *= 1 + value
+            peak = max(peak, equity)
+            max_drawdown = max(max_drawdown, (peak - equity) / peak)
+        metrics = StrategyMetrics(
+            net_return=round(equity - 1, 8),
+            sharpe=round(sharpe, 8),
+            maximum_drawdown=round(max_drawdown, 8),
+            completed_trades=len(returns),
+            fill_count=fill_count,
+        )
+    if metrics_cache is not None:
+        metrics_cache[returns_key] = metrics
+    return metrics
 
 
 def _simulate_one_entry(
@@ -496,71 +536,100 @@ def _simulate_one_entry(
     volatilities: Mapping[date, float],
     execution: DailyExecutionModel,
     parameters: StrategyParameters,
+    buy_cache: dict[tuple[date, Decimal, int], _PreparedBuy | None] | None = None,
+    exit_cache: dict[tuple[object, ...], float | None] | None = None,
+    path_cache: dict[
+        tuple[date, Decimal, int], tuple[tuple[date, ExecutionBar, Decimal], ...]
+    ] | None = None,
 ) -> float | None:
     signal_date = calendar[entry_index]
-    reference = bars[signal_date].close
-    limit_price = _money(reference * (Decimal("1") - parameters.entry_discount))
     initial_cash = Decimal("100000")
-    buy_date: date | None = None
-    buy_result = None
-    account = AccountState(cash=initial_cash)
-    for offset in range(1, parameters.entry_valid_sessions + 1):
-        if entry_index + offset >= len(calendar):
-            break
-        current_date = calendar[entry_index + offset]
-        bar = bars[current_date]
-        rule = rules[current_date]
-        lot = int(rule.details.get("buy_qty_step", rule.lot_size))
-        quantity = int((initial_cash * Decimal("0.95") / limit_price) // lot) * lot
-        if quantity <= 0 or bar.low > limit_price:
-            continue
-        next_date = _next_date(calendar, entry_index + offset)
-        if next_date is None:
-            break
-        execution_bar = (
-            bar
-            if bar.open <= limit_price
-            else bar.model_copy(update={"open": min(max(limit_price, bar.low), bar.high)})
-        )
-        result = execution.execute_orders(
-            orders=[
-                Order(
+    buy_key = (signal_date, parameters.entry_discount, parameters.entry_valid_sessions)
+    prepared = buy_cache.get(buy_key) if buy_cache is not None else None
+    if buy_cache is None or buy_key not in buy_cache:
+        reference = bars[signal_date].close
+        limit_price = _money(reference * (Decimal("1") - parameters.entry_discount))
+        buy_date: date | None = None
+        buy_result = None
+        buy_account = AccountState.model_construct(cash=initial_cash, lots=[])
+        for offset in range(1, parameters.entry_valid_sessions + 1):
+            if entry_index + offset >= len(calendar):
+                break
+            current_date = calendar[entry_index + offset]
+            bar = bars[current_date]
+            rule = rules[current_date]
+            lot = int(rule.details.get("buy_qty_step", rule.lot_size))
+            quantity = int((initial_cash * Decimal("0.95") / limit_price) // lot) * lot
+            if quantity <= 0 or bar.low > limit_price:
+                continue
+            next_date = _next_date(calendar, entry_index + offset)
+            if next_date is None:
+                break
+            reference_open = min(max(limit_price, bar.low), bar.high)
+            result = execution.execute_order(
+                order=Order.model_construct(
                     order_id=f"tp-buy-{signal_date}-{current_date}",
                     symbol=symbol,
                     side=Side.BUY,
                     quantity=quantity,
                     limit_price=limit_price,
-                )
-            ],
-            bars={symbol: execution_bar},
-            rules={symbol: rule},
-            account=account,
-            next_trading_date=next_date,
-            adv_amounts={symbol: adv_amounts.get(current_date, Decimal("0"))},
-            volatilities={symbol: volatilities.get(current_date, 0.0)},
-        )[0]
-        if result.status in {OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED}:
-            buy_date = current_date
-            buy_result = result
-            break
-    if buy_date is None or buy_result is None or buy_result.fill_price is None:
+                ),
+                bar=bar,
+                rule=rule,
+                account=buy_account,
+                next_trading_date=next_date,
+                adv_amount=adv_amounts.get(current_date, Decimal("0")),
+                volatility=volatilities.get(current_date, 0.0),
+                reference_open=reference_open if bar.open > limit_price else None,
+            )
+            if result.status in {OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED}:
+                buy_date = current_date
+                buy_result = result
+                break
+        if buy_date is not None and buy_result is not None and buy_result.fill_price is not None:
+            lot_state = buy_account.lots[0]
+            prepared = _PreparedBuy(
+                calendar.index(buy_date),
+                buy_result.fill_price,
+                buy_result.filled_quantity,
+                buy_account.cash,
+                lot_state.acquired_date,
+                lot_state.sellable_date,
+                lot_state.unit_cost,
+            )
+        if buy_cache is not None:
+            buy_cache[buy_key] = prepared
+    if prepared is None:
         return None
-
-    buy_index = calendar.index(buy_date)
-    entry_price = buy_result.fill_price
-    highest = entry_price
-    quantity = buy_result.filled_quantity
+    buy_index = prepared.buy_index
+    entry_price = prepared.entry_price
+    quantity = prepared.quantity
+    account: AccountState | None = None
     sell_result = None
-    for holding_offset in range(1, parameters.max_holding_sessions + 1):
+    take_profit = parameters.take_profit
+    stop_loss = parameters.stop_loss
+    trailing_stop = parameters.trailing_stop
+    max_holding_sessions = parameters.max_holding_sessions
+    calendar_length = len(calendar)
+    path = path_cache.get(buy_key) if path_cache is not None else None
+    if path is None:
+        highest = entry_price
+        built_path: list[tuple[date, ExecutionBar, Decimal]] = []
+        for current_index in range(buy_index + 1, calendar_length):
+            current_date = calendar[current_index]
+            bar = bars[current_date]
+            highest = max(highest, bar.high)
+            built_path.append((current_date, bar, highest))
+        path = tuple(built_path)
+        if path_cache is not None:
+            path_cache[buy_key] = path
+    for holding_offset, (current_date, bar, highest) in enumerate(
+        path[:max_holding_sessions], start=1
+    ):
         current_index = buy_index + holding_offset
-        if current_index >= len(calendar):
-            break
-        current_date = calendar[current_index]
-        bar = bars[current_date]
-        highest = max(highest, bar.high)
-        stop_price = entry_price * (Decimal("1") - parameters.stop_loss)
-        take_price = entry_price * (Decimal("1") + parameters.take_profit)
-        trailing_price = highest * (Decimal("1") - parameters.trailing_stop)
+        stop_price = entry_price * (Decimal("1") - stop_loss)
+        take_price = entry_price * (Decimal("1") + take_profit)
+        trailing_price = highest * (Decimal("1") - trailing_stop)
         hit_stop = bar.low <= stop_price
         hit_take = bar.high >= take_price
         hit_trailing = holding_offset > 1 and bar.low <= trailing_price
@@ -572,37 +641,66 @@ def _simulate_one_entry(
         elif hit_take:
             trigger_price = take_price
         forced = (
-            holding_offset == parameters.max_holding_sessions
-            or current_index == len(calendar) - 1
+            holding_offset == max_holding_sessions
+            or current_index == calendar_length - 1
         )
         if trigger_price is None and not forced:
             continue
-        execution_bar = (
-            bar
-            if trigger_price is None
-            else bar.model_copy(update={"open": min(max(trigger_price, bar.low), bar.high)})
+        attempt_key = (
+            buy_key,
+            current_date,
+            trigger_price,
+            quantity,
         )
-        sell_result = execution.execute_orders(
-            orders=[
-                Order(
-                    order_id=f"tp-sell-{signal_date}-{current_date}",
-                    symbol=symbol,
-                    side=Side.SELL,
-                    quantity=quantity,
-                )
-            ],
-            bars={symbol: execution_bar},
-            rules={symbol: rules[current_date]},
+        if exit_cache is not None and attempt_key in exit_cache:
+            cached_outcome = exit_cache[attempt_key]
+            if cached_outcome is not None:
+                return cached_outcome
+            continue
+        if account is None:
+            account = AccountState.model_construct(
+                cash=prepared.cash_after_buy,
+                lots=[
+                    PositionLot.model_construct(
+                        symbol=symbol,
+                        quantity=quantity,
+                        acquired_date=prepared.acquired_date,
+                        sellable_date=prepared.sellable_date,
+                        unit_cost=prepared.unit_cost,
+                    )
+                ],
+            )
+        sell_result = execution.execute_order(
+            order=Order.model_construct(
+                order_id=f"tp-sell-{signal_date}-{current_date}",
+                symbol=symbol,
+                side=Side.SELL,
+                quantity=quantity,
+                limit_price=None,
+            ),
+            bar=bar,
+            rule=rules[current_date],
             account=account,
             next_trading_date=_next_date(calendar, current_index) or current_date,
-            adv_amounts={symbol: adv_amounts.get(current_date, Decimal("0"))},
-            volatilities={symbol: volatilities.get(current_date, 0.0)},
-        )[0]
+            adv_amount=adv_amounts.get(current_date, Decimal("0")),
+            volatility=volatilities.get(current_date, 0.0),
+            reference_open=(
+                None
+                if trigger_price is None
+                else min(max(trigger_price, bar.low), bar.high)
+            ),
+        )
         if sell_result.status in {OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED}:
+            outcome = float(account.cash / initial_cash - Decimal("1"))
+            if exit_cache is not None:
+                exit_cache[attempt_key] = outcome
             break
+        if exit_cache is not None:
+            exit_cache[attempt_key] = None
         sell_result = None
     if sell_result is None:
         return None
+    assert account is not None
     return float(account.cash / initial_cash - Decimal("1"))
 
 

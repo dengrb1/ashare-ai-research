@@ -75,6 +75,29 @@ def test_lake_streams_query_results_as_arrow_batches(tmp_path) -> None:
     assert empty == []
 
 
+def test_snapshot_streaming_keeps_payload_and_parquet_hashes_byte_identical(tmp_path) -> None:
+    rows = (
+        {"symbol": f"{600000 + index:06d}.SH", "close": float(index), "volume": index}
+        for index in range(70_000)
+    )
+    manifest = ImmutableLake(tmp_path / "lake").write_snapshot(
+        dataset="daily_bar",
+        source="fixture",
+        schema_version="1",
+        adapter_version="1",
+        fetched_at=datetime(2026, 7, 14, 18, tzinfo=TZ),
+        rows=rows,
+    )
+
+    assert manifest.row_count == 70_000
+    assert manifest.payload_sha256 == (
+        "8b20259d58ddfddc5fa23dd5ded21b8162788a476c3860cf46b4a777e38f093d"
+    )
+    assert manifest.metadata["parquet_file_sha256"] == (
+        "72b4977d87f174416b7a05a24cfe589386c1d8cf101e36d987680b701cecdbcc"
+    )
+
+
 def test_lake_rejects_invalid_query_batch_size(tmp_path) -> None:
     lake = ImmutableLake(tmp_path / "lake")
     with pytest.raises(ValueError, match="batch_size must be positive"):

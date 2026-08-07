@@ -173,11 +173,38 @@ def test_data_readiness_wait_continues_after_the_legacy_two_hour_window() -> Non
 
     assert ready is False
     assert queued and queued[0][0] == "research-run"
+    assert queued[0][1] == now + timedelta(minutes=5)
     assert now < queued[0][1] < deadline
     with factory() as session:
         run = session.get(JobRun, "research-run")
         assert run is not None and run.status == "DATA_READINESS_WAITING"
         assert run.manifest["data_readiness_wait"]["attempt_count"] == 1
+
+
+def test_data_readiness_retry_uses_batch_friendly_exponential_backoff() -> None:
+    deadline = datetime(2026, 7, 20, 1, 25, tzinfo=UTC)
+    factory = _waiting_factory(deadline=deadline)
+    queued: list[tuple[str, datetime]] = []
+    first = datetime(2026, 7, 17, 9, 10, tzinfo=UTC)
+
+    for current in (first, first + timedelta(minutes=5), first + timedelta(minutes=25)):
+        _retry_waiting_research(
+            "research-run",
+            now=current,
+            session_factory=factory,
+            readiness=lambda _date, _checked_at: False,
+            enqueue_at=lambda run_id, retry_at: queued.append((run_id, retry_at)),
+        )
+
+    assert [retry_at - current for (_, retry_at), current in zip(queued, (
+        first,
+        first + timedelta(minutes=5),
+        first + timedelta(minutes=25),
+    ), strict=True)] == [
+        timedelta(minutes=5),
+        timedelta(minutes=20),
+        timedelta(minutes=80),
+    ]
 
 
 def test_data_readiness_wait_promotes_late_data_before_next_session_cutoff() -> None:

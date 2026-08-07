@@ -314,10 +314,10 @@ class CountingBenchmarkProvider:
     def __init__(self) -> None:
         self.calls = 0
 
-    def benchmark_bars(self, code: str, start_date: date, end_date: date):
-        del code, start_date
+    def benchmark_bars_many(self, codes: tuple[str, ...], start_date: date, end_date: date):
+        del start_date
         self.calls += 1
-        return [{"date": end_date}]
+        return {code: [{"date": end_date}] for code in codes}
 
 
 class SlowBenchmarkProvider:
@@ -326,10 +326,10 @@ class SlowBenchmarkProvider:
     def __init__(self, delay: float) -> None:
         self.delay = delay
 
-    def benchmark_bars(self, code: str, start_date: date, end_date: date):
-        del code, start_date
+    def benchmark_bars_many(self, codes: tuple[str, ...], start_date: date, end_date: date):
+        del start_date
         time.sleep(self.delay)
-        return [{"date": end_date}]
+        return {code: [{"date": end_date}] for code in codes}
 
 
 def _patch_provider(monkeypatch: pytest.MonkeyPatch, provider: object) -> None:
@@ -347,11 +347,11 @@ def test_readiness_probes_three_series_and_caches(monkeypatch: pytest.MonkeyPatc
     checked_at = datetime.now(UTC)
 
     assert readiness.ready(trading_date, checked_at) is True
-    assert provider.calls == 3  # one benchmark_bars call per index series
+    assert provider.calls == 1
 
     # A second probe for the same trading date within the TTL is a cache hit.
     assert readiness.ready(trading_date, checked_at) is True
-    assert provider.calls == 3
+    assert provider.calls == 1
 
 
 def test_readiness_cache_expires_after_the_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -362,12 +362,12 @@ def test_readiness_cache_expires_after_the_ttl(monkeypatch: pytest.MonkeyPatch) 
     checked_at = datetime.now(UTC)
 
     assert readiness.ready(trading_date, checked_at) is True
-    assert provider.calls == 3
+    assert provider.calls == 1
 
-    # A checked_at past the 60s TTL misses the cache and probes again.
-    stale = checked_at + timedelta(seconds=61)
+    # A checked_at past the four-minute TTL misses the cache and probes again.
+    stale = checked_at + timedelta(seconds=241)
     assert readiness.ready(trading_date, stale) is True
-    assert provider.calls == 6
+    assert provider.calls == 2
 
 
 def test_readiness_budget_bounds_a_stalling_probe(monkeypatch: pytest.MonkeyPatch) -> None:

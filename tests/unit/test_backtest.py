@@ -218,6 +218,7 @@ def test_signal_is_executed_next_day_and_t1_sell_waits_until_following_session()
     assert result.symbol_attribution[0].symbol == "600000.SH"
     assert result.industry_attribution[0].industry_code == "BANK"
     assert result.cost_attribution.total_cost == 0
+    assert result.output_hash == "b61c4528c3ed54123dd8e473118c557f8e84d64b49518e3fa6e54578bd54b29f"
 
 
 def test_fixed_snapshot_hash_covers_adv_volatility_and_benchmarks() -> None:

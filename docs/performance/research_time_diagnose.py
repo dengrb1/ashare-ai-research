@@ -106,7 +106,9 @@ def _agent_summary(rows: list[dict[str, Any]]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Daily-research time diagnosis (read-only).")
     parser.add_argument("--env", type=Path, default=None, help="runtime .env with DATABASE_URL")
-    parser.add_argument("--runs", type=int, default=10, help="number of recent DAILY runs to inspect")
+    parser.add_argument(
+        "--runs", type=int, default=10, help="number of recent DAILY runs to inspect"
+    )
     args = parser.parse_args()
 
     url = _database_url(args.env)

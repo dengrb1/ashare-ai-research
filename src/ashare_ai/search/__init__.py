@@ -1,11 +1,9 @@
 """Interactive financial search isolated from frozen research snapshots."""
 
-from ashare_ai.search.service import (
-    FinancialSearchResponse,
-    FinancialSearchService,
-    FinancialSearchStatus,
-    get_financial_search_service,
-)
+from __future__ import annotations
+
+from importlib import import_module
+from typing import Any
 
 __all__ = [
     "FinancialSearchResponse",
@@ -13,3 +11,9 @@ __all__ = [
     "FinancialSearchStatus",
     "get_financial_search_service",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name not in __all__:
+        raise AttributeError(name)
+    return getattr(import_module("ashare_ai.search.service"), name)

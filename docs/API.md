@@ -312,13 +312,15 @@ Web 登录。请求体为 `LoginRequest`：
     "max_research_symbols":100,
     "max_trade_plan_symbols":15,
     "portfolio_target_count":15,
-    "features": {"watchlist_research_selection":true,"formal_watchlist_reports":true,"report_symbol_eligibility":true,"trade_plan_generation":true,"research_cancellation":true,"idempotency_key":true,"paper_portfolio_only":true,"profit_exit_monitor":true,"stop_loss_monitor":true,"buy_entry_monitor":true,"market_refresh_interval_setting":true,"notifications":true,"chat_context_metrics":true,"ai_cost_summary":true,"persistent_ai_chat":true,"chat_images_seven_day_retention":true,"personal_archive_export_import":true,"searxng_web_research":true},
+    "features": {"watchlist_research_selection":true,"formal_watchlist_reports":true,"report_symbol_eligibility":true,"trade_plan_generation":true,"research_cancellation":true,"idempotency_key":true,"paper_portfolio_only":true,"profit_exit_monitor":true,"stop_loss_monitor":true,"buy_entry_monitor":true,"market_refresh_interval_setting":true,"notifications":true,"chat_context_metrics":true,"ai_cost_summary":true,"persistent_ai_chat":true,"chat_images_seven_day_retention":true,"personal_archive_export_import":true,"searxng_web_research":false},
     "endpoints": {"assets":"/api/v1/assets","exit_monitor_settings":"/api/v1/assets/exit-monitor","market_refresh_settings":"/api/v1/assets/market-refresh","research_runs":"/api/v1/research/runs","research_run":"/api/v1/research/runs/{run_id}","research_settings":"/api/v1/research/settings","exit_advice":"/api/v1/exit-advice","manual_exit_advice":"/api/v1/exit-advice/manual","buy_entry_monitors":"/api/v1/buy-entry-monitors","notifications":"/api/v1/notifications","notification_summary":"/api/v1/notifications/summary","security_resolve":"/api/v1/securities/resolve","chat_metrics":"/api/v1/ai/chat/metrics","ai_costs":"/api/v1/ai/costs","ai_chat_threads":"/api/v1/ai/chat/threads","ai_chat_thread_index":"/api/v1/ai/chat/thread-index","personal_data_exports":"/api/v1/me/data-exports","personal_data_imports":"/api/v1/me/data-imports"}
   }
 }
 ```
 
 `portfolio_target_count` 从版本化策略配置读取，不应由客户端写入或覆盖。
+`searxng_web_research` 由服务端 `SEARXNG_BASE_URL` 动态决定；默认低内存栈为
+`false`，启用 Compose `search` profile 并配置该 URL 后为 `true`。
 
 ### 5.2 卖出建议、买入监控与通知
 

@@ -15,12 +15,18 @@ from pathlib import Path
 from typing import Any, Literal
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
 from ashare_ai.adapters.symbols import normalize_symbol
 from ashare_ai.agents.model_settings import ModelConfigurationService, ModelSettingsError
 from ashare_ai.agents.openai_compatible import OpenAICompatibleStructuredLLMClient
+from ashare_ai.api.schemas import (
+    FinancialSearchResponse,
+    FinancialSearchStatus,
+    SearchEntity,
+    SearchRecall,
+)
 from ashare_ai.core.config import Settings, get_settings
 from ashare_ai.core.hashing import stable_hash
 from ashare_ai.core.system_settings import get_effective_settings
@@ -47,56 +53,6 @@ _QUERY_CODES = {
     "创业板指": "s_sz399006",
     "沪深300": "s_sh000300",
 }
-
-
-class SearchEntity(BaseModel):
-    model_config = ConfigDict(extra="allow", frozen=True)
-
-    name: str
-    code: str
-
-
-class SearchRecall(BaseModel):
-    model_config = ConfigDict(extra="allow", frozen=True)
-
-    type: str
-    desc: str
-    content: str
-
-
-class FinancialSearchResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    query: str
-    provider: str
-    upstream: str
-    mode: Literal["cli", "embedded", "direct", "ai"]
-    searched_at: datetime
-    elapsed_ms: int = Field(ge=0)
-    entities: tuple[SearchEntity, ...]
-    recalls: tuple[SearchRecall, ...]
-    raw_sha256: str = Field(min_length=64, max_length=64)
-    outcome: dict[str, Any] = Field(default_factory=dict)
-    interpretation: str = ""
-    sources: tuple[dict[str, Any], ...] = ()
-    warnings: tuple[str, ...] = ()
-    live_data_isolated_from_snapshots: bool = True
-
-
-class FinancialSearchStatus(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    provider: str
-    upstream: str
-    mode: Literal["cli", "embedded", "direct", "ai"]
-    available: bool
-    configured: bool = False
-    reachable: bool = False
-    degraded: bool = False
-    model: str | None = None
-    script_path: str | None = None
-    message: str
-    live_data_isolated_from_snapshots: bool = True
 
 
 class FinancialSearchBusyError(RuntimeError):

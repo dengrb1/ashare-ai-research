@@ -10,7 +10,7 @@ x-app-service: &app-service
     MKL_NUM_THREADS: "1"
     NUMEXPR_NUM_THREADS: "1"
     ARROW_IO_THREADS: "1"
-    SEARXNG_BASE_URL: "http://searxng:8080"
+    SEARXNG_BASE_URL: "${SEARXNG_BASE_URL:-}"
     PRIVATE_OBJECT_ROOT: "/data/private"
   extra_hosts: ["host.docker.internal:host-gateway"]
   volumes:
@@ -128,8 +128,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      searxng:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')"]
       interval: 30s
@@ -148,8 +146,6 @@ services:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      searxng:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import redis; from ashare_ai.core.config import get_settings; assert redis.Redis.from_url(get_settings().redis_url).ping()"]
@@ -238,8 +234,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      searxng:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import redis; from ashare_ai.core.config import get_settings; assert redis.Redis.from_url(get_settings().redis_url).ping()"]
       interval: 30s
@@ -247,6 +241,7 @@ services:
       retries: 5
 
   searxng:
+    profiles: ["search"]
     image: searxng/searxng@sha256:800a5e3757df04f59e6bd6c622f15de2edbfa47f5591c5b82d4a8ff3b938a845
     restart: unless-stopped
     environment:

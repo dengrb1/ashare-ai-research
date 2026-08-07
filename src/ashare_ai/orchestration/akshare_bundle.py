@@ -226,7 +226,7 @@ class AKShareCanonicalProvider:
                 if rows:
                     return rows
             if round_index + 1 < self.max_attempts and self.backoff_seconds:
-                self.sleeper(self.backoff_seconds)
+                self.sleeper(self.backoff_seconds * (2**round_index))
         raise MarketDataAcquisitionError(
             operation=operation,
             subject=subject,
@@ -354,6 +354,75 @@ class AKShareCanonicalProvider:
                 ),
                 ("sina", sina_rows),
             ),
+        )
+
+    def benchmark_bars_many(
+        self,
+        codes: tuple[str, ...],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Fetch a readiness batch under one retry/backoff budget.
+
+        Each index still requires a vendor request, but failures no longer create
+        three nested retry loops.  A round first tries Eastmoney for every missing
+        series, then Sina only for those still missing, and backs off once for the
+        batch before another round.
+        """
+        sdk = self._sdk()
+        pending = tuple(dict.fromkeys(codes))
+        collected: dict[str, list[dict[str, Any]]] = {}
+        attempt_count = 0
+
+        def eastmoney_rows(code: str) -> list[dict[str, Any]]:
+            return self._records(
+                sdk.index_zh_a_hist(
+                    symbol=code,
+                    period="daily",
+                    start_date=start_date.strftime("%Y%m%d"),
+                    end_date=end_date.strftime("%Y%m%d"),
+                )
+            )
+
+        def sina_rows(code: str) -> list[dict[str, Any]]:
+            rows: list[dict[str, Any]] = []
+            for row in self._records(sdk.stock_zh_index_daily(symbol=f"sh{code}")):
+                try:
+                    value_date = date.fromisoformat(str(row.get("date"))[:10])
+                except ValueError:
+                    continue
+                if start_date <= value_date <= end_date:
+                    rows.append(
+                        {
+                            **row,
+                            "amount": row.get("amount", 0),
+                            "_canonical_source": "akshare-sina",
+                        }
+                    )
+            return rows
+
+        for round_index in range(self.max_attempts):
+            for source_fetcher in (eastmoney_rows, sina_rows):
+                for code in pending:
+                    if code in collected:
+                        continue
+                    attempt_count += 1
+                    try:
+                        rows = source_fetcher(code)
+                    except Exception:
+                        rows = []
+                    if rows:
+                        collected[code] = rows
+            if len(collected) == len(pending):
+                return collected
+            if round_index + 1 < self.max_attempts and self.backoff_seconds:
+                self.sleeper(self.backoff_seconds * (2**round_index))
+        missing = tuple(code for code in pending if code not in collected)
+        raise MarketDataAcquisitionError(
+            operation="benchmark_bars",
+            subject=",".join(missing),
+            attempt_count=attempt_count,
+            sources=("eastmoney", "sina"),
         )
 
     def financial_reports(self, symbol: str) -> list[dict[str, Any]]:

@@ -89,8 +89,8 @@ class Settings(BaseSettings):
     allow_demo_data: bool = False
     akshare_bundle_size: int = Field(default=20, ge=15, le=100)
     akshare_history_sessions: int = Field(default=280, ge=65, le=500)
-    akshare_fetch_max_attempts: int = Field(default=2, ge=1, le=5)
-    akshare_fetch_backoff_seconds: float = Field(default=1.0, ge=0, le=60)
+    akshare_fetch_max_attempts: int = Field(default=3, ge=1, le=5)
+    akshare_fetch_backoff_seconds: float = Field(default=5.0, ge=0, le=60)
     worker_lease_seconds: int = Field(default=900, ge=30, le=7200)
     supreme_mode_config_path: Path = runtime_resource_path("configs/supreme_mode.v1.json")
     ashare_pipeline_factory: str | None = None

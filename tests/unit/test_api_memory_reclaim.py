@@ -17,10 +17,6 @@ def test_after_close_releases_caches_and_reclaims_process_memory(
         def release_after_close(self) -> None:
             events.append("market-release")
 
-    class CachedSearchFactory:
-        def cache_clear(self) -> None:
-            events.append("search-cache-clear")
-
     settings = SimpleNamespace()
     policy = SimpleNamespace(auto_close_after_close=True, mode="LIGHTWEIGHT")
     report = SimpleNamespace(
@@ -33,7 +29,11 @@ def test_after_close_releases_caches_and_reclaims_process_memory(
     monkeypatch.setattr(api_module, "get_effective_settings", lambda: settings)
     monkeypatch.setattr(api_module, "runtime_mode_policy", lambda _settings: policy)
     monkeypatch.setattr(api_module, "get_market_data_service", Market)
-    monkeypatch.setattr(api_module, "get_financial_search_service", CachedSearchFactory())
+    monkeypatch.setattr(
+        api_module,
+        "_clear_financial_search_service",
+        lambda: events.append("search-cache-clear"),
+    )
     monkeypatch.setattr(api_module, "is_after_close", lambda _now=None: True)
     def reclaim_runtime_memory(actual: object, *, reason: str, force: bool = False) -> object:
         events.append(("reclaim", actual, reason, force))

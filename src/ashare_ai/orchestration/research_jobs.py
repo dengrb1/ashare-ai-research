@@ -135,8 +135,7 @@ def _retry_waiting_research(
             session.commit()
             return False
         retry_at = min(
-            current
-            + timedelta(minutes=get_effective_settings().daily_research_retry_minutes),
+            current + _readiness_retry_delay(wait),
             deadline,
         )
         wait["next_retry_at"] = retry_at.isoformat()
@@ -149,6 +148,13 @@ def _retry_waiting_research(
         session.commit()
     enqueue_at(run_id, retry_at)
     return False
+
+
+def _readiness_retry_delay(wait: dict[str, Any]) -> timedelta:
+    """Return a bounded exponential delay for an unavailable benchmark batch."""
+    base_minutes = get_effective_settings().daily_research_retry_minutes
+    completed_attempts = max(0, int(wait.get("attempt_count", 0)))
+    return timedelta(minutes=min(120, base_minutes * (4**completed_attempts)))
 
 
 def mark_research_failed(
@@ -392,10 +398,7 @@ def execute_research_job(
                         deadline = deadline.replace(tzinfo=UTC)
                     if now < deadline:
                         retry_at = min(
-                            now
-                            + timedelta(
-                                minutes=get_effective_settings().daily_research_retry_minutes
-                            ),
+                            now + _readiness_retry_delay(wait),
                             deadline,
                         )
                         wait.update(

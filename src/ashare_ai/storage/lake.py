@@ -11,10 +11,14 @@ from uuid import uuid4
 
 import duckdb
 import pyarrow as pa
+import pyarrow.ipc as ipc
 import pyarrow.parquet as pq
 
 from ashare_ai.core.contracts import SnapshotManifest, SnapshotStatus
-from ashare_ai.core.hashing import stable_hash
+from ashare_ai.core.hashing import canonical_json, stable_hash
+
+_SNAPSHOT_BATCH_ROWS = 65_536
+_DUCKDB_MEMORY_LIMIT_DEFAULT = "256 MiB"
 
 
 class ImmutableLake:
@@ -35,8 +39,6 @@ class ImmutableLake:
         rows: Iterable[Mapping[str, Any]],
         metadata: Mapping[str, Any] | None = None,
     ) -> SnapshotManifest:
-        materialized = list(rows)
-        payload_hash = stable_hash(materialized)
         partition = (
             self.root
             / dataset
@@ -48,16 +50,58 @@ class ImmutableLake:
         )
         partition.mkdir(parents=True, exist_ok=True)
         temp = partition / f".{uuid4().hex}.parquet.tmp"
-        table = pa.Table.from_pylist(materialized)
-        table_metadata = {
-            b"dataset": dataset.encode(),
-            b"source": source.encode(),
-            b"schema_version": schema_version.encode(),
-            b"adapter_version": adapter_version.encode(),
-            b"payload_sha256": payload_hash.encode(),
-        }
-        table = table.replace_schema_metadata(table_metadata)
-        pq.write_table(table, temp, compression="zstd")
+        spool = partition / f".{uuid4().hex}.arrow.tmp"
+        payload_digest = hashlib.sha256()
+        payload_digest.update(b"[")
+        row_count = 0
+        schema: pa.Schema | None = None
+        writer: ipc.RecordBatchFileWriter | None = None
+        try:
+            with spool.open("wb") as handle:
+                batch_rows: list[Mapping[str, Any]] = []
+                for row in rows:
+                    if row_count:
+                        payload_digest.update(b",")
+                    payload_digest.update(canonical_json(row))
+                    row_count += 1
+                    batch_rows.append(row)
+                    if len(batch_rows) < _SNAPSHOT_BATCH_ROWS:
+                        continue
+                    batch = pa.RecordBatch.from_pylist(batch_rows, schema=schema)
+                    if writer is None:
+                        schema = batch.schema
+                        writer = ipc.new_file(handle, schema)
+                    writer.write_batch(batch)
+                    batch_rows.clear()
+                if batch_rows:
+                    batch = pa.RecordBatch.from_pylist(batch_rows, schema=schema)
+                    if writer is None:
+                        schema = batch.schema
+                        writer = ipc.new_file(handle, schema)
+                    writer.write_batch(batch)
+                if writer is not None:
+                    writer.close()
+            payload_digest.update(b"]")
+            payload_hash = payload_digest.hexdigest()
+            if schema is None:
+                table = pa.Table.from_pylist([])
+                mapped = None
+            else:
+                mapped = pa.memory_map(str(spool), "r")
+                table = ipc.open_file(mapped).read_all()
+            table_metadata = {
+                b"dataset": dataset.encode(),
+                b"source": source.encode(),
+                b"schema_version": schema_version.encode(),
+                b"adapter_version": adapter_version.encode(),
+                b"payload_sha256": payload_hash.encode(),
+            }
+            table = table.replace_schema_metadata(table_metadata)
+            pq.write_table(table, temp, compression="zstd")
+            if mapped is not None:
+                mapped.close()
+        finally:
+            spool.unlink(missing_ok=True)
         file_hash = _file_sha256(temp)
         target = partition / f"{file_hash}.parquet"
         try:
@@ -73,7 +117,7 @@ class ImmutableLake:
             schema_version=schema_version,
             adapter_version=adapter_version,
             fetched_at=fetched_at,
-            row_count=len(materialized),
+            row_count=row_count,
             payload_sha256=payload_hash,
             parquet_uri=target.resolve().as_uri(),
             status=SnapshotStatus.STAGING,
@@ -125,6 +169,10 @@ class ImmutableLake:
             raise ValueError("DuckDB queries require one or more committed manifests")
         paths = [str(path) for path in _validated_paths(selected)]
         with duckdb.connect(":memory:") as connection:
+            connection.execute(
+                "SET memory_limit = ?",
+                [os.environ.get("ASHARE_DUCKDB_MEMORY_LIMIT", _DUCKDB_MEMORY_LIMIT_DEFAULT)],
+            )
             connection.from_parquet(paths).create_view("snapshot")
             reader = connection.execute(sql).fetch_record_batch(rows_per_batch=batch_size)
             yield from reader

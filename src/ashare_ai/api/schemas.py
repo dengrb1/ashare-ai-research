@@ -37,6 +37,56 @@ class HealthResponse(BaseModel):
     git_sha: str = "UNVERSIONED"
 
 
+class SearchEntity(BaseModel):
+    model_config = ConfigDict(extra="allow", frozen=True)
+
+    name: str
+    code: str
+
+
+class SearchRecall(BaseModel):
+    model_config = ConfigDict(extra="allow", frozen=True)
+
+    type: str
+    desc: str
+    content: str
+
+
+class FinancialSearchResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    query: str
+    provider: str
+    upstream: str
+    mode: Literal["cli", "embedded", "direct", "ai"]
+    searched_at: datetime
+    elapsed_ms: int = Field(ge=0)
+    entities: tuple[SearchEntity, ...]
+    recalls: tuple[SearchRecall, ...]
+    raw_sha256: str = Field(min_length=64, max_length=64)
+    outcome: dict[str, Any] = Field(default_factory=dict)
+    interpretation: str = ""
+    sources: tuple[dict[str, Any], ...] = ()
+    warnings: tuple[str, ...] = ()
+    live_data_isolated_from_snapshots: bool = True
+
+
+class FinancialSearchStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    provider: str
+    upstream: str
+    mode: Literal["cli", "embedded", "direct", "ai"]
+    available: bool
+    configured: bool = False
+    reachable: bool = False
+    degraded: bool = False
+    model: str | None = None
+    script_path: str | None = None
+    message: str
+    live_data_isolated_from_snapshots: bool = True
+
+
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=256)

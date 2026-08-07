@@ -56,6 +56,10 @@ docker compose -p ashare-ai-src -f compose.yaml up -d --build
 docker compose -p ashare-ai-src -f compose.yaml ps
 ```
 
+默认栈不启动可选的 SearXNG，以节省常驻内存。需要联网检索时，在 `.env.docker`
+设置 `SEARXNG_BASE_URL=http://searxng:8080`，并用
+`docker compose -p ashare-ai-src -f compose.yaml --profile search up -d --build` 启动。
+
 打开 [http://localhost](http://localhost)。首次启动需要在 `.env` 中设置管理员账号与强密码。服务健康后，可执行：
 
 ```powershell

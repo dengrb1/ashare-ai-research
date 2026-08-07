@@ -226,16 +226,22 @@ class BacktestEngine:
         signals_by_date: dict[date, list[BacktestSignal]] = defaultdict(list)
         for signal in signals:
             signals_by_date[signal.signal_date].append(signal)
+        bars_by_date: dict[date, dict[str, ExecutionBar]] = defaultdict(dict)
+        rules_by_date: dict[date, dict[str, TradingRule]] = defaultdict(dict)
+        adv_by_date: dict[date, dict[str, Decimal]] = defaultdict(dict)
+        volatility_by_date: dict[date, dict[str, float]] = defaultdict(dict)
+        for (value_date, symbol), bar in bars.items():
+            bars_by_date[value_date][symbol] = bar
+        for (value_date, symbol), rule in rules.items():
+            rules_by_date[value_date][symbol] = rule
+        for (value_date, symbol), statistic in adv_amounts.items():
+            adv_by_date[value_date][symbol] = statistic.value
+        for (value_date, symbol), statistic in volatilities.items():
+            volatility_by_date[value_date][symbol] = float(statistic.value)
 
         for index, trading_date in enumerate(calendar):
-            day_bars = {
-                symbol: bar for (bar_date, symbol), bar in bars.items() if bar_date == trading_date
-            }
-            day_rules = {
-                symbol: rule
-                for (rule_date, symbol), rule in rules.items()
-                if rule_date == trading_date
-            }
+            day_bars = bars_by_date.get(trading_date, {})
+            day_rules = rules_by_date.get(trading_date, {})
             if pending_orders:
                 next_session = calendar[index + 1] if index + 1 < len(calendar) else date.max
                 day_results = self.execution_model.execute_orders(
@@ -244,16 +250,8 @@ class BacktestEngine:
                     rules=day_rules,
                     account=account,
                     next_trading_date=next_session,
-                    adv_amounts={
-                        symbol: adv_amounts[(trading_date, symbol)].value
-                        for symbol in day_bars
-                        if (trading_date, symbol) in adv_amounts
-                    },
-                    volatilities={
-                        symbol: float(volatilities[(trading_date, symbol)].value)
-                        for symbol in day_bars
-                        if (trading_date, symbol) in volatilities
-                    },
+                    adv_amounts=adv_by_date.get(trading_date, {}),
+                    volatilities=volatility_by_date.get(trading_date, {}),
                 )
                 executions.extend(day_results)
                 execution_dates.update({result.order_id: trading_date for result in day_results})
@@ -277,11 +275,7 @@ class BacktestEngine:
                     account=account,
                     nav=nav,
                     current_bars=day_bars,
-                    next_rules={
-                        symbol: rule
-                        for (rule_date, symbol), rule in rules.items()
-                        if rule_date == calendar[index + 1]
-                    },
+                    next_rules=rules_by_date.get(calendar[index + 1], {}),
                 )
 
         average_nav = sum((entry.nav for entry in daily_nav), Decimal("0")) / len(daily_nav)

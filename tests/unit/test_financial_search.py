@@ -12,7 +12,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from ashare_ai.api.app import app
+from ashare_ai.api.app import _financial_search_service, app
 from ashare_ai.api.auth import hash_password
 from ashare_ai.api.dependencies import get_db
 from ashare_ai.core.config import Settings
@@ -25,7 +25,6 @@ from ashare_ai.search.service import (
     SearchRecall,
     _minimal_subprocess_env,
     _valuation_facts,
-    get_financial_search_service,
 )
 from ashare_ai.storage.models import Base, UserAccount
 
@@ -258,7 +257,7 @@ def test_authenticated_financial_search_api_uses_default_service() -> None:
             yield session
 
     app.dependency_overrides[get_db] = override_db
-    app.dependency_overrides[get_financial_search_service] = FakeSearch
+    app.dependency_overrides[_financial_search_service] = FakeSearch
     try:
         client = TestClient(app)
         assert client.get("/api/v1/search/status").status_code == 401

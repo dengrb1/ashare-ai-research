@@ -47,7 +47,7 @@ _READINESS_BUDGET_SECONDS_DEFAULT = 30.0
 # minute-tick scheduler and concurrent submit requests coalesce onto a single
 # upstream probe instead of each hitting AKShare.  The scheduler re-evaluates
 # every tick and the submit path probes right before enqueue, so 60s is plenty.
-_READINESS_RESULT_TTL_SECONDS = 60
+_READINESS_RESULT_TTL_SECONDS = 240
 _READINESS_RESULTS_MAX_ENTRIES = 8
 _READINESS_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="readiness-probe")
 _READINESS_RESULTS: dict[date, tuple[datetime, bool]] = {}
@@ -147,10 +147,17 @@ def _probe_benchmarks(trading_date: date) -> bool:
     from ashare_ai.orchestration.akshare_bundle import AKShareCanonicalProvider
 
     provider = AKShareCanonicalProvider()
-    # The backtest policy consumes all three series.  A CSI300-only probe
-    # can otherwise admit a run that is guaranteed to fail at snapshot time.
-    for code in ("000300", "000905", "000852"):
-        rows = provider.benchmark_bars(code, trading_date - timedelta(days=10), trading_date)
+    # Keep the three-index readiness contract, but let the provider coordinate
+    # retries/fallbacks as one bounded batch.  This prevents three independent
+    # retry loops from amplifying a temporary upstream throttle.
+    codes = ("000300", "000905", "000852")
+    rows_by_code = provider.benchmark_bars_many(
+        codes,
+        trading_date - timedelta(days=10),
+        trading_date,
+    )
+    for code in codes:
+        rows = rows_by_code.get(code, [])
         available = sorted(
             parsed
             for row in rows

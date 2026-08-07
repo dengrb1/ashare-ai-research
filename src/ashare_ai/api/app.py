@@ -108,6 +108,8 @@ from ashare_ai.api.schemas import (
     EnergySavingResponse,
     ExitAdviceResponse,
     ExitMonitorSettingsRequest,
+    FinancialSearchResponse,
+    FinancialSearchStatus,
     HealthResponse,
     KlineResponse,
     LoginRequest,
@@ -233,13 +235,6 @@ from ashare_ai.orchestration.trade_plan_queue import (
 from ashare_ai.orchestration.worker_status import read_heartbeats
 from ashare_ai.portfolio.user_assets import UNSET_TOTAL_ASSETS, UserAssetService
 from ashare_ai.reports.chinese_summary import component_summary, symbol_summary
-from ashare_ai.search.service import (
-    FinancialSearchBusyError,
-    FinancialSearchResponse,
-    FinancialSearchService,
-    FinancialSearchStatus,
-    get_financial_search_service,
-)
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import (
     ActiveEdgeGatewayConfiguration,
@@ -376,7 +371,7 @@ def _reconcile_market_runtime(now: datetime | None = None) -> None:
         release = getattr(market, "release_after_close", None)
         if callable(release):
             release()
-        get_financial_search_service.cache_clear()
+        _clear_financial_search_service()
         with _market_session_calendar_cache_lock:
             _market_session_calendar_cache.clear()
         report = reclaim_runtime_memory(settings, reason="api-after-close")
@@ -529,7 +524,21 @@ def _remember_idempotency(
     )
 
 
-SearchService = Annotated[FinancialSearchService, Depends(get_financial_search_service)]
+def _financial_search_service() -> Any:
+    from ashare_ai.search.service import get_financial_search_service
+
+    return get_financial_search_service()
+
+
+def _clear_financial_search_service() -> None:
+    if "ashare_ai.search.service" not in sys.modules:
+        return
+    from ashare_ai.search.service import get_financial_search_service
+
+    get_financial_search_service.cache_clear()
+
+
+SearchService = Annotated[Any, Depends(_financial_search_service)]
 
 
 @app.middleware("http")
@@ -1052,7 +1061,7 @@ def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
                 "persistent_ai_chat": True,
                 "chat_images_seven_day_retention": True,
                 "personal_archive_export_import": True,
-                "searxng_web_research": True,
+                "searxng_web_research": bool(get_effective_settings().searxng_base_url),
                 "runtime_modes": True,
             },
             endpoints={
@@ -3215,7 +3224,7 @@ def put_system_settings(
         # values (search, market and storage tuning) hot-load without a Docker
         # restart.  Worker topology itself is intentionally boot-time only.
         _reload_market_runtime()
-        get_financial_search_service.cache_clear()
+        _clear_financial_search_service()
         logger.info(
             "administrator saved system configuration version=%s hash=%s",
             runtime.version,
@@ -3240,7 +3249,7 @@ def restore_system_setting(
         SystemConfigurationService().restore_field(db, field=field, user_id=context.user.user_id)
         db.commit()
         _reload_market_runtime()
-        get_financial_search_service.cache_clear()
+        _clear_financial_search_service()
         return _system_settings_response(db)
     except SystemSettingsError as exc:
         db.rollback()
@@ -3259,7 +3268,7 @@ def restore_all_system_settings(
         SystemConfigurationService().restore_all(db, user_id=context.user.user_id)
         db.commit()
         _reload_market_runtime()
-        get_financial_search_service.cache_clear()
+        _clear_financial_search_service()
         return _system_settings_response(db)
     except SystemSettingsError as exc:
         db.rollback()
@@ -4862,6 +4871,8 @@ def financial_search(
     context: Current,
     q: str = Query(min_length=1, max_length=256),
 ) -> FinancialSearchResponse:
+    from ashare_ai.search.service import FinancialSearchBusyError, FinancialSearchService
+
     if not service.allow_user_request(context.user.user_id):
         raise HTTPException(
             status_code=429,
@@ -4871,7 +4882,7 @@ def financial_search(
     try:
         if isinstance(service, FinancialSearchService):
             return service.search(q, db)
-        return service.search(q)
+        return FinancialSearchResponse.model_validate(service.search(q))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except TimeoutError as exc:
@@ -4890,9 +4901,11 @@ def financial_search(
 def financial_search_status(
     service: SearchService, db: DbSession, _: Current
 ) -> FinancialSearchStatus:
+    from ashare_ai.search.service import FinancialSearchService
+
     if isinstance(service, FinancialSearchService):
         return service.status(db)
-    return service.status()
+    return FinancialSearchStatus.model_validate(service.status())
 
 
 def _mount_native_web() -> None:

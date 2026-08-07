@@ -57,7 +57,7 @@ MODEL_ALLOWED_HOSTS=api.openai.com
 MODEL_SETTINGS_ENCRYPTION_KEYS=<Fernet 密钥>
 PERSONAL_DATA_ENCRYPTION_KEYS=<URL-safe Base64 编码的 32 字节密钥，可与模型密钥分离轮换>
 PRIVATE_OBJECT_ROOT=/data/private
-SEARXNG_BASE_URL=http://searxng:8080
+SEARXNG_BASE_URL=
 CANONICAL_BUNDLE_MODE=akshare
 ALLOW_DEMO_DATA=false
 ```
@@ -85,7 +85,16 @@ docker compose -p ashare-ai-src -f compose.yaml logs --tail 100 api job-worker
 
 ## 4. SearXNG 联网方式
 
-Compose 中的 `searxng` 服务只声明 `expose: 8080`，没有宿主机端口映射。API 和 Worker 通过 Docker DNS 访问：
+SearXNG 是可选的 `search` profile；默认栈不启动它，搜索能力会以
+`searxng_web_research=false` 明确降级，API、Worker 和健康检查均不依赖它。
+需要联网检索时，将 `.env.docker` 中的 `SEARXNG_BASE_URL` 设为
+`http://searxng:8080`，然后启动 profile：
+
+```bash
+docker compose -p ashare-ai-src -f compose.yaml --profile search up -d --build
+```
+
+服务只声明 `expose: 8080`，没有宿主机端口映射。API 和 Worker 通过 Docker DNS 访问：
 
 ```text
 http://searxng:8080
@@ -94,7 +103,7 @@ http://searxng:8080
 验收私有搜索服务：
 
 ```bash
-docker compose -p ashare-ai-src -f compose.yaml ps searxng
+docker compose -p ashare-ai-src -f compose.yaml --profile search ps searxng
 docker compose -p ashare-ai-src -f compose.yaml exec -T api \
   python -c "import urllib.request; print(urllib.request.urlopen('http://searxng:8080/healthz', timeout=5).status)"
 ```
