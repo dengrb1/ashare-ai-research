@@ -52,6 +52,12 @@ _CALENDAR_CACHE_KEY = "calendar:v1"
 _CALENDAR_CACHE_SECONDS = 6 * 60 * 60
 _CALENDAR_FULL_START = date(1990, 1, 1)
 _CALENDAR_FULL_END = date(2100, 1, 1)
+# The worker protocol bounds a calendar request: the full 1990 -> 2100 span is
+# ~40,176 days and ~27k A-share sessions, so the old ~10-year/4096-item caps
+# rejected the very fetch the cache is built from.  Keep the worker and the
+# service request gate on one shared constant so they cannot drift apart.
+MAX_CALENDAR_RANGE_DAYS = 40_200
+MAX_CALENDAR_ITEMS = 65_536
 
 
 def _calendar_range(values: object, start_date: date, end_date: date) -> tuple[date, ...]:
@@ -815,7 +821,7 @@ class AKShareMarketProvider:
                 "start": start_date.isoformat(),
                 "end": end_date.isoformat(),
             },
-            maximum_items=4096,
+            maximum_items=MAX_CALENDAR_ITEMS,
         )
         values: set[date] = set()
         for item in rows:

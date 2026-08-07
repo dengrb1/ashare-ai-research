@@ -224,6 +224,37 @@ def test_child_contract_returns_bounded_calendar_rows() -> None:
     assert rows == [{"date": "2026-07-17"}, {"date": "2026-07-20"}]
 
 
+def test_child_contract_accepts_full_calendar_range() -> None:
+    """The calendar cache fetches 1990 -> 2100 whole; the worker must serve it."""
+
+    class Provider:
+        def sessions(self, start_date: date, end_date: date) -> list[date]:
+            assert start_date == date(1990, 1, 1)
+            assert end_date == date(2100, 1, 1)
+            return [date(1990, 12, 19), date(2026, 8, 7)]
+
+    rows = handle_request(
+        {
+            "operation": "sessions",
+            "start": "1990-01-01",
+            "end": "2100-01-01",
+        },
+        provider=Provider(),  # type: ignore[arg-type]
+    )
+    assert rows == [{"date": "1990-12-19"}, {"date": "2026-08-07"}]
+
+
+def test_child_contract_rejects_calendar_range_beyond_full_span() -> None:
+    with pytest.raises(ValueError):
+        handle_request(
+            {
+                "operation": "sessions",
+                "start": "1900-01-01",
+                "end": "2200-01-01",
+            }
+        )
+
+
 def test_market_number_rejects_non_finite_values() -> None:
     assert _number(float("nan")) is None
     assert _number(float("inf")) is None

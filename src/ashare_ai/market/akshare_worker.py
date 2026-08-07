@@ -8,6 +8,8 @@ from datetime import date, datetime
 from typing import Any
 
 from ashare_ai.market.service import (
+    MAX_CALENDAR_ITEMS,
+    MAX_CALENDAR_RANGE_DAYS,
     MAX_PREFETCH_SYMBOLS,
     _AKShareInProcessProvider,
     normalize_symbol,
@@ -15,7 +17,6 @@ from ashare_ai.market.service import (
 
 MAX_REQUEST_BYTES = 64 * 1024
 MAX_KLINE_ITEMS = 5000
-MAX_CALENDAR_ITEMS = 4096
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
@@ -75,7 +76,7 @@ def handle_request(
     if operation == "sessions":
         start = _required_date(payload.get("start"))
         end = _required_date(payload.get("end"))
-        if end < start or (end - start).days > 3660:
+        if end < start or (end - start).days > MAX_CALENDAR_RANGE_DAYS:
             raise ValueError("invalid calendar range")
         calendar_rows = effective.sessions(start, end)
         return [
