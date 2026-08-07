@@ -38,8 +38,11 @@ DATA_READINESS_CUTOFF = time(9, 25)
 # runs on a dedicated executor thread under a wall-clock budget; a timeout means
 # "not ready" (fail-closed -> the run defers to DATA_READINESS_WAITING and the
 # worker re-probes on its next retry, where the P1 calendar cache keeps those
-# retries cheap).
-_READINESS_BUDGET_SECONDS_DEFAULT = 10.0
+# retries cheap).  The budget must clear the realistic worst case: three
+# benchmark series fetched sequentially can take ~17s under slow eastmoney
+# latency, so a 10s cap made the probe always fail-closed and no daily run
+# could ever leave DATA_READINESS_WAITING.
+_READINESS_BUDGET_SECONDS_DEFAULT = 30.0
 # In-process short-term cache of the probe result per trading date, so the
 # minute-tick scheduler and concurrent submit requests coalesce onto a single
 # upstream probe instead of each hitting AKShare.  The scheduler re-evaluates
