@@ -2,8 +2,9 @@ import { useEffect, useState } from 'react'
 import { CalendarClock, Calculator, Database, Scale } from 'lucide-react'
 import { api, unwrapList } from '../api'
 import { MarketClosedNotice } from '../components/MarketClosedNotice'
+import { Sparkline } from '../components/Sparkline'
 import { useMarket } from '../context/MarketContext'
-import type { Run } from '../types'
+import type { Notification, Run } from '../types'
 import { Empty, formatAmount, formatNumber, formatTime, Panel, StatusPill, today } from '../components/Ui'
 
 const RUNNING = ['PENDING', 'QUEUED', 'RUNNING', 'PROCESSING', 'DATA_READINESS_WAITING', 'CANCEL_REQUESTED']
@@ -29,12 +30,23 @@ const PRINCIPLES = [
 ]
 
 export function DashboardPage() {
-  const { quotes, watchlist, positions, totalAssets, assetsLoading, quotesLoading, subscribe } = useMarket()
+  const { quotes, watchlist, positions, totalAssets, assetsLoading, quotesLoading, subscribe, getKline, loadKline, klineVersion } = useMarket()
   const [runs, setRuns] = useState<Run[]>([])
-  useEffect(() => { api.runs().then((data) => setRuns(unwrapList(data))).catch(() => setRuns([])) }, [])
+  const [notifications, setNotifications] = useState<Notification[]>([])
+  useEffect(() => {
+    api.runs().then((data) => setRuns(unwrapList(data))).catch(() => setRuns([]))
+    api.notificationSummary().then((data) => setNotifications(data.latest || [])).catch(() => setNotifications([]))
+  }, [])
   useEffect(() => subscribe(positions.map((position) => position.symbol)), [positions.map((position) => position.symbol).sort().join(','), subscribe])
   const latest = runs[0]
   const quoteSymbols = Array.from(new Set([...watchlist, ...positions.map((position) => position.symbol)])).slice(0, 4)
+  useEffect(() => {
+    if (assetsLoading || !quoteSymbols.length) return
+    const missing = quoteSymbols.filter((symbol) => !(getKline(symbol, 'day', 160)?.bars.length))
+    void Promise.all(missing.map(async (symbol) => {
+      try { await loadKline(symbol, 'day', 160) } catch { /* quote cards keep their empty state */ }
+    }))
+  }, [assetsLoading, getKline, klineVersion, loadKline, quoteSymbols.join(',')])
   const completed = runs.filter((run) => COMPLETE.includes(run.status.toUpperCase())).length
   const running = runs.filter((run) => RUNNING.includes(run.status.toUpperCase())).length
   const state = researchState(latest)
@@ -50,6 +62,7 @@ export function DashboardPage() {
   const totalMarketValue = positionRows.reduce((sum, position) => sum + position.marketValue, 0)
   const totalPnl = totalMarketValue - totalCost
   const totalReturn = totalCost > 0 ? totalPnl / totalCost * 100 : 0
+  const feedItems = notifications.slice(0, 5)
 
   return <div className="page-stack">
     <section className="research-hero" aria-label="研究时点">
@@ -65,18 +78,38 @@ export function DashboardPage() {
       </div>
     </section>
     <MarketClosedNotice />
-    <div className="metric-grid">
-      {quoteSymbols.length ? quoteSymbols.map((symbol) => {
-        const quote = quotes[symbol]
-        if (quote) return <div className="quote-card" key={quote.symbol}>
-          <div><div><strong>{quote.name || quote.symbol}</strong><small>{quote.symbol}</small></div><span className={quote.change_pct >= 0 ? 'price-up' : 'price-down'}>{quote.change_pct >= 0 ? '+' : ''}{formatNumber(quote.change_pct)}%</span></div>
-          <div className="quote-main"><strong>{formatNumber(quote.price)}</strong></div>
-          <small>成交额 {formatAmount(quote.amount)}</small>
-        </div>
-        return quotesLoading || assetsLoading
-          ? <div className="skeleton quote-card" key={symbol} />
-          : <div className="quote-card quote-card-empty" key={symbol}><strong>{symbol}</strong><small>行情暂不可用</small></div>
-      }) : assetsLoading || quotesLoading ? <><div className="skeleton quote-card" /><div className="skeleton quote-card" /><div className="skeleton quote-card" /><div className="skeleton quote-card" /></> : <div className="quote-card quote-card-empty quote-card-empty-full"><strong>暂无自选行情</strong><small>添加自选股或模拟持仓后显示</small></div>}
+    <div className="dashboard-overview-grid">
+      <div className="metric-grid">
+        {quoteSymbols.length ? quoteSymbols.map((symbol) => {
+          const quote = quotes[symbol]
+          if (quote) {
+            const entry = getKline(quote.symbol, 'day', 160)
+            const closes = (entry?.bars || []).map((bar) => bar.close).filter((value) => Number.isFinite(value))
+            const trendPositive = closes.length > 1 ? closes[closes.length - 1] >= closes[0] : quote.change_pct >= 0
+            return <div className="quote-card" key={quote.symbol}>
+              <div><div><strong>{quote.name || quote.symbol}</strong><small>{quote.symbol}</small></div><span className={quote.change_pct >= 0 ? 'price-up' : 'price-down'}>{quote.change_pct >= 0 ? '+' : ''}{formatNumber(quote.change_pct)}%</span></div>
+              <div className="quote-main"><strong>{formatNumber(quote.price)}</strong></div>
+              <div className="quote-card-trend" aria-label={`${quote.name || quote.symbol} 日线走势`}>
+                {closes.length > 1 ? <Sparkline values={closes} positive={trendPositive} height={42} /> : <div className="sparkline-placeholder" aria-hidden="true" />}
+                <small>{entry?.stale ? '日线稍旧' : '日线走势'}</small>
+              </div>
+              <small>成交额 {formatAmount(quote.amount)}</small>
+            </div>
+          }
+          return quotesLoading || assetsLoading
+            ? <div className="skeleton quote-card" key={symbol} />
+            : <div className="quote-card quote-card-empty" key={symbol}><strong>{symbol}</strong><small>行情暂不可用</small></div>
+        }) : assetsLoading || quotesLoading ? <><div className="skeleton quote-card" /><div className="skeleton quote-card" /><div className="skeleton quote-card" /><div className="skeleton quote-card" /></> : <div className="quote-card quote-card-empty quote-card-empty-full"><strong>暂无自选行情</strong><small>添加自选股或模拟持仓后显示</small></div>}
+      </div>
+      <Panel title="关注动态" eyebrow="WATCHLIST FEED" className="dashboard-feed-panel">
+        {feedItems.length ? <div className="dashboard-feed-list">
+          {feedItems.map((item) => <article className={`dashboard-feed-item severity-${item.severity.toLowerCase()}`} key={item.notification_id}>
+            <div><span>{item.notification_type || '研究提醒'}</span><time>{formatTime(item.created_at)}</time></div>
+            <strong>{item.title}</strong>
+            <p>{item.body}</p>
+          </article>)}
+        </div> : <div className="dashboard-feed-empty"><strong>暂无新的关注动态</strong><p>自选股提醒、研究结果和系统通知会显示在这里。</p></div>}
+      </Panel>
     </div>
     <div className="dashboard-grid">
       <Panel title="模拟持仓盈亏" eyebrow="PAPER HOLDINGS" className="full-span">
