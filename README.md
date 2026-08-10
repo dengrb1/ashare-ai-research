@@ -8,7 +8,7 @@
 
 | 版本 | 运行方式 | Edge Gateway |
 | --- | --- | --- |
-| `v2.0.3` | Docker Compose、Windows 原生管理器、Linux 原生管理器 | `v2.0.4-alpha.1`，仅在 Docker x86_64 环境验证 |
+| `v2.1.0` | Docker Compose、Windows 原生管理器、Linux 原生管理器（Beta） | `v2.0.4-alpha.1`，仅在 Docker x86_64 环境验证 |
 
 ## 目录
 
@@ -231,7 +231,7 @@ npm run build
 | [Windows 原生管理器](docs/NATIVE_WINDOWS.md) | Windows 安装、启停、诊断与卸载 |
 | [个人档案格式](docs/PERSONAL_ARCHIVE.md) | 加密导出、导入预览与合并边界 |
 | [双研究 Worker](docs/DUAL_RESEARCH_CONCURRENCY.md) | `SERIAL` / `DUAL` 拓扑与容量约束 |
-| [v2.0.3 发布说明](docs/releases/v2.0.3.zh-CN.md) | 当前稳定版本的变化与升级步骤 |
+| [v2.1.0 发布说明](docs/releases/v2.1.0.zh-CN.md) | 当前稳定版本的变化与升级步骤 |
 | [安全策略](SECURITY.md) | 漏洞报告与安全维护范围 |
 
 Web 使用服务端会话、HttpOnly Cookie 和双提交 CSRF；原生 App 使用短期 Bearer access token 与轮换 refresh token。除健康检查和登录外，业务接口都需要认证。完整端点、请求体与兼容策略以 [API 契约](docs/API.md) 为准。

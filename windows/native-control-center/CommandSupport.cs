@@ -49,7 +49,7 @@ namespace AshareAI.NativeControlCenter
                 }
                 if (request.Operation == "version")
                 {
-                    Console.Out.WriteLine("AshareAI Native Control Center 2026.08.03.2");
+                    Console.Out.WriteLine("AshareAI Native Control Center 2.1.0");
                     return 0;
                 }
                 var options = Options.Parse(request.OptionArgs.ToArray());

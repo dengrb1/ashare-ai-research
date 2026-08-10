@@ -201,9 +201,73 @@ jobs:
       - name: Upload Windows installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ashare-ai-windows-installer-${{ github.sha }}
+          name: ashare-ai-windows-native-installer-${{ github.sha }}
           path: |
             windows/native-control-center/dist/AshareAI-Setup.exe
             windows/native-control-center/dist/AshareAI-Setup.exe.sha256
           if-no-files-found: error
           retention-days: 30
+
+  linux-native-installer:
+    name: Build Linux native Beta package
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build native package
+        run: bash linux/native-control-center/build-package.sh
+
+      - name: Smoke-test native installer entrypoint
+        run: |
+          archive=$(find linux/native-control-center/dist -name 'AshareAI-Linux-Native-Beta-v*.tar.gz' -print -quit)
+          test -n "$archive"
+          test -f "$archive.sha256"
+          (cd "$(dirname "$archive")" && sha256sum --check "$(basename "$archive").sha256")
+          stage=$(mktemp -d)
+          trap 'rm -rf "$stage"' EXIT
+          tar -xzf "$archive" -C "$stage"
+          "$stage"/AshareAI-Linux-Native-Beta-v*/install.sh --help
+
+      - name: Upload Linux native package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ashare-ai-linux-native-installer-${{ github.sha }}
+          path: |
+            linux/native-control-center/dist/AshareAI-Linux-Native-Beta-v*.tar.gz
+            linux/native-control-center/dist/AshareAI-Linux-Native-Beta-v*.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [quality, docker, executable, windows-installer, linux-native-installer]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Download native installer assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ashare-ai-*-native-installer-${{ github.sha }}
+          merge-multiple: true
+          path: release-assets
+
+      - name: Name Windows Beta installer for the release
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          mv release-assets/AshareAI-Setup.exe "release-assets/AshareAI-Windows-Native-Beta-${RELEASE_TAG}.exe"
+          sha256sum "release-assets/AshareAI-Windows-Native-Beta-${RELEASE_TAG}.exe" > "release-assets/AshareAI-Windows-Native-Beta-${RELEASE_TAG}.exe.sha256"
+          rm release-assets/AshareAI-Setup.exe.sha256
+
+      - name: Publish Chinese release notes and native Beta installers
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: docs/releases/${{ github.ref_name }}.zh-CN.md
+          files: release-assets/*
+          generate_release_notes: false
