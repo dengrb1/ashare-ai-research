@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     lake_root: Path = Path("data/lake")
     private_object_root: Path = Path("data/private")
     native_web_root: Path | None = None
-    policy_config_path: Path = runtime_resource_path("configs/first_release.v3.json")
+    policy_config_path: Path = runtime_resource_path("configs/first_release.v4.json")
     object_store_endpoint: str | None = None
     object_store_bucket: str = "ashare-research"
     object_store_access_key: str | None = None

@@ -2,6 +2,7 @@ from ashare_ai.scoring.dividends import DividendBonusResult, calculate_dividend_
 from ashare_ai.scoring.formula import (
     FORMULA_VERSION,
     FORMULA_VERSION_V2,
+    FORMULA_VERSION_V3,
     QUALITY_VERSION,
     build_composite_score,
     calculate_base_total_score,
@@ -12,6 +13,7 @@ from ashare_ai.scoring.formula import (
 __all__ = [
     "FORMULA_VERSION",
     "FORMULA_VERSION_V2",
+    "FORMULA_VERSION_V3",
     "QUALITY_VERSION",
     "DividendBonusResult",
     "build_composite_score",

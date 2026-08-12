@@ -111,6 +111,11 @@ services:
     command: ["sh", "-c", "ashare-ai migrate && ashare-ai api --host 0.0.0.0 --port 8000"]
     ports: ["${API_BIND_ADDRESS:-127.0.0.1}:8000:8000"]
     environment:
+      # The api overrides `environment:`, which under YAML `<<:` replaces the
+      # app-service anchor's map entirely. Re-merge the shared env so the api
+      # keeps PRIVATE_OBJECT_ROOT (and the low-memory thread caps / SEARXNG
+      # base URL) instead of silently dropping them.
+      <<: *low-memory-python
       EDGE_GATEWAY_SOURCE_DIR: "/app/docker/edge-gateway"
       EDGE_GATEWAY_HOST_SOURCE_DIR: "${EDGE_GATEWAY_SOURCE_DIR:-./docker/edge-gateway}"
       EDGE_GATEWAY_LOG_DIR: "/data/edge-gateway-logs"

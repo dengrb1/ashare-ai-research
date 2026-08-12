@@ -15,7 +15,7 @@ server {
         try_files $uri =404;
     }
     location / {
-        return 308 https://$host$request_uri;
+        return 308 https://${EDGE_DOMAIN}$request_uri;
     }
 }
 

@@ -44,6 +44,7 @@
   {% set risk_message = risk_reason_message|default(None) %}
   {% set buy_exec = buy_execution_date|default(None) %}
   {% set t1_sell = t1_earliest_sell_date|default(None) %}
+  {% set market = market_index_snapshot|default(None) %}
   <h1>{{ trading_date }} A股 AI 投研日报</h1>
   <p>决策时点：{{ decision_at }}；运行状态：{{ run_status }}</p>
   <p class="info">本报告是正式研究报告；是否允许生成交易建议，由个股数据门禁和全局风控分别决定。</p>
@@ -55,6 +56,19 @@
     <div><span>最早可卖日(T+1)</span><strong>{{ t1_sell or '买入执行日的下一交易日（以交易所日历为准）' }}</strong></div>
   </div>
   <p class="muted">calendar_source={{ trade_calendar_source|default('UNSPECIFIED', true) }}</p>
+  <h2>大盘指数环境</h2>
+  {% if market %}
+  <p class="{{ 'warning' if market.regime == 'RISK_OFF' else 'info' }}">
+    冻结时点大盘状态：<strong>{{ {'RISK_ON': '风险偏好改善', 'NEUTRAL': '中性', 'RISK_OFF': '风险偏好收缩', 'UNKNOWN': '数据不足'}.get(market.regime, market.regime) }}</strong>；
+    综合 5 日收益 {{ '%.2f%%'|format((market.composite_return_5d or 0) * 100) }}，
+    评分调整 {{ '%+.2f'|format(market.score_adjustment) }} 分，
+    大盘风险乘数 {{ '%.3f'|format(market.risk_multiplier) }}。
+  </p>
+  <div class="table-scroll"><table><thead><tr><th>指数</th><th>代码</th><th>1日</th><th>5日</th><th>20日</th></tr></thead>
+    <tbody>{% for index in market.indices %}<tr><td>{{ index.name }}</td><td>{{ index.symbol }}</td><td>{{ '%.2f%%'|format((index.return_1d or 0) * 100) }}</td><td>{{ '%.2f%%'|format((index.return_5d or 0) * 100) }}</td><td>{{ '%.2f%%'|format((index.return_20d or 0) * 100) }}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  <p class="muted">指数环境来自本次运行冻结的基准序列，参与最终分计算；报告打开后的实时行情不会改写该结论。</p>
+  {% else %}<p class="info">本历史报告尚未记录大盘指数快照；评分保持原公式结果。</p>{% endif %}
   <h2>本次研究配置</h2>
   <div class="config">
     <div><span>研究范围</span><strong>{{ {'MARKET': '动态市场股票池', 'WATCHLIST': '我的自选与持仓', 'CUSTOM': '手工指定股票'}.get(scope, scope) }}</strong></div>
@@ -94,6 +108,9 @@
       <div><span>情绪面</span><strong>{{ "%.2f"|format(row.score.sentiment_score) }}</strong></div>
       <div><span>数据质量</span><strong>{{ "%.2f"|format(row.score.quality_confidence_score) }}</strong></div>
       <div><span>风险乘数</span><strong>{{ "%.2f"|format(row.score.event_risk_multiplier) }}</strong></div>
+      <div><span>大盘调整</span><strong>{{ "%+.2f"|format(row.score.market_score_adjustment) }}</strong></div>
+      <div><span>大盘状态</span><strong>{{ row.score.market_regime }}</strong></div>
+      <div><span>大盘风险乘数</span><strong>{{ "%.3f"|format(row.score.market_risk_multiplier) }}</strong></div>
       <div><span>数据截止</span><strong>{{ row.score.decision_at }}</strong></div>
     </div>
     <p class="info"><strong>省流版：</strong>{{ row.plain_language_summary }}</p>

@@ -681,9 +681,30 @@ export interface Score {
   base_total_score?: number
   dividend_bonus?: number
   event_risk_multiplier?: number
+  market_index_snapshot?: MarketIndexSnapshot | null
+  market_regime?: 'RISK_ON' | 'NEUTRAL' | 'RISK_OFF' | 'UNKNOWN'
+  market_score_adjustment?: number
+  market_risk_multiplier?: number
   formula_version?: string
   prediction_percentile?: number
   rank?: number
+}
+
+export interface MarketIndexSnapshot {
+  trading_date: string
+  indices: Array<{
+    name: string
+    symbol: string
+    return_1d?: number | null
+    return_5d?: number | null
+    return_20d?: number | null
+  }>
+  composite_return_1d?: number | null
+  composite_return_5d?: number | null
+  composite_return_20d?: number | null
+  regime: 'RISK_ON' | 'NEUTRAL' | 'RISK_OFF' | 'UNKNOWN'
+  score_adjustment: number
+  risk_multiplier: number
 }
 
 export interface Candidate {
@@ -766,6 +787,7 @@ export interface Report {
   body?: string
   object_uri?: string
   created_at?: string
+  market_index_snapshot?: MarketIndexSnapshot | null
 }
 
 export interface TradePlan {

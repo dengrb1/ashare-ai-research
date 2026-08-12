@@ -109,10 +109,16 @@ def test_edge_gateway_pins_downloads_and_sanitizes_forwarded_headers() -> None:
     assert "sed -i 's/\\r$//' /usr/local/bin/edge-gateway-entrypoint" in dockerfile
     assert "ssl_protocols TLSv1.2 TLSv1.3" in nginx
     assert "ssl_reject_handshake on" in nginx
+    assert "return 308 https://${EDGE_DOMAIN}$request_uri;" in nginx
+    assert "return 308 https://$host$request_uri;" not in nginx
     assert "proxy_set_header X-Forwarded-For $remote_addr" in nginx
     assert "$proxy_add_x_forwarded_for" not in nginx
     assert "proxy_buffering off" in nginx
     assert "--keylength ec-256" in entrypoint
+    assert "--issue --webroot \"$ACME_WEBROOT\"" in entrypoint
+    assert "--standalone" not in entrypoint
+    assert "migrate_acme_webroot" in entrypoint
+    assert "BOOTSTRAP_MARKER" in entrypoint
     assert "EDGE_FRPC_ENABLED=true requires" in entrypoint
     assert "using /tmp/edge logs until the container is recreated" in entrypoint
     assert "if ! mkdir -p \"$LOG_DIR\" 2>/dev/null || [ ! -w \"$LOG_DIR\" ]; then" in entrypoint

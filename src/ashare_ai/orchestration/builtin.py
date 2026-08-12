@@ -76,7 +76,13 @@ from ashare_ai.portfolio.risk import (
 from ashare_ai.reports.chinese_summary import component_summary, symbol_summary
 from ashare_ai.reports.daily import DailyReportService
 from ashare_ai.scoring.dividends import calculate_dividend_bonus
-from ashare_ai.scoring.formula import FORMULA_VERSION, FORMULA_VERSION_V2, build_composite_score
+from ashare_ai.scoring.formula import (
+    FORMULA_VERSION,
+    FORMULA_VERSION_V2,
+    FORMULA_VERSION_V3,
+    build_composite_score,
+    build_market_index_snapshot,
+)
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.lake import ImmutableLake
 from ashare_ai.storage.models import (
@@ -253,7 +259,11 @@ class FirstReleasePolicy(FrozenModel):
         )
         if weights != (Decimal("0.35"), Decimal("0.35"), Decimal("0.20"), Decimal("0.10")):
             raise ValueError("first release scoring weights must be 35/35/20/10")
-        if self.scoring.formula_version not in {FORMULA_VERSION, FORMULA_VERSION_V2}:
+        if self.scoring.formula_version not in {
+            FORMULA_VERSION,
+            FORMULA_VERSION_V2,
+            FORMULA_VERSION_V3,
+        }:
             raise ValueError("first release formula version does not match scoring engine")
         if (
             self.trade_plan.training_sessions + self.trade_plan.validation_sessions
@@ -990,6 +1000,11 @@ class BuiltinDailyBackend:
             },
             blocked_severities=frozenset({EventSeverity.CRITICAL}),
         )
+        market_snapshot = (
+            build_market_index_snapshot(bundle.benchmark_returns, bundle.trading_date)
+            if self.policy.scoring.formula_version == FORMULA_VERSION_V3
+            else None
+        )
         scores = tuple(
             build_composite_score(
                 symbol=item.symbol,
@@ -1028,7 +1043,7 @@ class BuiltinDailyBackend:
                         ),
                         total_bonus_cap=float(self.policy.scoring.dividend_total_bonus_cap),
                     ).total_bonus
-                    if self.policy.scoring.formula_version == FORMULA_VERSION_V2
+                    if self.policy.scoring.formula_version in {FORMULA_VERSION_V2, FORMULA_VERSION_V3}
                     else 0.0
                 ),
                 event_risk_multiplier=aggregate_event_risk(
@@ -1040,11 +1055,12 @@ class BuiltinDailyBackend:
                             decision_at=bundle.decision_at,
                             window_days=self.policy.scoring.news_window_days,
                         )
-                        if self.policy.scoring.formula_version == FORMULA_VERSION_V2
+                        if self.policy.scoring.formula_version in {FORMULA_VERSION_V2, FORMULA_VERSION_V3}
                         else bundle.events_by_symbol.get(item.symbol, ())
                     ),
                     event_policy,
                 ).multiplier,
+                market_index_snapshot=market_snapshot,
             )
             for item in agents.items
         )
@@ -1064,6 +1080,14 @@ class BuiltinDailyBackend:
                         base_total_score=score.base_total_score,
                         dividend_bonus=score.dividend_bonus,
                         event_risk_multiplier=score.event_risk_multiplier,
+                        market_index_snapshot=(
+                            score.market_index_snapshot.model_dump(mode="json")
+                            if score.market_index_snapshot is not None
+                            else None
+                        ),
+                        market_regime=score.market_regime,
+                        market_score_adjustment=score.market_score_adjustment,
+                        market_risk_multiplier=score.market_risk_multiplier,
                         total_score=score.total_score,
                         formula_version=score.formula_version,
                         agent_bundle_sha256=score.agent_bundle_sha256,
@@ -1614,6 +1638,11 @@ class BuiltinDailyBackend:
                         else None
                     ),
                     "trade_calendar_source": bundle.calendar_source,
+                    "market_index_snapshot": (
+                        scores.scores[0].market_index_snapshot.model_dump(mode="json")
+                        if scores.scores and scores.scores[0].market_index_snapshot is not None
+                        else None
+                    ),
                     "candidates": candidates.candidates,
                     "report_symbols": self._report_symbol_rows(
                         bundle=bundle,

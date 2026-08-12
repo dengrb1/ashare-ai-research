@@ -300,6 +300,29 @@ class DataQualityInputs(FrozenModel):
     mean_agent_confidence: Confidence
 
 
+class MarketIndexPerformance(FrozenModel):
+    """Frozen benchmark performance used by a research score, as decimal returns."""
+
+    name: str
+    symbol: str
+    return_1d: float | None = None
+    return_5d: float | None = None
+    return_20d: float | None = None
+
+
+class MarketIndexSnapshot(FrozenModel):
+    """Point-in-time broad-market context shared by every score in one run."""
+
+    trading_date: date
+    indices: tuple[MarketIndexPerformance, ...] = ()
+    composite_return_1d: float | None = None
+    composite_return_5d: float | None = None
+    composite_return_20d: float | None = None
+    regime: Literal["RISK_ON", "NEUTRAL", "RISK_OFF", "UNKNOWN"] = "UNKNOWN"
+    score_adjustment: float = Field(default=0, ge=-10, le=10)
+    risk_multiplier: float = Field(default=1, ge=0.8, le=1)
+
+
 class CompositeScore(FrozenModel):
     symbol: CanonicalSymbol
     trading_date: date
@@ -312,6 +335,10 @@ class CompositeScore(FrozenModel):
     base_total_score: Score100 = 0
     dividend_bonus: float = Field(ge=0, le=10)
     event_risk_multiplier: float = Field(ge=0, le=1)
+    market_index_snapshot: MarketIndexSnapshot | None = None
+    market_regime: Literal["RISK_ON", "NEUTRAL", "RISK_OFF", "UNKNOWN"] = "UNKNOWN"
+    market_score_adjustment: float = Field(default=0, ge=-10, le=10)
+    market_risk_multiplier: float = Field(default=1, ge=0.8, le=1)
     total_score: Score100
     formula_version: str
     agent_bundle_sha256: Sha256
@@ -328,6 +355,10 @@ class CompositeScore(FrozenModel):
         result.setdefault("base_total_score", result.get("total_score", 0))
         result.setdefault("dividend_bonus", 0.0)
         result.setdefault("event_risk_multiplier", 1.0)
+        result.setdefault("market_index_snapshot", None)
+        result.setdefault("market_regime", "UNKNOWN")
+        result.setdefault("market_score_adjustment", 0.0)
+        result.setdefault("market_risk_multiplier", 1.0)
         return result
 
 

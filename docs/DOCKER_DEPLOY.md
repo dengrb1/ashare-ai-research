@@ -135,7 +135,7 @@ EDGE_GATEWAY_CONFIG_DIR=./.secrets/edge-gateway
 EDGE_PROXY_TARGET_ALLOWLIST=web
 ```
 
-首次启动会以 ACME HTTP-01 自动申请 ECDSA P-256 证书，证书和 ACME 账号保存在 Compose 的 `edge-certificates`、`edge-acme-data` 卷中：
+首次启动会让 Nginx 通过 ACME HTTP-01 webroot 自动申请 ECDSA P-256 证书，证书和 ACME 账号保存在 Compose 的 `edge-certificates`、`edge-acme-data` 卷中。若首次签发暂时失败，网关仅以短期自签名证书维持启动，并每小时重试签发；签发成功后会自动热加载正式证书。旧版 standalone 续期记录会在启动时迁移为 webroot 模式，避免与 Nginx 占用的 80 端口冲突：
 
 ```bash
 docker compose -p ashare-ai-src -f compose.yaml --profile edge up -d --build --force-recreate edge-gateway

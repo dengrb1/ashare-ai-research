@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from ashare_ai.core.contracts import MarketIndexSnapshot
 from ashare_ai.core.security import safe_error_text
 
 MAX_WATCHLIST_SYMBOLS = 100
@@ -987,6 +988,10 @@ class ScoreResponse(OrmResponse):
     base_total_score: float
     dividend_bonus: float
     event_risk_multiplier: float
+    market_index_snapshot: MarketIndexSnapshot | None = None
+    market_regime: Literal["RISK_ON", "NEUTRAL", "RISK_OFF", "UNKNOWN"] = "UNKNOWN"
+    market_score_adjustment: float = 0
+    market_risk_multiplier: float = 1
     total_score: float
     formula_version: str
     agent_bundle_sha256: str
@@ -1419,6 +1424,12 @@ class QuoteResponse(BaseModel):
     status: MarketDataStatus
 
 
+class MarketIndicesResponse(BaseModel):
+    quotes: list[QuoteResponse] = Field(default_factory=list)
+    labels: dict[str, str] = Field(default_factory=dict)
+    live_data_isolated_from_snapshots: bool = True
+
+
 class KlineBarResponse(BaseModel):
     timestamp: datetime
     open: float
@@ -1468,3 +1479,4 @@ class ReportResponse(OrmResponse):
     object_uri: str
     content_sha256: str
     created_at: datetime
+    market_index_snapshot: MarketIndexSnapshot | None = None

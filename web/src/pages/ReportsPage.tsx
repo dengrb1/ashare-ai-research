@@ -8,7 +8,7 @@ import { Empty, ErrorNotice, formatNumber, formatTime, Loading, StatusPill, toda
 import { useMarket, useQuoteSubscription } from '../context/MarketContext'
 import { usePageRefresh } from '../context/RefreshContext'
 import { getKlineRangePlan, KLINE_PERIODS, KLINE_RANGES, trimBarsToRange } from '../marketKlines'
-import type { Candidate, KlineBar, KlineRange, MarketDataStatus, Report, ReportExecutionStatus, ReportSymbol, Run, Score, TradePlan } from '../types'
+import type { Candidate, KlineBar, KlineRange, MarketDataStatus, MarketIndexSnapshot, Report, ReportExecutionStatus, ReportSymbol, Run, Score, TradePlan } from '../types'
 import { resolvePublishedResearchRun } from '../researchRuns'
 
 function displayReportHtml(content: string) {
@@ -23,6 +23,23 @@ function displayReportHtml(content: string) {
 function values(value: unknown): string[] {
   if (Array.isArray(value)) return value.map((item) => typeof item === 'object' && item ? JSON.stringify(item) : String(item))
   return value === undefined || value === null || value === '' ? [] : [String(value)]
+}
+
+const MARKET_REGIME_LABELS: Record<MarketIndexSnapshot['regime'], string> = {
+  RISK_ON: '风险偏好改善',
+  NEUTRAL: '大盘中性',
+  RISK_OFF: '风险偏好收缩',
+  UNKNOWN: '大盘数据不足',
+}
+
+function MarketIndexSnapshotCard({ snapshot }: { snapshot?: MarketIndexSnapshot | null }) {
+  if (!snapshot) return <div className="snapshot-callout"><span>◇</span><div><strong>大盘指数</strong><p>历史报告未记录指数快照；该报告保持原有冻结评分结果。</p></div></div>
+  return <section className={`market-index-snapshot ${snapshot.regime.toLowerCase()}`} aria-label="冻结大盘指数环境">
+    <header><div><span>FROZEN MARKET CONTEXT</span><strong>大盘指数环境</strong></div><b>{MARKET_REGIME_LABELS[snapshot.regime]}</b></header>
+    <div className="market-index-summary"><div><span>综合 5 日</span><strong>{formatNumber((snapshot.composite_return_5d || 0) * 100)}%</strong></div><div><span>评分调整</span><strong>{snapshot.score_adjustment >= 0 ? '+' : ''}{formatNumber(snapshot.score_adjustment)}</strong></div><div><span>风险乘数</span><strong>{formatNumber(snapshot.risk_multiplier, 3)}</strong></div></div>
+    <div className="market-index-list">{snapshot.indices.map((index) => <div key={index.symbol}><strong>{index.name}</strong><small>{index.symbol}</small><span>{formatNumber((index.return_1d || 0) * 100)}% / {formatNumber((index.return_5d || 0) * 100)}% / {formatNumber((index.return_20d || 0) * 100)}%</span></div>)}</div>
+    <small className="market-index-note">1日 / 5日 / 20日收益来自本次运行的冻结基准序列，已参与最终分；实时行情不会改写报告。</small>
+  </section>
 }
 
 function explanationSection(explanation: Record<string, unknown>, keys: string[]) {
@@ -250,6 +267,7 @@ export function ReportsPage() {
       <section className="report-kpi-strip" aria-label="报告概览">
         <div><FileText size={18} aria-hidden="true" /><span>报告类型</span><strong>{report.report_type}</strong></div><div><Gauge size={18} aria-hidden="true" /><span>研究标的</span><strong>{reportSymbols.length} 只</strong><small>正式可建议 {eligibleCount} 只</small></div><div><ShieldCheck size={18} aria-hidden="true" /><span>运行状态</span><StatusPill status={run?.status || 'SUCCEEDED'} /></div><div><Database size={18} aria-hidden="true" /><span>生成时间</span><strong>{formatTime(report.created_at)}</strong></div>
       </section>
+      <MarketIndexSnapshotCard snapshot={report.market_index_snapshot} />
       <div className="report-reading-grid">
         <aside className="report-provenance-rail"><div className="report-rail-heading"><span>RUN LINEAGE</span><strong>可追溯来源</strong></div><dl><div><dt>报告 ID</dt><dd><code>{report.report_id}</code></dd></div><div><dt>关联运行</dt><dd><code>{report.run_id}</code></dd></div><div><dt>研究范围</dt><dd>{run?.research_scope || 'MARKET'}</dd></div><div><dt>决策状态</dt><dd>{fused ? '观察模式' : '正式研究'}</dd></div></dl>{run?.supreme_mode && <div className="report-supreme-profile"><Zap size={15} aria-hidden="true" /><div><strong>至高模式</strong><small>{executionProfile ? `${executionProfile.data_fetch_workers} 路数据采集 · 模型并发 ${executionProfile.model_agent_max_concurrency}` : '等待 Worker 解析运行档案'}</small></div></div>}</aside>
         <section className="report-reading-surface"><header><div><span>DAILY BRIEF</span><strong>{date} A 股每日研究报告</strong></div><small>HTML 正文以沙箱隔离展示</small></header>{content ? <iframe className="report-frame" title={`${date} A 股每日研究报告正文`} sandbox="" srcDoc={displayReportHtml(content)} /> : <Empty title="报告正文暂不可用" />}</section>
@@ -262,7 +280,7 @@ export function ReportsPage() {
           <div className="kline-selectors"><div><span>采样周期</span><div className="period-tabs">{KLINE_PERIODS.map((item) => <button key={item.value} className={period === item.value ? 'active' : ''} onClick={() => setPeriod(item.value)}>{item.label}</button>)}</div></div><div><span>查看区间</span><div className="period-tabs">{KLINE_RANGES.map((item) => <button key={item.value} className={range === item.value ? 'active' : ''} onClick={() => setRange(item.value)}>{item.label}</button>)}</div></div></div>
           <ErrorNotice message={marketError} />
           {marketLoading && !bars.length ? <Loading label="加载行情与评分" /> : bars.length ? <CandlestickChart key={`${symbol}:${period}:${range}`} bars={bars} period={period} /> : <Empty title="K 线暂不可用" />}
-          <h3>确定性评分</h3>{score ? <div className="score-grid">{[['最终分', score.total_score], ['基础分', score.base_total_score], ['基本面', score.fundamental_score], ['技术', score.technical_score], ['情绪', score.sentiment_score], ['质量', score.quality_confidence_score], ['分红加分', score.dividend_bonus], ['风险乘数', score.event_risk_multiplier], ['预测分位', selectedResearch?.prediction_percentile ?? selectedCandidate?.prediction_percentile ?? score.prediction_percentile], ['排名', selectedResearch?.rank ?? selectedCandidate?.rank ?? score.rank]].map(([label, value]) => <div key={String(label)}><span>{label}</span><strong>{typeof value === 'number' ? formatNumber(value) : '—'}</strong></div>)}<div><span>公式版本</span><strong>{score.formula_version || String(lineage?.formula_version || '—')}</strong></div></div> : <Empty title="评分暂不可用" />}
+          <h3>确定性评分</h3>{score ? <div className="score-grid">{[['最终分', score.total_score], ['基础分', score.base_total_score], ['基本面', score.fundamental_score], ['技术', score.technical_score], ['情绪', score.sentiment_score], ['质量', score.quality_confidence_score], ['分红加分', score.dividend_bonus], ['事件风险乘数', score.event_risk_multiplier], ['大盘调整', score.market_score_adjustment], ['大盘风险乘数', score.market_risk_multiplier], ['预测分位', selectedResearch?.prediction_percentile ?? selectedCandidate?.prediction_percentile ?? score.prediction_percentile], ['排名', selectedResearch?.rank ?? selectedCandidate?.rank ?? score.rank]].map(([label, value]) => <div key={String(label)}><span>{label}</span><strong>{typeof value === 'number' ? formatNumber(value) : '—'}</strong></div>)}<div><span>大盘状态</span><strong>{score.market_regime ? MARKET_REGIME_LABELS[score.market_regime] : '—'}</strong></div><div><span>公式版本</span><strong>{score.formula_version || String(lineage?.formula_version || '—')}</strong></div></div> : <Empty title="评分暂不可用" />}
           {selectedResearch?.plain_language_summary && <div className="snapshot-callout"><span>◇</span><div><strong>省流版</strong><p>{selectedResearch.plain_language_summary}</p></div></div>}<div className="snapshot-callout"><span>◇</span><div><strong>确定性方案，AI 仅负责解释</strong><p>方案选择历史样本中风险调整后表现最优的合格参数；模型不可用时，买入或暂不买入、数量、限价、仓位和退出规则仍然有效。</p></div></div>
           {fused && <div className="warning-box"><strong>全局风控熔断，禁止生成交易方案</strong><p>{run?.reason_message || '本次仅保留正式观察报告。'}</p></div>}{!fused && selectedResearch && !selectedResearch.advice_eligible && <div className="warning-box"><strong>NO_BUY · {selectedResearch.research_status === 'RISK_BLOCKED' ? '风险禁买' : '数据受限'}</strong><p>{selectedResearch.exclusion_reasons.map((reason) => REASON_LABELS[reason] || reason).join('；') || '该股票未通过个股建议门禁。'}。不会生成买入价格、仓位或止损位。</p></div>}
           <button className="primary" disabled={fused || planSubmitting || !symbol || Boolean(selectedPlan) || !selectedResearch?.advice_eligible} onClick={() => void submitPlan()}>{planSubmitting ? '正在生成…' : selectedPlan ? (PLAN_ACTIVE.has(selectedPlan.status.toUpperCase()) ? '方案生成中，已复用' : '已展示该股方案') : selectedResearch?.advice_eligible ? '生成购买建议' : 'NO_BUY'}</button>

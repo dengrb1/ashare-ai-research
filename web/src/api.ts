@@ -155,6 +155,7 @@ export const api = {
     }
   },
   marketStatus: () => request<MarketServiceStatus>('/market/status'),
+  marketIndices: (refresh = false) => request<{ quotes: RawQuote[]; labels: Record<string, string> }>(`/market/indices${params({ refresh: refresh ? 'true' : undefined })}`).then((payload) => ({ ...payload, quotes: (payload.quotes || []).map(normalizeQuote) })),
   financialSearch: (query: string) => request<FinancialSearchResult>(`/search/financial${params({ q: query })}`),
   financialSearchStatus: () => request<FinancialSearchStatus>('/search/status'),
 

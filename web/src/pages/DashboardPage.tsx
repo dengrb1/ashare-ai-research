@@ -4,7 +4,7 @@ import { api, unwrapList } from '../api'
 import { MarketClosedNotice } from '../components/MarketClosedNotice'
 import { Sparkline } from '../components/Sparkline'
 import { useMarket } from '../context/MarketContext'
-import type { Notification, Run } from '../types'
+import type { Notification, Quote, Run } from '../types'
 import { Empty, formatAmount, formatNumber, formatTime, Panel, StatusPill, today } from '../components/Ui'
 
 const RUNNING = ['PENDING', 'QUEUED', 'RUNNING', 'PROCESSING', 'DATA_READINESS_WAITING', 'CANCEL_REQUESTED']
@@ -33,9 +33,11 @@ export function DashboardPage() {
   const { quotes, watchlist, positions, totalAssets, assetsLoading, quotesLoading, subscribe, getKline, loadKline, klineVersion } = useMarket()
   const [runs, setRuns] = useState<Run[]>([])
   const [notifications, setNotifications] = useState<Notification[]>([])
+  const [marketIndices, setMarketIndices] = useState<{ quotes: Quote[]; labels: Record<string, string> }>({ quotes: [], labels: {} })
   useEffect(() => {
     api.runs().then((data) => setRuns(unwrapList(data))).catch(() => setRuns([]))
     api.notificationSummary().then((data) => setNotifications(data.latest || [])).catch(() => setNotifications([]))
+    api.marketIndices().then(setMarketIndices).catch(() => setMarketIndices({ quotes: [], labels: {} }))
   }, [])
   useEffect(() => subscribe(positions.map((position) => position.symbol)), [positions.map((position) => position.symbol).sort().join(','), subscribe])
   const latest = runs[0]
@@ -78,6 +80,10 @@ export function DashboardPage() {
       </div>
     </section>
     <MarketClosedNotice />
+    <section className="live-market-indices" aria-label="实时大盘指数">
+      <header><div><span className="eyebrow">LIVE MARKET INDICES</span><h2>大盘指数</h2></div><small>实时展示，不参与已发布报告评分</small></header>
+      <div>{marketIndices.quotes.map((quote) => <article key={quote.symbol}><span>{marketIndices.labels[quote.symbol] || quote.name || quote.symbol}</span><strong>{formatNumber(quote.price)}</strong><small className={(quote.change_pct || 0) >= 0 ? 'price-up' : 'price-down'}>{(quote.change_pct || 0) >= 0 ? '+' : ''}{formatNumber(quote.change_pct)}%</small></article>)}{!marketIndices.quotes.length && <small>指数行情暂不可用</small>}</div>
+    </section>
     <div className="dashboard-overview-grid">
       <div className="metric-grid">
         {quoteSymbols.length ? quoteSymbols.map((symbol) => {

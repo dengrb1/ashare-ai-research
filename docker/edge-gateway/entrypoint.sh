@@ -7,6 +7,7 @@ set -eu
 ACME_HOME=/var/lib/acme
 ACME_WEBROOT=/var/lib/acme-webroot
 CERT_DIR=/etc/edge/certs
+BOOTSTRAP_MARKER="$CERT_DIR/.acme-bootstrap"
 ACME_CA_SERVER="${EDGE_ACME_CA_SERVER:-letsencrypt}"
 LOG_DIR="${EDGE_GATEWAY_LOG_DIR:-/var/log/edge}"
 FRPC_PID=""
@@ -55,42 +56,86 @@ if [ "${EDGE_FRPC_ENABLED:-false}" = "true" ]; then
   FRPC_PID=$!
 fi
 
-if [ ! -s "$CERT_DIR/fullchain.pem" ] || [ ! -s "$CERT_DIR/key.pem" ]; then
+certificate_is_self_signed() {
+  [ -s "$CERT_DIR/fullchain.pem" ] || return 1
+  subject=$(openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -subject 2>/dev/null || true)
+  issuer=$(openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -issuer 2>/dev/null || true)
+  [ -n "$subject" ] && [ "${subject#subject=}" = "${issuer#issuer=}" ]
+}
+
+needs_acme_certificate() {
+  [ -f "$BOOTSTRAP_MARKER" ] || [ ! -s "$CERT_DIR/fullchain.pem" ] || \
+    [ ! -s "$CERT_DIR/key.pem" ] || certificate_is_self_signed
+}
+
+prepare_bootstrap_certificate() {
+  if needs_acme_certificate; then
+    : > "$BOOTSTRAP_MARKER"
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+      -keyout "$CERT_DIR/key.pem" -out "$CERT_DIR/fullchain.pem" -days 7 -nodes \
+      -subj "/CN=$EDGE_DOMAIN" -addext "subjectAltName=DNS:$EDGE_DOMAIN"
+  fi
+}
+
+migrate_acme_webroot() {
+  # Older releases issued in standalone mode.  Migrate their persisted
+  # renewal record so future renewals do not try to bind Nginx's port 80.
+  domain_conf="$ACME_HOME/${EDGE_DOMAIN}_ecc/${EDGE_DOMAIN}.conf"
+  if [ -f "$domain_conf" ] && grep -q "^Le_Webroot='no'" "$domain_conf"; then
+    sed -i "s|^Le_Webroot='no'.*$|Le_Webroot='$ACME_WEBROOT'|" "$domain_conf"
+    echo "Migrated ACME renewal for $EDGE_DOMAIN to webroot mode" >&2
+  fi
+}
+
+issue_certificate() {
   acme.sh --home "$ACME_HOME" --config-home "$ACME_HOME" --server "$ACME_CA_SERVER" \
-    --register-account -m "$EDGE_ACME_EMAIL"
-  # Standalone cert issuance may fail transiently under low resource limits
-  # (e.g. Docker pids_limit).  Retry twice with a short back-off, then fall
-  # through to a self-signed pair so nginx can still start.
-  ISSUE_OK=0
+    --register-account -m "$EDGE_ACME_EMAIL" >/dev/null 2>&1 || true
   for attempt in 1 2 3; do
-    if acme.sh --home "$ACME_HOME" --config-home "$ACME_HOME" --server "$ACME_CA_SERVER" \
-         --issue --standalone -d "$EDGE_DOMAIN" --keylength ec-256; then
-      ISSUE_OK=1
-      break
+    # Webroot mode keeps Nginx online, which is required both for FRP users
+    # and for renewals after the initial certificate has been installed.
+    acme.sh --home "$ACME_HOME" --config-home "$ACME_HOME" --server "$ACME_CA_SERVER" \
+      --issue --webroot "$ACME_WEBROOT" -d "$EDGE_DOMAIN" --keylength ec-256 || true
+    if acme.sh --home "$ACME_HOME" --config-home "$ACME_HOME" --install-cert \
+      -d "$EDGE_DOMAIN" --ecc --key-file "$CERT_DIR/key.pem" \
+      --fullchain-file "$CERT_DIR/fullchain.pem"; then
+      if ! certificate_is_self_signed; then
+        rm -f "$BOOTSTRAP_MARKER"
+        nginx -s reload >/dev/null 2>&1 || true
+        echo "ACME certificate installed for $EDGE_DOMAIN" >&2
+        return 0
+      fi
     fi
     echo "ACME issue attempt $attempt failed; retrying in 5s..." >&2
     sleep 5
   done
-  if [ "$ISSUE_OK" -eq 1 ]; then
-    acme.sh --home "$ACME_HOME" --config-home "$ACME_HOME" --install-cert -d "$EDGE_DOMAIN" \
-      --ecc --key-file "$CERT_DIR/key.pem" --fullchain-file "$CERT_DIR/fullchain.pem"
-  else
-    echo "WARNING: ACME issuance failed; falling back to self-signed certificate for $EDGE_DOMAIN" >&2
-    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -keyout "$CERT_DIR/key.pem" \
-      -out "$CERT_DIR/fullchain.pem" -days 30 -nodes \
-      -subj "/CN=$EDGE_DOMAIN" -addext "subjectAltName=DNS:$EDGE_DOMAIN"
-  fi
-fi
+  echo "WARNING: ACME issuance failed; serving the temporary certificate for $EDGE_DOMAIN" >&2
+  return 1
+}
+
+migrate_acme_webroot
+prepare_bootstrap_certificate
 
 nginx -t
 nginx -g 'daemon off;' &
 NGINX_PID=$!
 
+if needs_acme_certificate; then
+  issue_certificate || true
+fi
+
 (
   while :; do
-    sleep 12h
-    acme.sh --home "$ACME_HOME" --config-home "$ACME_HOME" --cron --server "$ACME_CA_SERVER"
-    nginx -s reload
+    if needs_acme_certificate; then
+      sleep 1h
+      issue_certificate || true
+    else
+      sleep 12h
+      if acme.sh --home "$ACME_HOME" --config-home "$ACME_HOME" --cron --server "$ACME_CA_SERVER"; then
+        nginx -s reload
+      else
+        echo "WARNING: ACME renewal failed; retaining the current certificate" >&2
+      fi
+    fi
   done
 ) &
 RENEW_PID=$!

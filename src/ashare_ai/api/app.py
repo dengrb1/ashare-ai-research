@@ -116,6 +116,7 @@ from ashare_ai.api.schemas import (
     ManualExitAdviceRequest,
     MarketPrefetchRequest,
     MarketPrefetchResponse,
+    MarketIndicesResponse,
     MarketRefreshSettingsRequest,
     MarketSessionStatus,
     ModelListResponse,
@@ -3318,6 +3319,10 @@ def score_lineage(
         "base_total_score": row.base_total_score,
         "dividend_bonus": row.dividend_bonus,
         "event_risk_multiplier": row.event_risk_multiplier,
+        "market_index_snapshot": row.market_index_snapshot,
+        "market_regime": row.market_regime,
+        "market_score_adjustment": row.market_score_adjustment,
+        "market_risk_multiplier": row.market_risk_multiplier,
         "evidence": [
             {
                 "evidence_id": item.evidence_id,
@@ -3449,7 +3454,17 @@ def report(
     row = QueryRepository(db).report(trading_date, run_id=run_id, **_result_access(context))
     if row is None:
         raise HTTPException(status_code=404, detail="report not found")
-    return ReportResponse.model_validate(row)
+    market_snapshot = db.scalar(
+        select(ScoreRow.market_index_snapshot)
+        .where(ScoreRow.run_id == row.run_id, ScoreRow.market_index_snapshot.is_not(None))
+        .limit(1)
+    )
+    return ReportResponse.model_validate(
+        {
+            **{column.name: getattr(row, column.name) for column in row.__table__.columns},
+            "market_index_snapshot": market_snapshot,
+        }
+    )
 
 
 @app.get("/api/v1/reports/{report_id}/content", response_model=ReportBodyResponse)
@@ -4800,6 +4815,29 @@ def market_quotes(symbols: str, _: Current, refresh: bool = False) -> list[Quote
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail="market quotes unavailable") from exc
     return [QuoteResponse.model_validate(row) for row in rows]
+
+
+@app.get("/api/v1/market/indices", response_model=MarketIndicesResponse)
+def market_indices(_: Current, refresh: bool = False) -> MarketIndicesResponse:
+    """Return live display quotes for the three broad A-share indices.
+
+    This endpoint is intentionally separate from score snapshots: the research
+    worker obtains index context only from frozen benchmark data in its bundle.
+    """
+
+    indices = {
+        "000300.SH": "沪深300",
+        "000905.SH": "中证500",
+        "000852.SH": "中证1000",
+    }
+    try:
+        rows = get_market_data_service().quotes(list(indices), force_refresh=refresh)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=503, detail="market index quotes unavailable") from exc
+    return MarketIndicesResponse(
+        quotes=[QuoteResponse.model_validate(row) for row in rows],
+        labels=indices,
+    )
 
 
 @app.get("/api/v1/market/klines/{symbol}", response_model=KlineResponse)
