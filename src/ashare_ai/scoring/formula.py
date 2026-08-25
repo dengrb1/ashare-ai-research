@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import date
+from typing import Literal
 from uuid import UUID
 
 from pydantic import AwareDatetime
@@ -92,11 +93,18 @@ def calculate_total_score(
         + quality_confidence_score * 0.10
     )
     event_multiplier = (
-        event_risk_multiplier if formula_version in {FORMULA_VERSION_V2, FORMULA_VERSION_V3} else 1.0
+        event_risk_multiplier
+        if formula_version in {FORMULA_VERSION_V2, FORMULA_VERSION_V3}
+        else 1.0
     )
     market_adjustment = market_score_adjustment if formula_version == FORMULA_VERSION_V3 else 0.0
     market_multiplier = market_risk_multiplier if formula_version == FORMULA_VERSION_V3 else 1.0
-    return round(max(0.0, min(100.0, base_total + market_adjustment)) * event_multiplier * market_multiplier, 6)
+    return round(
+        max(0.0, min(100.0, base_total + market_adjustment))
+        * event_multiplier
+        * market_multiplier,
+        6,
+    )
 
 
 def calculate_base_total_score(
@@ -155,21 +163,33 @@ def build_market_index_snapshot(
     def weighted(field: str) -> float | None:
         if any(getattr(item, field) is None for item in performances):
             return None
-        return sum(_MARKET_INDEX_WEIGHTS[item.name] * getattr(item, field) for item in performances)
+        return sum(
+            _MARKET_INDEX_WEIGHTS[item.name] * float(getattr(item, field))
+            for item in performances
+        )
 
     return_1d = weighted("return_1d")
     return_5d = weighted("return_5d")
     return_20d = weighted("return_20d")
+    regime: Literal["RISK_ON", "NEUTRAL", "RISK_OFF", "UNKNOWN"]
     if return_5d is None or return_20d is None:
         regime, adjustment, multiplier = "UNKNOWN", 0.0, 1.0
     elif return_5d >= 0.01 and return_20d >= 0:
-        regime, adjustment, multiplier = "RISK_ON", min(adjustment_cap, return_5d * 100 * score_per_percent), 1.0
+        regime, adjustment, multiplier = (
+            "RISK_ON",
+            min(adjustment_cap, return_5d * 100 * score_per_percent),
+            1.0,
+        )
     elif return_5d <= -0.01 and return_20d < 0:
         regime = "RISK_OFF"
         adjustment = max(-adjustment_cap, return_5d * 100 * score_per_percent)
         multiplier = 1.0 - (1.0 - bearish_multiplier_floor) * min(1.0, abs(return_5d) / 0.05)
     else:
-        regime, adjustment, multiplier = "NEUTRAL", max(-adjustment_cap, min(adjustment_cap, return_5d * 100 * score_per_percent)), 1.0
+        regime, adjustment, multiplier = (
+            "NEUTRAL",
+            max(-adjustment_cap, min(adjustment_cap, return_5d * 100 * score_per_percent)),
+            1.0,
+        )
     return MarketIndexSnapshot(
         trading_date=trading_date,
         indices=performances,
@@ -215,11 +235,19 @@ def build_composite_score(
         dividend_bonus if formula_version in {FORMULA_VERSION_V2, FORMULA_VERSION_V3} else 0.0
     )
     effective_risk_multiplier = (
-        event_risk_multiplier if formula_version in {FORMULA_VERSION_V2, FORMULA_VERSION_V3} else 1.0
+        event_risk_multiplier
+        if formula_version in {FORMULA_VERSION_V2, FORMULA_VERSION_V3}
+        else 1.0
     )
-    effective_market_snapshot = market_index_snapshot if formula_version == FORMULA_VERSION_V3 else None
-    effective_market_adjustment = effective_market_snapshot.score_adjustment if effective_market_snapshot else 0.0
-    effective_market_multiplier = effective_market_snapshot.risk_multiplier if effective_market_snapshot else 1.0
+    effective_market_snapshot = (
+        market_index_snapshot if formula_version == FORMULA_VERSION_V3 else None
+    )
+    effective_market_adjustment = (
+        effective_market_snapshot.score_adjustment if effective_market_snapshot else 0.0
+    )
+    effective_market_multiplier = (
+        effective_market_snapshot.risk_multiplier if effective_market_snapshot else 1.0
+    )
     adjusted_fundamental = min(100.0, fundamental + effective_dividend_bonus)
     base_total_score = calculate_base_total_score(
         fundamental_score=fundamental,

@@ -92,6 +92,9 @@ def test_daily_report_prefers_chinese_plain_language_summary(tmp_path) -> None:
                         "sentiment_score": 70,
                         "quality_confidence_score": 70,
                         "event_risk_multiplier": 1,
+                        "market_score_adjustment": 0,
+                        "market_regime": "UNKNOWN",
+                        "market_risk_multiplier": 1,
                         "decision_at": "2026-07-14T18:00:00+08:00",
                     },
                     "components": {
