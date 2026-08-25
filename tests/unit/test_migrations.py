@@ -6,7 +6,7 @@ from unittest.mock import Mock
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import Column, Integer, MetaData, Table, create_engine, inspect, text
+from sqlalchemy import Column, Integer, MetaData, String, Table, create_engine, inspect, text
 
 from ashare_ai.cli import migrate_database
 from ashare_ai.core.config import get_settings, runtime_resource_path
@@ -46,7 +46,7 @@ def test_cli_migrate_bootstraps_empty_database_at_alembic_head(tmp_path, monkeyp
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar()
-                assert revision == "0031_compaction_cache_layer"
+                assert revision == "0033_model_provider_fallback"
             assert {
                 "exit_advice",
                 "ai_response_cache",
@@ -74,9 +74,51 @@ def test_cli_migrate_bootstraps_empty_database_at_alembic_head(tmp_path, monkeyp
             assert "last_singleflight_wait_ms" in {
                 column["name"] for column in inspect(engine).get_columns("ai_response_cache")
             }
+            providers_column = next(
+                column
+                for column in inspect(engine).get_columns("model_configuration_versions")
+                if column["name"] == "providers"
+            )
+            assert str(providers_column["default"]).strip("()'") == "[]"
         finally:
             engine.dispose()
     finally:
+        get_settings.cache_clear()
+
+
+def test_model_provider_fallback_migration_upgrades_and_downgrades_on_sqlite(
+    tmp_path, monkeypatch
+) -> None:
+    database = tmp_path / "model-provider-fallback.db"
+    url = f"sqlite+pysqlite:///{database.as_posix()}"
+    monkeypatch.setenv("DATABASE_URL", url)
+    get_settings.cache_clear()
+    config = Config(str(runtime_resource_path("alembic.ini")))
+    config.set_main_option("script_location", str(runtime_resource_path("migrations")))
+    engine = create_engine(url)
+    try:
+        metadata = MetaData()
+        Table(
+            "model_configuration_versions",
+            metadata,
+            Column("configuration_id", String(36), primary_key=True),
+        )
+        metadata.create_all(engine)
+        command.stamp(config, "0032_market_index_score_context")
+
+        command.upgrade(config, "0033_model_provider_fallback")
+        assert "providers" in {
+            column["name"]
+            for column in inspect(engine).get_columns("model_configuration_versions")
+        }
+
+        command.downgrade(config, "0032_market_index_score_context")
+        assert "providers" not in {
+            column["name"]
+            for column in inspect(engine).get_columns("model_configuration_versions")
+        }
+    finally:
+        engine.dispose()
         get_settings.cache_clear()
 
 

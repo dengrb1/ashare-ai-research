@@ -206,6 +206,9 @@ class ModelConfigurationVersion(Base):
     research_model: Mapped[str] = mapped_column(String(128), nullable=False)
     research_reasoning_effort: Mapped[str] = mapped_column(String(16), nullable=False)
     model_profiles: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    providers: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, nullable=False, default=list, server_default="[]"
+    )
     timeout_seconds: Mapped[float] = mapped_column(Float, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
     config_sha256: Mapped[str] = mapped_column(String(64), nullable=False)

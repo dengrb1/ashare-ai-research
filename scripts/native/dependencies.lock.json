@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "runtime_version": "2.1.0",
+  "runtime_version": "2.1.1",
   "platform": "windows-amd64",
   "artifacts": [
     {

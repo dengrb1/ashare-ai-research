@@ -287,7 +287,12 @@ class OpenAICompatibleStructuredLLMClient:
                     )
                 except _RetryableResponseError as exc:
                     if attempts >= self._max_retries:
-                        raise OpenAICompatibleError(_http_error_message(exc.response)) from exc
+                        raise OpenAICompatibleError(
+                            _http_error_message(exc.response),
+                            code=_status_error_code(exc.response.status_code),
+                            status_code=exc.response.status_code,
+                            retryable=True,
+                        ) from exc
                 except httpx.TimeoutException as exc:
                     if attempts >= self._max_retries:
                         raise OpenAICompatibleError(
@@ -296,7 +301,9 @@ class OpenAICompatibleStructuredLLMClient:
                 except httpx.TransportError as exc:
                     if attempts >= self._max_retries:
                         raise OpenAICompatibleError(
-                            f"Responses API transport failure: {exc}"
+                            f"Responses API transport failure: {exc}",
+                            code="MODEL_GATEWAY_UNAVAILABLE",
+                            retryable=True,
                         ) from exc
                 except OpenAICompatibleError as exc:
                     if (

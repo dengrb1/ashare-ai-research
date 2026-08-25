@@ -151,10 +151,10 @@ def test_research_worker_persists_failure_reason() -> None:
         # The user-facing failure reason is fixed Chinese copy; the exception text
         # stays in the structured audit details for operations.
         assert run.error_message == public_error_message("RESEARCH_FAILED")
-        assert (
-            session.query(AuditEvent).order_by(AuditEvent.created_at.desc()).first().severity
-            == "ERROR"
+        failed_event = (
+            session.query(AuditEvent).filter(AuditEvent.event_type == "RESEARCH_FAILED").one()
         )
+        assert failed_event.severity == "ERROR"
 
 
 def test_data_readiness_wait_continues_after_the_legacy_two_hour_window() -> None:

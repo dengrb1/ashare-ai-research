@@ -1043,7 +1043,10 @@ class BuiltinDailyBackend:
                         ),
                         total_bonus_cap=float(self.policy.scoring.dividend_total_bonus_cap),
                     ).total_bonus
-                    if self.policy.scoring.formula_version in {FORMULA_VERSION_V2, FORMULA_VERSION_V3}
+                    if self.policy.scoring.formula_version in {
+                        FORMULA_VERSION_V2,
+                        FORMULA_VERSION_V3,
+                    }
                     else 0.0
                 ),
                 event_risk_multiplier=aggregate_event_risk(
@@ -1055,7 +1058,10 @@ class BuiltinDailyBackend:
                             decision_at=bundle.decision_at,
                             window_days=self.policy.scoring.news_window_days,
                         )
-                        if self.policy.scoring.formula_version in {FORMULA_VERSION_V2, FORMULA_VERSION_V3}
+                        if self.policy.scoring.formula_version in {
+                            FORMULA_VERSION_V2,
+                            FORMULA_VERSION_V3,
+                        }
                         else bundle.events_by_symbol.get(item.symbol, ())
                     ),
                     event_policy,
