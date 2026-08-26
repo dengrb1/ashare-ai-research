@@ -1,0 +1,31 @@
+# 由 Web 控制台设置页生成（a_share_ai_trader.settings_store）。
+# 手动修改后可通过 POST /admin/reload 热重载，或在本页保存。
+
+listen = "127.0.0.1:8787"
+default_model = "ashare-advisor"
+client_api_key_env = "GATEWAY_CLIENT_API_KEY"
+max_body_bytes = 1048576
+failure_threshold = 3
+recovery_seconds = 30
+health_probe_seconds = 20
+key_failure_cooldown_seconds = 300
+protocol_fallback = true
+
+[[channels]]
+id = "local-model"
+name = "本地 Qwen 模型"
+service_type = "openai"
+base_url = "http://127.0.0.1:8080/v1"
+api_keys = []
+api_key_optional = true
+model_mapping = { "ashare-advisor" = "Qwen2.5-3B-Instruct-Q4_K_M" }
+timeout_ms = 120000
+priority = 3
+health_path = "/v1/models"
+
+[[channels]]
+id = "local-safe"
+name = "本地安全基线"
+service_type = "local"
+model = "ashare-rule-baseline-v1"
+priority = 99

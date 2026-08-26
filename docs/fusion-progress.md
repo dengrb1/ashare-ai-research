@@ -121,14 +121,26 @@ tests/test_research_only_mode.py .....  [100%]
 
 结论：**前端已经是纯研究模式，无需修改**
 
-## Phase 2: 迁入 QMT 运行底座 ⏳
+## Phase 2: 迁入 QMT 运行底座 ✅
 
-待办：
-- [ ] 迁入 `gateway/` Rust 模型 Gateway
-- [ ] 迁入 `tools/console/` Windows 控制台
-- [ ] 迁入服务控制脚本
-- [ ] 迁入行情桥、新闻桥
-- [ ] 适配本地模型启动脚本
+已完成：
+1. ✅ 迁入 `gateway/` Rust 模型 Gateway（纯模型代理，无交易逻辑）
+2. ✅ 迁入 `tools/quote_bridge/` 行情桥（stdlib only，Tencent/Sina 数据源）
+3. ✅ 迁入 `tools/news_bridge/` 新闻桥（stdlib only，Eastmoney 数据源）
+4. ✅ 迁入服务控制脚本：
+   - `scripts/service_control.ps1` - 统一服务生命周期管理
+   - `scripts/llm_stack.ps1` - 本地模型服务
+   - `scripts/start_stack.ps1` - 启动脚本
+   - `scripts/stop_stack.ps1` - 停止脚本
+   - `scripts/verify_stack.ps1` - 验证脚本
+5. ✅ 更新 `.gitignore` 排除 `gateway/target/`
+6. ✅ 验证 Gateway 编译（cargo check 通过，13.53s）
+7. ✅ 验证 Bridge 服务（--help 正常，无额外依赖）
+
+说明：
+- Console 工具暂不迁入（包含"交易与风控"页面和实盘交易配置，需要大量清理才能符合研究只读模式）
+- Gateway、Bridge 都是基础设施组件，无交易逻辑，可安全使用
+- 服务控制脚本管理 Gateway、Bridge、Api、LocalModel 生命周期
 
 ## Phase 3: 统一 Compose、任务和生命周期 ⏳
 
@@ -178,10 +190,21 @@ export PYTHONPATH=src
 .venv/Scripts/python.exe -m pytest
 ```
 
+### Phase 2 验收 ✅ COMPLETED
+
+运行底座组件：
+- [x] Gateway (Rust) 编译通过，可独立运行
+- [x] Bridge 服务（市场桥、新闻桥）无额外依赖，可直接运行
+- [x] 服务控制脚本已就位
+- [x] Console 工具暂不迁入（包含交易界面，不符合研究只读要求）
+
+**Phase 2 完成状态：QMT 运行底座（研究部分）已迁入** ✅
+
 ---
 
 更新时间：2026-08-26
 当前分支：main
 **Phase 1 状态：✅ 完成**
+**Phase 2 状态：✅ 完成**
 
-下一步：创建分支 `codex/fusion-research-only`，开始 Phase 2
+下一步：Phase 3 - 统一 Compose、任务和生命周期

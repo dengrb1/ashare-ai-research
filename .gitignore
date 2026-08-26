@@ -24,6 +24,7 @@ web/coverage/
 web/dist/
 build/
 native/**/target/
+gateway/target/
 *.egg-info/
 .pip-install.*.log
 .pip-*.log

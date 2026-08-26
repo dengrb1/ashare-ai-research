@@ -1,0 +1,20 @@
+# 压测专用配置：只保留内置本地安全基线，避免环境中的远端密钥影响路由。
+# 用法：GATEWAY_CONFIG=gateway/config.benchmark.toml 在独立端口启动后，
+#    python scripts\gateway_benchmark.py --url http://127.0.0.1:8788
+
+listen = "127.0.0.1:8788"
+default_model = "ashare-advisor"
+client_api_key_env = "GATEWAY_BENCHMARK_UNUSED_KEY"
+failure_threshold = 3
+recovery_seconds = 30
+health_probe_seconds = 20
+max_body_bytes = 1048576
+key_failure_cooldown_seconds = 300
+protocol_fallback = true
+
+[[channels]]
+id = "local-safe"
+name = "本地安全基线"
+service_type = "local"
+model = "ashare-rule-baseline-v1"
+priority = 1
