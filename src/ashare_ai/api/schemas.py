@@ -36,6 +36,9 @@ class HealthResponse(BaseModel):
     version: str
     database: str
     git_sha: str = "UNVERSIONED"
+    qmt_enabled: bool = False
+    auto_trading_enabled: bool = False
+    execution_mode: str = "RESEARCH_ONLY"
 
 
 class SearchEntity(BaseModel):

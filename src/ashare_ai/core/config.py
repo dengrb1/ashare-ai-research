@@ -23,6 +23,12 @@ def runtime_resource_path(relative_path: str) -> Path:
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
+    # Research-only mode: permanently disabled trading capabilities
+    research_only_mode: bool = True
+    qmt_enabled: bool = False
+    auto_trading_enabled: bool = False
+    execution_mode: Literal["RESEARCH_ONLY", "PAPER", "LIVE"] = "RESEARCH_ONLY"
+
     app_env: str = "development"
     database_url: str = "sqlite+pysqlite:///./data/ashare.db"
     redis_url: str = "redis://localhost:6379/0"
@@ -160,6 +166,30 @@ class Settings(BaseSettings):
     def empty_neodata_path_is_unconfigured(cls, value: object) -> object:
         return None if isinstance(value, str) and not value.strip() else value
 
+    @field_validator("research_only_mode", mode="before")
+    @classmethod
+    def lock_research_only_mode(cls, value: object) -> bool:
+        """Research-only mode is permanently enabled and cannot be turned off."""
+        return True
+
+    @field_validator("qmt_enabled", mode="before")
+    @classmethod
+    def lock_qmt_disabled(cls, value: object) -> bool:
+        """QMT integration is permanently disabled for research-only mode."""
+        return False
+
+    @field_validator("auto_trading_enabled", mode="before")
+    @classmethod
+    def lock_auto_trading_disabled(cls, value: object) -> bool:
+        """Auto trading is permanently disabled for research-only mode."""
+        return False
+
+    @field_validator("execution_mode", mode="before")
+    @classmethod
+    def lock_execution_mode_research_only(cls, value: object) -> str:
+        """Execution mode is permanently locked to RESEARCH_ONLY."""
+        return "RESEARCH_ONLY"
+
     @field_validator("edge_domain", mode="before")
     @classmethod
     def clean_edge_domain(cls, value: object) -> object:
@@ -201,6 +231,16 @@ class Settings(BaseSettings):
         if self.app_env.casefold() != "production":
             return
         problems: list[str] = []
+
+        # Enforce research-only mode in all environments
+        if not self.research_only_mode:
+            problems.append("RESEARCH_ONLY_MODE must be true")
+        if self.qmt_enabled:
+            problems.append("QMT_ENABLED must be false")
+        if self.auto_trading_enabled:
+            problems.append("AUTO_TRADING_ENABLED must be false")
+        if self.execution_mode != "RESEARCH_ONLY":
+            problems.append("EXECUTION_MODE must be RESEARCH_ONLY")
         if not self.cookie_secure:
             problems.append("COOKIE_SECURE must be true")
         if not self.trusted_host_list or "*" in self.trusted_host_list:

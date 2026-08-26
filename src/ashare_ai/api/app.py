@@ -892,11 +892,16 @@ def health(db: DbSession) -> HealthResponse:
         db.execute(text("SELECT 1"))
     except SQLAlchemyError:
         database = "unavailable"
+
+    # Always expose research-only status in health check
     return HealthResponse(
         status="ok" if database == "ok" else "degraded",
         version=__version__,
         database=database,
         git_sha=_api_settings.git_sha,
+        qmt_enabled=False,
+        auto_trading_enabled=False,
+        execution_mode="RESEARCH_ONLY",
     )
 
 
