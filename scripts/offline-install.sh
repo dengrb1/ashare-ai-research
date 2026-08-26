@@ -49,10 +49,10 @@ if [ "$IMPORT_IMAGES" = "true" ]; then
 
     if [ -f "ashare-ai-images.tar.gz" ]; then
         echo "解压并导入镜像包..."
-        gunzip -c ashare-ai-images.tar.gz | docker load
+        gunzip -c "ashare-ai-images.tar.gz" | docker load
         echo "✓ 镜像导入完成"
     elif [ -f "ashare-ai-images.tar" ]; then
-        docker load -i ashare-ai-images.tar
+        docker load -i "ashare-ai-images.tar"
         echo "✓ 镜像导入完成"
     else
         echo "警告: 未找到镜像包，跳过导入"

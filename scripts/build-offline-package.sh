@@ -53,6 +53,7 @@ echo "$IMAGES" | sed 's/^/  - /'
 # 导出镜像
 IMAGES_TAR="$PACKAGE_DIR/ashare-ai-images.tar"
 echo "导出镜像到: $IMAGES_TAR"
+# shellcheck disable=SC2086
 docker save $IMAGES -o "$IMAGES_TAR"
 
 # 压缩镜像包

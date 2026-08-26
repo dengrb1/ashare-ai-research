@@ -52,7 +52,8 @@ if ($ImportImages) {
 
     if (Test-Path ".\ashare-ai-images.tar.gz") {
         Write-Host "解压并导入镜像包..." -ForegroundColor Cyan
-        cmd /c "gzip -dc ashare-ai-images.tar.gz | docker load"
+        $imagePath = Join-Path $InstallDir "ashare-ai-images.tar.gz"
+        & gzip -dc $imagePath | docker load
         Write-Host "✓ 镜像导入完成" -ForegroundColor Green
     } elseif (Test-Path ".\ashare-ai-images.tar") {
         docker load -i ashare-ai-images.tar
