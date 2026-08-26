@@ -87,6 +87,65 @@ services:
     restart: "no"
     security_opt: ["no-new-privileges:true"]
 
+  # Rust-based model gateway (migrated from QMT repository Phase 2)
+  # Pure proxy layer with no trading logic - forwards requests to LLM providers
+  gateway:
+    build:
+      context: .
+      dockerfile: docker/gateway.Dockerfile
+    ports: ["${SERVICE_BIND_ADDRESS:-127.0.0.1}:8787:8787"]
+    environment:
+      RUST_LOG: "${GATEWAY_LOG_LEVEL:-info}"
+      GATEWAY_BIND: "0.0.0.0:8787"
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 128m
+    logging: *bounded-logs
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8787/health/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  # Real-time quote bridge (migrated from QMT repository Phase 2)
+  # Fetches quotes from Tencent/Sina public APIs, stdlib only
+  quote-bridge:
+    build:
+      context: .
+      dockerfile: docker/bridge.Dockerfile
+      target: quote-bridge
+    ports: ["${SERVICE_BIND_ADDRESS:-127.0.0.1}:8081:8081"]
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 32
+    mem_limit: 64m
+    logging: *bounded-logs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  # News feed bridge (migrated from QMT repository Phase 2)
+  # Fetches news from Eastmoney public API, stdlib only
+  news-bridge:
+    build:
+      context: .
+      dockerfile: docker/bridge.Dockerfile
+      target: news-bridge
+    ports: ["${SERVICE_BIND_ADDRESS:-127.0.0.1}:8082:8082"]
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 32
+    mem_limit: 64m
+    logging: *bounded-logs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8082/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
   web:
     build:
       context: ./web
@@ -132,6 +191,12 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+      quote-bridge:
+        condition: service_healthy
+      news-bridge:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')"]
