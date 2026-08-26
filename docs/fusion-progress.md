@@ -169,29 +169,42 @@ tests/test_research_only_mode.py .....  [100%]
 - [ ] 为长时间任务（backtest, research）添加 checkpoint 机制
 - [ ] 编写集成测试验证新服务启动
 
-## Phase 4: 数据管道集成 📋
+## Phase 4: 数据管道集成 ✅
 
-**状态**: 规划完成，待实施
+**状态**: ✅ 完成 (2026-08-26)
 
-详见 [phase4-data-pipeline-plan.md](phase4-data-pipeline-plan.md)
+详见 [phase4-data-pipeline-plan.md](phase4-data-pipeline-plan.md) 和 [phase4-completion-summary.md](phase4-completion-summary.md)
 
 **目标**: 集成 Gateway 和 Bridge 服务到数据管道，使研究任务能够使用新基础设施。
 
-**主要任务**:
-1. 集成 Quote Bridge 到市场数据层
-2. 集成 News Bridge 到研究流程
-3. 集成 Gateway 到 AI Agent
-4. 扩展健康检查端点
+**已完成的任务**:
+1. ✅ 集成 Quote Bridge 到市场数据层 - 作为补充数据源
+2. ✅ 集成 News Bridge 到研究流程 - 新闻特征提取模块
+3. ✅ 集成 Gateway 到 AI Agent - 通过 OpenAICompatibleStructuredLLMClient
+4. ✅ 扩展健康检查端点 - 报告所有服务状态
 
-**交付物**:
-- `src/ashare_ai/market/quote_bridge_client.py` - Quote Bridge 客户端
-- `src/ashare_ai/market/news_bridge_client.py` - News Bridge 客户端
-- `src/ashare_ai/agents/gateway_client.py` - Gateway 客户端
-- `src/ashare_ai/features/news_features.py` - 新闻特征提取
-- `src/ashare_ai/core/health.py` - 基础设施健康检查
-- 配置扩展、API 扩展、集成测试
+**已交付文件**:
+- ✅ `src/ashare_ai/market/quote_bridge_client.py` - Quote Bridge HTTP 客户端
+- ✅ `src/ashare_ai/market/news_bridge_client.py` - News Bridge HTTP 客户端
+- ✅ `src/ashare_ai/agents/gateway_client.py` - Gateway HTTP 客户端
+- ✅ `src/ashare_ai/features/news_features.py` - 新闻特征提取模块
+- ✅ `src/ashare_ai/core/health.py` - 基础设施健康检查
+- ✅ `src/ashare_ai/market/service.py` - 已集成 Quote Bridge
+- ✅ `src/ashare_ai/api/app.py` - 健康检查端点已更新
+- ✅ `src/ashare_ai/api/schemas.py` - HealthResponse schema 已更新
 
-**预计时间**: 10-15 小时
+**测试覆盖**:
+- ✅ `tests/test_bridge_gateway_integration.py` - 9 个集成测试，全部通过
+- ✅ `tests/test_news_features.py` - 5 个特征提取测试，全部通过
+- ✅ `tests/test_health.py` - 4 个健康检查测试，全部通过
+- ✅ **总计: 18 个测试，全部通过** ✅
+
+**配置**:
+- ✅ `quote_bridge_enabled: bool = True` (默认启用)
+- ✅ `news_bridge_enabled: bool = True` (默认启用)
+- ✅ `gateway_enabled: bool = True` (默认启用)
+
+**实际耗时**: 约 6 小时 (低于预计 10-15 小时，因为部分集成在 Phase 3 已完成)
 
 ---
 
@@ -397,28 +410,29 @@ export PYTHONPATH=src
 **Phase 1 状态：✅ 完成**
 **Phase 2 状态：✅ 完成**
 **Phase 3 状态：✅ 完成**
+**Phase 4 状态：✅ 完成**
 
-下一步：开始实施 Phase 4 - 数据管道集成
+下一步：评估是否需要实施 Phase 5 - 模型训练集成（需先审查现状）
 
 ## 总体进度概览
 
-| Phase | 名称 | 状态 | 预计时间 | 说明 |
+| Phase | 名称 | 状态 | 实际/预计时间 | 说明 |
 |-------|------|------|----------|------|
 | 0 | 基线评估 | ✅ 完成 | - | 确认现有系统状态 |
 | 1 | 研究只读闭锁 | ✅ 完成 | 已完成 | 配置层加固、测试覆盖 |
 | 2 | QMT 运行底座迁移 | ✅ 完成 | 已完成 | Gateway、Bridge、脚本 |
 | 3 | Compose 和生命周期统一 | ✅ 完成 | 已完成 | Docker 集成、服务编排 |
-| 4 | 数据管道集成 | 📋 规划完成 | 10-15h | Quote/News/Gateway 集成 |
+| 4 | 数据管道集成 | ✅ 完成 | 6h / 10-15h | Quote/News/Gateway 集成 |
 | 5 | 模型训练集成 | 📋 规划完成 | 2-15h | 视评估结果而定 |
 | 6 | Rust 优化 | 📋 规划完成 | 4-35h | 视性能瓶颈而定 |
 | 7 | Web/PWA 增强 | 📋 规划完成 | 2-40h | 视前端现状而定 |
 | 8 | 离线部署包 | 📋 规划完成 | 12-16h | 打包、脚本、文档 |
 
 **关键里程碑**:
-- ✅ Phase 1-3: 核心基础设施完成，系统可安全运行
-- 📋 Phase 4-8: 功能增强和部署优化，根据实际需求选择性实施
+- ✅ Phase 1-4: 核心基础设施完成，系统可安全运行并使用新数据管道
+- 📋 Phase 5-8: 功能增强和部署优化，根据实际需求选择性实施
 
 **总体策略**:
-- Phase 4 是必需的（数据管道集成）
+- Phase 1-4 是必需的（已全部完成）✅
 - Phase 5-7 是可选的（根据评估结果决定）
 - Phase 8 是推荐的（便于交付和部署）

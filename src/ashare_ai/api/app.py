@@ -887,11 +887,16 @@ def _research_run_response(db: Session, row: JobRun) -> ResearchRunResponse:
 
 @app.get("/api/v1/health", response_model=HealthResponse)
 def health(db: DbSession) -> HealthResponse:
+    from ashare_ai.core.health import check_infrastructure_health
+
     database = "ok"
     try:
         db.execute(text("SELECT 1"))
     except SQLAlchemyError:
         database = "unavailable"
+
+    # Check infrastructure services (Gateway, Bridge)
+    infrastructure = check_infrastructure_health(_api_settings)
 
     # Always expose research-only status in health check
     return HealthResponse(
@@ -902,6 +907,9 @@ def health(db: DbSession) -> HealthResponse:
         qmt_enabled=False,
         auto_trading_enabled=False,
         execution_mode="RESEARCH_ONLY",
+        quote_bridge=infrastructure.get("quote_bridge"),
+        news_bridge=infrastructure.get("news_bridge"),
+        gateway=infrastructure.get("gateway"),
     )
 
 

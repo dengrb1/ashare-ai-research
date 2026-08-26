@@ -28,8 +28,10 @@ import httpx
 from ashare_ai.adapters.symbols import normalize_symbol as canonical_symbol
 from ashare_ai.core.config import Settings, get_settings
 from ashare_ai.core.runtime_mode import is_after_close, runtime_mode_policy
+from ashare_ai.market.quote_bridge_client import get_quote_bridge_client
 from ashare_ai.core.system_settings import get_effective_settings
 from ashare_ai.core.time import SHANGHAI
+from ashare_ai.market.quote_bridge_client import get_quote_bridge_client
 
 PERIODS = {
     "1m": "1",
@@ -1237,6 +1239,12 @@ class MarketDataService:
         # cache key, so sustained stale polls never stack unbounded threads.
         self._background_refreshing: set[str] = set()
         self._background_guard = threading.Lock()
+        # Quote Bridge client for supplementary real-time quotes
+        self._quote_bridge_client = (
+            get_quote_bridge_client(self.settings)
+            if self.settings.quote_bridge_enabled
+            else None
+        )
 
     def start(self) -> bool:
         if isinstance(self.primary, AKShareMarketProvider):
@@ -1248,6 +1256,8 @@ class MarketDataService:
     def close(self) -> None:
         if isinstance(self.primary, AKShareMarketProvider):
             self.primary.close()
+        if self._quote_bridge_client is not None:
+            self._quote_bridge_client.close()
         with self._cache_guard:
             self._cache.clear()
         with self._background_guard:
@@ -1805,6 +1815,34 @@ class MarketDataService:
                     time.sleep(0.05)
             errors: list[str] = []
             try:
+                # Try Quote Bridge first if enabled (fast, supplementary data source)
+                if self._quote_bridge_client is not None:
+                    try:
+                        collected = self.clock()
+                        bridge_item = self._quote_bridge_client.get_quote(normalized)
+                        if bridge_item is not None:
+                            cached_at = self.clock()
+                            value = {
+                                **self._normalize_quote(bridge_item),
+                                "status": self._status(
+                                    "quote_bridge",
+                                    collected.isoformat(),
+                                    cached_at.isoformat(),
+                                    delayed=False,
+                                ),
+                            }
+                            record = {
+                                "cached_at": cached_at.isoformat(),
+                                "cache_seconds": self.settings.market_cache_seconds,
+                                "item": value,
+                            }
+                            self._set(key, record)
+                            return cached_item(record)
+                    except Exception as exc:
+                        errors.append(f"quote_bridge: {exc}")
+                        logger.debug("Quote Bridge fallback failed for %s: %s", normalized, exc)
+
+                # Fall back to existing provider chain
                 for provider in (*self.fallbacks, self.primary):
                     if not self._provider_allowed(provider):
                         continue

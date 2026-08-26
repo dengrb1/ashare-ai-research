@@ -91,6 +91,15 @@ class Settings(BaseSettings):
     searxng_timeout_seconds: float = Field(default=12.0, gt=0, le=60)
     searxng_max_results: int = Field(default=5, ge=1, le=10)
     ai_chat_rate_limit_per_minute: int = Field(default=10, ge=1, le=120)
+    # Quote Bridge integration (supplementary real-time quotes from Tencent/Sina)
+    quote_bridge_enabled: bool = True
+    quote_bridge_url: str = "http://127.0.0.1:8081"
+    # News Bridge integration (news data from Eastmoney)
+    news_bridge_enabled: bool = True
+    news_bridge_url: str = "http://127.0.0.1:8082"
+    # Gateway integration (model proxy)
+    gateway_enabled: bool = True
+    gateway_url: str = "http://127.0.0.1:8787"
     canonical_bundle_mode: Literal["akshare", "file", "demo"] = "akshare"
     allow_demo_data: bool = False
     akshare_bundle_size: int = Field(default=20, ge=15, le=100)

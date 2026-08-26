@@ -39,6 +39,9 @@ class HealthResponse(BaseModel):
     qmt_enabled: bool = False
     auto_trading_enabled: bool = False
     execution_mode: str = "RESEARCH_ONLY"
+    quote_bridge: dict[str, Any] | None = None
+    news_bridge: dict[str, Any] | None = None
+    gateway: dict[str, Any] | None = None
 
 
 class SearchEntity(BaseModel):
