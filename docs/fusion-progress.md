@@ -169,9 +169,157 @@ tests/test_research_only_mode.py .....  [100%]
 - [ ] 为长时间任务（backtest, research）添加 checkpoint 机制
 - [ ] 编写集成测试验证新服务启动
 
-## Phase 4-8: 后续阶段 ⏳
+## Phase 4: 数据管道集成 📋
 
-详见 `最终执行方案.md`
+**状态**: 规划完成，待实施
+
+详见 [phase4-data-pipeline-plan.md](phase4-data-pipeline-plan.md)
+
+**目标**: 集成 Gateway 和 Bridge 服务到数据管道，使研究任务能够使用新基础设施。
+
+**主要任务**:
+1. 集成 Quote Bridge 到市场数据层
+2. 集成 News Bridge 到研究流程
+3. 集成 Gateway 到 AI Agent
+4. 扩展健康检查端点
+
+**交付物**:
+- `src/ashare_ai/market/quote_bridge_client.py` - Quote Bridge 客户端
+- `src/ashare_ai/market/news_bridge_client.py` - News Bridge 客户端
+- `src/ashare_ai/agents/gateway_client.py` - Gateway 客户端
+- `src/ashare_ai/features/news_features.py` - 新闻特征提取
+- `src/ashare_ai/core/health.py` - 基础设施健康检查
+- 配置扩展、API 扩展、集成测试
+
+**预计时间**: 10-15 小时
+
+---
+
+## Phase 5: 模型训练集成 📋
+
+**状态**: 规划完成，待审查现状
+
+详见 [phase5-model-training-plan.md](phase5-model-training-plan.md)
+
+**目标**: 评估并决定是否需要集成模型训练能力。
+
+**方向分支**:
+- **方向 A**: 基于规则的评分，无需训练 → 跳过 Phase 5
+- **方向 B**: 使用预训练模型，仅需推理集成 → 简化实施
+- **方向 C**: 需要定期训练/微调 → 完整训练流程
+
+**主要任务**（方向 C）:
+1. 添加训练任务类型和队列
+2. 实现模型存储和版本管理
+3. 创建训练 API 端点
+4. 集成到评分模块
+
+**预计时间**: 
+- 审查: 1-2 小时
+- 方向 B: 2-3 小时
+- 方向 C: 10-15 小时
+
+---
+
+## Phase 6: Rust 优化 📋
+
+**状态**: 规划完成，待性能评估
+
+详见 [phase6-rust-optimization-plan.md](phase6-rust-optimization-plan.md)
+
+**目标**: 评估性能瓶颈，选择性将计算密集型模块改写为 Rust。
+
+**决策流程**:
+1. **Phase 6A**: 性能 profiling，识别瓶颈
+   - 瓶颈在 I/O → 跳过 Rust 优化
+   - 瓶颈在 CPU 计算 → 执行 Phase 6B
+   - 性能已满足 → 跳过
+
+2. **Phase 6B**: Rust 扩展开发（如果需要）
+   - 使用 PyO3 + maturin
+   - 候选模块: 技术指标、回测引擎、特征工程
+   - 保留 Python 回退实现
+
+3. **Phase 6C**: 其他优化（替代方案）
+   - Numba JIT
+   - Cython
+   - NumPy 向量化
+
+**性能目标**:
+- 技术指标计算: > 10x 加速
+- 回测引擎: > 10x 加速
+- 特征工程: > 10x 加速
+
+**预计时间**:
+- 评估: 2-4 小时
+- Rust 优化: 18-35 小时
+- Python 优化: 4-12 小时
+
+---
+
+## Phase 7: Web/PWA 增强 📋
+
+**状态**: 规划完成，待前端审查
+
+详见 [phase7-web-pwa-plan.md](phase7-web-pwa-plan.md)
+
+**目标**: 评估前端功能完整性，决定是否需要增强 Web UI 或添加 PWA 能力。
+
+**方向分支**:
+- **方向 A**: 功能完整，体验良好 → 跳过 Phase 7
+- **方向 B**: 需要 UI/UX 优化 → 响应式、图表、性能、深色模式
+- **方向 C**: 功能不完整 → 补齐缺失页面
+- **方向 D**: 需要 PWA → 离线访问、可安装、推送通知
+
+**主要任务**（方向 D）:
+1. PWA 基础配置（Manifest、图标）
+2. Service Worker 配置（Workbox）
+3. 离线体验优化
+4. 推送通知（可选）
+5. 后台同步（可选）
+
+**性能目标**:
+- LCP < 2.5s, FID < 100ms, CLS < 0.1
+- Lighthouse PWA 评分 > 90
+- Bundle < 300KB (gzipped)
+
+**预计时间**:
+- 审查: 2-3 小时
+- UI 优化: 8-15 小时
+- 功能补齐: 5-20 小时
+- PWA 改造: 8-12 小时
+
+---
+
+## Phase 8: 离线部署包 📋
+
+**状态**: 规划完成，待实施
+
+详见 [phase8-offline-deployment-plan.md](phase8-offline-deployment-plan.md)
+
+**目标**: 打包完整的离线安装包，使系统可以在无互联网环境下一键部署。
+
+**主要任务**:
+1. 导出所有 Docker 镜像为 tar.gz
+2. 编写 Windows 部署脚本 (PowerShell)
+3. 编写 Linux 部署脚本 (Bash)
+4. 创建打包流程自动化脚本
+5. 完善安装、升级、备份文档
+
+**离线包内容**:
+- Docker 镜像包 (500MB - 2GB)
+- compose.yaml + 配置模板
+- 安装/卸载脚本
+- 完整文档（INSTALL, UPGRADE, BACKUP, FAQ）
+- SHA256 校验文件
+
+**使用场景**:
+- 内网部署（无外网访问）
+- 私有云
+- 客户现场演示
+- 备份恢复
+
+**预计时间**: 12-16 小时
 
 ---
 
@@ -250,4 +398,27 @@ export PYTHONPATH=src
 **Phase 2 状态：✅ 完成**
 **Phase 3 状态：✅ 完成**
 
-下一步：Phase 4 - 数据管道集成
+下一步：开始实施 Phase 4 - 数据管道集成
+
+## 总体进度概览
+
+| Phase | 名称 | 状态 | 预计时间 | 说明 |
+|-------|------|------|----------|------|
+| 0 | 基线评估 | ✅ 完成 | - | 确认现有系统状态 |
+| 1 | 研究只读闭锁 | ✅ 完成 | 已完成 | 配置层加固、测试覆盖 |
+| 2 | QMT 运行底座迁移 | ✅ 完成 | 已完成 | Gateway、Bridge、脚本 |
+| 3 | Compose 和生命周期统一 | ✅ 完成 | 已完成 | Docker 集成、服务编排 |
+| 4 | 数据管道集成 | 📋 规划完成 | 10-15h | Quote/News/Gateway 集成 |
+| 5 | 模型训练集成 | 📋 规划完成 | 2-15h | 视评估结果而定 |
+| 6 | Rust 优化 | 📋 规划完成 | 4-35h | 视性能瓶颈而定 |
+| 7 | Web/PWA 增强 | 📋 规划完成 | 2-40h | 视前端现状而定 |
+| 8 | 离线部署包 | 📋 规划完成 | 12-16h | 打包、脚本、文档 |
+
+**关键里程碑**:
+- ✅ Phase 1-3: 核心基础设施完成，系统可安全运行
+- 📋 Phase 4-8: 功能增强和部署优化，根据实际需求选择性实施
+
+**总体策略**:
+- Phase 4 是必需的（数据管道集成）
+- Phase 5-7 是可选的（根据评估结果决定）
+- Phase 8 是推荐的（便于交付和部署）
