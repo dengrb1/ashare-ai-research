@@ -207,6 +207,10 @@ class Controller:
         python_exe = Path(str(paths.get("python_exe", ""))) if isinstance(paths, dict) else Path()
         if not python_exe.is_file():
             missing.append("venv")
+        else:
+            site_packages = list(python_exe.parent.parent.glob("lib/python*/site-packages"))
+            if not any((candidate / "pystray").is_dir() for candidate in site_packages):
+                missing.append("venv console tray packages")
         if not (self.root / "web" / "index.html").is_file():
             missing.append("web/index.html")
         if not self.ports_path.is_file():
@@ -362,6 +366,22 @@ class Controller:
                 ],
                 check=True,
             )
+        console_requirements = (
+            self.source_root / "linux" / "native-control-center" / "requirements.console.lock"
+        )
+        if console_requirements.is_file() and os.environ.get("ASHARE_NATIVE_SKIP_PIP") != "1":
+            subprocess.run(
+                [
+                    str(venv_python),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--disable-pip-version-check",
+                    "-r",
+                    str(console_requirements),
+                ],
+                check=True,
+            )
         postgres = os.environ.get("ASHARE_NATIVE_POSTGRES_BIN") or find_binary("pg_ctl")
         redis = os.environ.get("ASHARE_NATIVE_REDIS_BIN") or find_binary(
             "redis-server", "valkey-server"
@@ -415,7 +435,7 @@ class Controller:
                 "redis_bin": str(Path(redis).parent) if redis else "",
                 "redis_cli": redis_cli or "",
                 "source_root": str(self.source_root),
-                "version": "2.1.1",
+                "version": "3.0.0",
             },
         )
         if missing:

@@ -7,6 +7,7 @@ using System.Reflection;
 using System.Text;
 using System.Windows.Forms;
 using Microsoft.Win32;
+using AshareAI.Startup;
 
 namespace AshareAI.Setup
 {
@@ -67,14 +68,22 @@ namespace AshareAI.Setup
 
             if (!options.NoShortcuts)
             {
-                CreateShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu), "Programs", "AshareAI 本机运行管理器.lnk"), manager);
+                var sourceRoot = Path.Combine(options.InstallRoot, "app");
+                var launchArguments = StartupEntry.BuildVisibleArguments(sourceRoot, options.RuntimeRoot);
+                var startupArguments = StartupEntry.BuildArguments(sourceRoot, options.RuntimeRoot);
+                CreateShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu), "Programs", "AshareAI 本机运行管理器.lnk"), manager, launchArguments);
                 if (!options.NoDesktopShortcut)
-                    CreateShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), "AshareAI 本机运行管理器.lnk"), manager);
+                    CreateShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), "AshareAI 本机运行管理器.lnk"), manager, launchArguments);
+                if (!options.NoStartup)
+                {
+                    try { StartupEntry.SetEnabled(manager, startupArguments, true); }
+                    catch (Exception error) { options.Log("WARNING startup registration failed: " + error.Message); }
+                }
             }
             using (var key = Registry.LocalMachine.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\AshareAI"))
             {
                 key.SetValue("DisplayName", "AshareAI 本机运行管理器");
-                key.SetValue("DisplayVersion", "2.1.1");
+                key.SetValue("DisplayVersion", "3.0.0");
                 key.SetValue("Publisher", "AshareAI");
                 key.SetValue("DisplayIcon", manager);
                 key.SetValue("InstallLocation", options.InstallRoot);
@@ -110,6 +119,7 @@ namespace AshareAI.Setup
             if (answer != DialogResult.Yes) return;
             DeleteIfExists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu), "Programs", "AshareAI 本机运行管理器.lnk"));
             DeleteIfExists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), "AshareAI 本机运行管理器.lnk"));
+            StartupEntry.SetEnabled(Path.Combine(options.InstallRoot, "AshareAI.NativeControlCenter.exe"), String.Empty, false);
             Registry.LocalMachine.DeleteSubKeyTree(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\AshareAI", false);
             var command = "$p='" + options.InstallRoot.Replace("'", "''") + "'; Start-Sleep -Seconds 2; if(Test-Path -LiteralPath $p){Remove-Item -Recurse -Force -LiteralPath $p}";
             Process.Start(new ProcessStartInfo("powershell.exe", "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -Command \"" + command.Replace("\"", "\\\"") + "\"") { UseShellExecute = false, CreateNoWindow = true });
@@ -148,12 +158,13 @@ namespace AshareAI.Setup
             Process.Start(new ProcessStartInfo(manager, arguments) { UseShellExecute = true });
         }
 
-        private static void CreateShortcut(string path, string target)
+        private static void CreateShortcut(string path, string target, string arguments)
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path));
             var shell = Activator.CreateInstance(Type.GetTypeFromProgID("WScript.Shell"));
             var shortcut = shell.GetType().InvokeMember("CreateShortcut", BindingFlags.InvokeMethod, null, shell, new object[] { path });
             shortcut.GetType().InvokeMember("TargetPath", BindingFlags.SetProperty, null, shortcut, new object[] { target });
+            shortcut.GetType().InvokeMember("Arguments", BindingFlags.SetProperty, null, shortcut, new object[] { arguments ?? String.Empty });
             shortcut.GetType().InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, shortcut, new object[] { Path.GetDirectoryName(target) });
             shortcut.GetType().InvokeMember("Save", BindingFlags.InvokeMethod, null, shortcut, null);
         }
@@ -170,6 +181,7 @@ namespace AshareAI.Setup
         public bool Quiet;
         public bool NoShortcuts;
         public bool NoDesktopShortcut;
+        public bool NoStartup;
         public bool NoStartManager;
         public bool InstallDependencies;
         public bool StartServices;
@@ -186,6 +198,7 @@ namespace AshareAI.Setup
                 if (lower == "/quiet" || lower == "/silent" || lower == "/verysilent" || lower == "/qn" || lower == "--quiet" || lower == "--silent") { options.Quiet = true; continue; }
                 if (lower == "/no-shortcuts" || lower == "--no-shortcuts") { options.NoShortcuts = true; continue; }
                 if (lower == "/no-desktop-shortcut" || lower == "--no-desktop-shortcut") { options.NoDesktopShortcut = true; continue; }
+                if (lower == "/no-startup" || lower == "--no-startup") { options.NoStartup = true; continue; }
                 if (lower == "/no-start" || lower == "--no-start") { options.NoStartManager = true; continue; }
                 if (lower == "/install-deps" || lower == "--install-deps") { options.InstallDependencies = true; continue; }
                 if (lower == "/no-install-deps" || lower == "--no-install-deps") { options.InstallDependencies = false; continue; }

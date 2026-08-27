@@ -9,6 +9,7 @@ using System.Reflection;
 using System.Text;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
+using AshareAI.Startup;
 
 namespace AshareAI.NativeControlCenter
 {
@@ -24,8 +25,12 @@ namespace AshareAI.NativeControlCenter
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 var options = Options.Parse(args);
-                Application.Run(new MainForm(options));
-                return 0;
+                using (var singleInstance = new SingleInstance())
+                {
+                    if (!singleInstance.TryAcquire()) return 0;
+                    Application.Run(new MainForm(options));
+                    return 0;
+                }
             }
             catch (Exception error)
             {
@@ -40,6 +45,7 @@ namespace AshareAI.NativeControlCenter
         public string SourceRoot;
         public string RuntimeRoot;
         public bool AutoInstall;
+        public bool StartMinimized;
 
         public static Options Parse(string[] args)
         {
@@ -53,6 +59,8 @@ namespace AshareAI.NativeControlCenter
                     options.RuntimeRoot = Path.GetFullPath(args[++index]);
                 else if (value == "--auto-install")
                     options.AutoInstall = true;
+                else if (value == "--minimized" || value == "/minimized")
+                    options.StartMinimized = true;
             }
             if (String.IsNullOrEmpty(options.SourceRoot))
                 options.SourceRoot = FindSourceRoot(AppDomain.CurrentDomain.BaseDirectory);
@@ -165,9 +173,12 @@ namespace AshareAI.NativeControlCenter
         private readonly NumericUpDown watchdogInterval = new NumericUpDown();
         private readonly CheckBox autoRefresh = new CheckBox();
         private readonly Button openWeb = new Button();
+        private readonly CheckBox autoStart = new CheckBox();
         private readonly Timer poll = new Timer();
         private readonly Timer refresh = new Timer();
         private readonly List<Button> actionButtons = new List<Button>();
+        private NotifyIcon trayIcon;
+        private bool exitRequested;
         private Process activeProcess;
         private string activeOperation;
         private readonly StringBuilder activeOutput = new StringBuilder();
@@ -189,6 +200,8 @@ namespace AshareAI.NativeControlCenter
             Font = new Font("Segoe UI", 9F);
             BuildLayout();
             LoadSettings();
+            try { autoStart.Checked = StartupEntry.IsEnabled(Application.ExecutablePath); } catch { autoStart.Checked = false; }
+            InitializeTray();
             workers.Enabled = String.Equals(Convert.ToString(mode.SelectedItem), "DUAL", StringComparison.Ordinal);
             poll.Interval = 500;
             poll.Tick += PollTick;
@@ -197,11 +210,33 @@ namespace AshareAI.NativeControlCenter
             poll.Start();
             refresh.Start();
             FormClosing += HandleClosing;
+            Resize += HandleResize;
             Shown += delegate
             {
                 if (options.AutoInstall && !File.Exists(Path.Combine(options.RuntimeRoot, ".env"))) StartCommand("install", false);
                 else StartCommand("status", true);
+                if (options.StartMinimized) BeginInvoke((Action)MinimizeToTray);
             };
+        }
+
+        private void InitializeTray()
+        {
+            var menu = new ContextMenuStrip();
+            var show = new ToolStripMenuItem("显示控制台");
+            show.Click += delegate { RestoreFromTray(); };
+            var exit = new ToolStripMenuItem("退出");
+            exit.Click += delegate { ExitFromTray(); };
+            menu.Items.Add(show);
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(exit);
+            trayIcon = new NotifyIcon
+            {
+                Text = "AshareAI 本机运行管理器",
+                Icon = SystemIcons.Application,
+                ContextMenuStrip = menu,
+                Visible = true
+            };
+            trayIcon.DoubleClick += delegate { RestoreFromTray(); };
         }
 
         private static Label Label(string text, int x, int y, int width, int height)
@@ -261,6 +296,8 @@ namespace AshareAI.NativeControlCenter
             settings.Controls.Add(Label("看门狗秒数", 388, 55, 84, 24));
             watchdogInterval.Location = new Point(478, 52); watchdogInterval.Size = new Size(66, 25); watchdogInterval.Minimum = 5; watchdogInterval.Maximum = 300; watchdogInterval.Value = 10; settings.Controls.Add(watchdogInterval);
             autoRefresh.Text = "自动刷新"; autoRefresh.Location = new Point(576, 53); autoRefresh.Size = new Size(110, 24); autoRefresh.Checked = true; settings.Controls.Add(autoRefresh);
+            autoStart.Text = "开机启动"; autoStart.Location = new Point(700, 53); autoStart.Size = new Size(110, 24); settings.Controls.Add(autoStart);
+            autoStart.CheckedChanged += delegate { if (IsHandleCreated) ApplyStartupSetting(); };
             Controls.Add(settings);
 
             var actions = Card(14, 194, 996, 48);
@@ -297,7 +334,8 @@ namespace AshareAI.NativeControlCenter
         private string SettingsPath { get { return Path.Combine(Path.GetFullPath(root.Text.Trim()), "config", "native-gui.json"); } }
         private string RuntimeRootConfigPath { get { return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "runtime-root.txt"); } }
         private void SaveRuntimeRootSelection() { try { File.WriteAllText(RuntimeRootConfigPath, Path.GetFullPath(root.Text.Trim()) + Environment.NewLine, Encoding.UTF8); } catch (Exception error) { AddActivity("保存运行目录失败：" + error.Message); } }
-        private void SaveSettings() { SaveRuntimeRootSelection(); Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)); var data = new Dictionary<string, object> { { "research_mode", Convert.ToString(mode.SelectedItem) }, { "research_workers", (int)workers.Value }, { "watchdog_interval_seconds", (int)watchdogInterval.Value }, { "auto_refresh", autoRefresh.Checked } }; File.WriteAllText(SettingsPath, json.Serialize(data), Encoding.UTF8); AddActivity("设置已保存到 " + SettingsPath); }
+        private void ApplyStartupSetting() { try { StartupEntry.SetEnabled(Application.ExecutablePath, StartupEntry.BuildArguments(options.SourceRoot, Path.GetFullPath(root.Text.Trim())), autoStart.Checked); AddActivity(autoStart.Checked ? "已启用开机启动" : "已关闭开机启动"); } catch (Exception error) { AddActivity("保存开机启动设置失败：" + error.Message); } }
+        private void SaveSettings() { SaveRuntimeRootSelection(); Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)); var data = new Dictionary<string, object> { { "research_mode", Convert.ToString(mode.SelectedItem) }, { "research_workers", (int)workers.Value }, { "watchdog_interval_seconds", (int)watchdogInterval.Value }, { "auto_refresh", autoRefresh.Checked } }; File.WriteAllText(SettingsPath, json.Serialize(data), Encoding.UTF8); ApplyStartupSetting(); AddActivity("设置已保存到 " + SettingsPath); }
         private void LoadSettings() { if (!File.Exists(SettingsPath)) return; try { var data = json.DeserializeObject(File.ReadAllText(SettingsPath)) as Dictionary<string, object>; if (data == null) return; if (data.ContainsKey("research_mode")) mode.SelectedItem = Convert.ToString(data["research_mode"]); if (data.ContainsKey("research_workers")) workers.Value = Math.Min(2, Math.Max(0, Convert.ToDecimal(data["research_workers"]))); if (data.ContainsKey("watchdog_interval_seconds")) watchdogInterval.Value = Math.Min(300, Math.Max(5, Convert.ToDecimal(data["watchdog_interval_seconds"]))); if (data.ContainsKey("auto_refresh")) autoRefresh.Checked = Convert.ToBoolean(data["auto_refresh"]); } catch (Exception error) { AddActivity("读取管理器设置失败：" + error.Message); } }
         private void AddActivity(string message) { activity.AppendText("[" + DateTime.Now.ToString("HH:mm:ss") + "] " + message + Environment.NewLine); }
         private static string Quote(string value) { return "\"" + value.Replace("\"", "\\\"") + "\""; }
@@ -379,7 +417,11 @@ namespace AshareAI.NativeControlCenter
         private void LoadWatchdogLog() { var path = Path.Combine(Path.GetFullPath(root.Text.Trim()), "logs", "watchdog.log"); if (!File.Exists(path)) { watchdogLog.Text = "暂无看门狗日志。"; return; } var lines = File.ReadAllLines(path); watchdogLog.Text = String.Join(Environment.NewLine, lines.Skip(Math.Max(0, lines.Length - 500))); watchdogLog.SelectionStart = watchdogLog.TextLength; watchdogLog.ScrollToCaret(); }
         private void SetBusy(bool busy, string message, bool lockActions) { if (lockActions) foreach (var button in actionButtons) button.Enabled = !busy; footer.Text = message; UseWaitCursor = false; Cursor = Cursors.Default; }
         private void PollTick(object sender, EventArgs args) { if (activeProcess == null || !activeProcess.HasExited) return; CompleteCommand(); }
-        private void HandleClosing(object sender, FormClosingEventArgs args) { if (activeProcess != null && !activeProcess.HasExited && MessageBox.Show(this, "管理命令仍在运行。要直接关闭窗口并让命令继续吗？", "命令正在运行", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) args.Cancel = true; }
+        private void HandleResize(object sender, EventArgs args) { if (WindowState == FormWindowState.Minimized) MinimizeToTray(); }
+        private void MinimizeToTray() { if (exitRequested || trayIcon == null) return; WindowState = FormWindowState.Normal; ShowInTaskbar = false; Hide(); trayIcon.Visible = true; }
+        private void RestoreFromTray() { if (exitRequested) return; ShowInTaskbar = true; Show(); WindowState = FormWindowState.Normal; Activate(); BringToFront(); }
+        private void ExitFromTray() { exitRequested = true; Close(); }
+        private void HandleClosing(object sender, FormClosingEventArgs args) { if (args.CloseReason == CloseReason.WindowsShutDown || args.CloseReason == CloseReason.TaskManagerClosing) exitRequested = true; if (exitRequested) { if (trayIcon != null) { trayIcon.Visible = false; trayIcon.Dispose(); } return; } args.Cancel = true; MinimizeToTray(); }
         private static string TextValue(Dictionary<string, object> data, string key, string fallback) { return data != null && data.ContainsKey(key) && data[key] != null ? Convert.ToString(data[key]) : fallback; }
         private static bool BoolValue(Dictionary<string, object> data, string key) { return data != null && data.ContainsKey(key) && data[key] != null && Convert.ToBoolean(data[key]); }
         private static string NestedTextValue(Dictionary<string, object> data, string parent, string key) { return data.ContainsKey(parent) && data[parent] is Dictionary<string, object> ? TextValue((Dictionary<string, object>)data[parent], key, "") : ""; }

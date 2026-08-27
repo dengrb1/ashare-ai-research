@@ -17,13 +17,21 @@ linux/native-control-center/
 ## 当前内容
 
 - `native_control_center.py`：标准库 Tkinter/ttk GUI 原型。
+- `ashare-native-console.sh`：Console 启动入口，优先使用运行目录中的 venv。
 - `ashare-native-linux.sh`：Shell 入口，转发到 Linux 控制器并保留命令契约。
 - `native_controller.py`：标准库控制器，负责安装、进程组、端口、状态和日志。
+- `requirements.console.lock`：Linux 托盘依赖锁定文件。
 - `README.md`：Linux 非 Docker 管理器说明。
 
 GUI 已提供与 Windows 管理器相同的用户侧入口：安装更新、启动、停止、重启、修复、
 诊断、打开 Web、刷新状态、运行目录、研究模式、研究进程、看门狗间隔、服务表、
 活动记录和看门狗日志。
+
+Console 支持 Linux 系统托盘。关闭窗口会隐藏到托盘，托盘菜单可以恢复窗口、退出程序或切换
+开机启动。首次启动会在 `~/.local/share/applications/` 创建应用菜单项，并在
+`~/.config/autostart/` 创建开机启动项；启动项使用 `--minimized`，因此登录后不会遮挡桌面。
+托盘依赖 `Pillow`、`pystray` 和 Linux 的 `python-xlib`，安装时会进入运行目录的私有 venv。
+Console 使用用户级 `flock` 防止 GUI 多开；重复启动会唤醒已经隐藏到托盘的实例，控制器命令不受影响。
 
 ## 运行方式
 
@@ -31,6 +39,12 @@ GUI 已提供与 Windows 管理器相同的用户侧入口：安装更新、启�
 
 ```bash
 python3 linux/native-control-center/native_control_center.py
+```
+
+安装后推荐使用启动脚本，它会自动选择包含托盘依赖的私有 venv：
+
+```bash
+linux/native-control-center/ashare-native-console.sh --minimized
 ```
 
 也可以显式指定控制器、源码目录和运行目录：

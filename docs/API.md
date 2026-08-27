@@ -202,7 +202,7 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 财报检索 | GET | `/api/v1/search/financial` | 登录 |
 | 财报检索 | GET | `/api/v1/search/status` | 登录 |
 
-`GET /api/v1/health` 返回 `{status, version, database, git_sha}`：`version` 为系统版本号（如 `2.1.1`），`git_sha` 为构建源码提交（未提供时 `UNVERSIONED`）。该接口公开，不要求登录，不返回任何凭据或运行配置。
+`GET /api/v1/health` 返回 `{status, version, database, git_sha}`：`version` 为系统版本号（如 `3.0.0`），`git_sha` 为构建源码提交（未提供时 `UNVERSIONED`）。该接口公开，不要求登录，不返回任何凭据或运行配置。
 
 ## 4. 认证接口
 

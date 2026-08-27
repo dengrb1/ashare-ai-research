@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-VERSION="${VERSION:-2.1.1}"
+VERSION="${VERSION:-3.0.0}"
 OUTPUT_DIR="${OUTPUT_DIR:-./dist}"
 INCLUDE_SOURCE="${INCLUDE_SOURCE:-false}"
 

@@ -4,14 +4,156 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
+import sys
 import threading
 import webbrowser
+from contextlib import suppress
 from pathlib import Path
 from tkinter import BooleanVar, IntVar, StringVar, Tk, filedialog, messagebox, ttk
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - the Linux console runs on POSIX.
+    fcntl = None
+
 DEFAULT_CONTROLLER = Path(__file__).with_name("ashare-native-linux.sh")
 COMMANDS = {"install", "start", "stop", "restart", "repair", "doctor", "status"}
+DESKTOP_FILE_NAME = "ashare-ai-native-console.desktop"
+SINGLE_INSTANCE_LOCK = "ashare-ai-native-console.lock"
+
+
+def single_instance_lock_path() -> Path:
+    runtime_directory = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+    base = (
+        Path(runtime_directory).expanduser()
+        if runtime_directory
+        else Path.home() / ".cache" / "ashare-ai"
+    )
+    return base / SINGLE_INSTANCE_LOCK
+
+
+class SingleInstance:
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = Path(path) if path is not None else single_instance_lock_path()
+        self._handle = None
+
+    def acquire(self) -> bool:
+        if fcntl is None:
+            raise RuntimeError("Linux Console 单实例锁仅支持 POSIX 系统")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._handle = self.path.open("a+", encoding="ascii")
+        try:
+            fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            self._handle.close()
+            self._handle = None
+            return False
+        self._handle.seek(0)
+        self._handle.truncate()
+        self._handle.write(str(os.getpid()))
+        self._handle.flush()
+        return True
+
+    def notify_existing(self) -> None:
+        try:
+            pid = int(self.path.read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            return
+        if pid > 0 and pid != os.getpid():
+            with suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGUSR1)
+
+    def release(self) -> None:
+        if self._handle is None:
+            return
+        try:
+            fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._handle.close()
+            self._handle = None
+
+
+def _desktop_home(environment_name: str, fallback: Path) -> Path:
+    value = os.environ.get(environment_name, "").strip()
+    return Path(value).expanduser() if value else fallback
+
+
+def desktop_integration_paths() -> tuple[Path, Path]:
+    data_home = _desktop_home("XDG_DATA_HOME", Path.home() / ".local" / "share")
+    config_home = _desktop_home("XDG_CONFIG_HOME", Path.home() / ".config")
+    return (
+        data_home / "applications" / DESKTOP_FILE_NAME,
+        config_home / "autostart" / DESKTOP_FILE_NAME,
+    )
+
+
+def _desktop_exec_arg(value: str | Path) -> str:
+    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def desktop_entry(
+    launcher: Path,
+    controller: Path,
+    source_root: Path,
+    runtime_root: Path,
+    *,
+    minimized: bool,
+) -> str:
+    arguments = [
+        launcher,
+        "--controller",
+        controller,
+        "--source-root",
+        source_root,
+        "--root",
+        runtime_root,
+    ]
+    if minimized:
+        arguments.append("--minimized")
+    command = " ".join(_desktop_exec_arg(value) for value in arguments)
+    return "\n".join(
+        [
+            "[Desktop Entry]",
+            "Type=Application",
+            "Name=AshareAI Linux 本机运行管理器",
+            "Comment=AshareAI Linux native control center",
+            f"Exec={command}",
+            f"Path={_desktop_exec_arg(source_root)}",
+            "Terminal=false",
+            "Categories=Utility;System;",
+            "StartupNotify=true",
+            "X-GNOME-Autostart-enabled=true" if minimized else "",
+            "",
+        ]
+    )
+
+
+def write_desktop_integration(
+    launcher: Path,
+    controller: Path,
+    source_root: Path,
+    runtime_root: Path,
+    enabled: bool,
+) -> tuple[Path, Path]:
+    application_path, autostart_path = desktop_integration_paths()
+    application_path.parent.mkdir(parents=True, exist_ok=True)
+    application_path.write_text(
+        desktop_entry(launcher, controller, source_root, runtime_root, minimized=False),
+        encoding="utf-8",
+    )
+    if enabled:
+        autostart_path.parent.mkdir(parents=True, exist_ok=True)
+        autostart_path.write_text(
+            desktop_entry(launcher, controller, source_root, runtime_root, minimized=True),
+            encoding="utf-8",
+        )
+    else:
+        with suppress(FileNotFoundError):
+            autostart_path.unlink()
+    return application_path, autostart_path
 
 
 def find_source_root(start: Path) -> Path:
@@ -49,7 +191,14 @@ def default_runtime_root(source_root: Path) -> Path:
 
 
 class ControlCenter:
-    def __init__(self, root: Tk, controller: Path, source_root: Path, runtime_root: Path) -> None:
+    def __init__(
+        self,
+        root: Tk,
+        controller: Path,
+        source_root: Path,
+        runtime_root: Path,
+        start_minimized: bool = False,
+    ) -> None:
         self.root = root
         self.controller = controller
         self.source_root = source_root
@@ -64,13 +213,25 @@ class ControlCenter:
         self.queued_action: tuple[str, bool] | None = None
         self.action_buttons: list[ttk.Button] = []
         self.last_report: dict[str, object] | None = None
+        self.autostart = BooleanVar(value=True)
+        self.tray_icon = None
+        self.tray_started = False
+        self.launcher = Path(__file__).with_name("ashare-native-console.sh")
 
         root.title("AshareAI Linux Native Control Center")
         root.geometry("1040x720")
         root.minsize(940, 640)
         self._build()
+        application_desktop, autostart_desktop = desktop_integration_paths()
+        self.autostart.set(not application_desktop.is_file() or autostart_desktop.is_file())
+        self.persist_runtime_root()
+        self._apply_desktop_integration()
+        root.protocol("WM_DELETE_WINDOW", self.minimize_to_tray)
         self.refresh_status()
         self._schedule_refresh()
+        root.after(0, self.start_tray)
+        if start_minimized:
+            root.after(100, self.minimize_to_tray)
 
     def _build(self) -> None:
         style = ttk.Style()
@@ -157,6 +318,12 @@ class ControlCenter:
             padx=(470, 0),
             pady=(12, 0),
         )
+        ttk.Checkbutton(
+            config,
+            text="开机启动",
+            variable=self.autostart,
+            command=self._apply_desktop_integration,
+        ).grid(row=1, column=1, sticky="w", padx=(560, 0), pady=(12, 0))
 
         actions = ttk.Frame(self.root, style="Card.TFrame", padding=10)
         actions.pack(fill="x", padx=14, pady=8)
@@ -230,6 +397,7 @@ class ControlCenter:
         if selected:
             self.runtime_root.set(selected)
             self.persist_runtime_root()
+            self._apply_desktop_integration()
             self.refresh_status()
 
     def persist_runtime_root(self) -> None:
@@ -239,6 +407,89 @@ class ControlCenter:
             config_path.write_text(str(runtime) + "\n", encoding="utf-8")
         except OSError as exc:
             self.append_activity(f"保存运行目录失败：{exc}")
+
+    def _apply_desktop_integration(self) -> None:
+        try:
+            application_path, _autostart_path = write_desktop_integration(
+                self.launcher,
+                self.controller.resolve(),
+                self.source_root.resolve(),
+                Path(self.runtime_root.get()).expanduser().resolve(),
+                self.autostart.get(),
+            )
+            self.append_activity(
+                f"Linux 应用菜单已更新：{application_path}；"
+                f"开机启动：{'已启用' if self.autostart.get() else '已关闭'}"
+            )
+        except OSError as exc:
+            self.append_activity(f"保存 Linux 桌面集成失败：{exc}")
+
+    def _load_runtime_site_packages(self) -> None:
+        runtime = Path(self.runtime_root.get()).expanduser()
+        for candidate in (runtime / "venv" / "lib").glob("python*/site-packages"):
+            value = str(candidate.resolve())
+            if value not in sys.path:
+                sys.path.insert(0, value)
+
+    def start_tray(self) -> bool:
+        if self.tray_started:
+            return True
+        self._load_runtime_site_packages()
+        try:
+            import pystray
+            from PIL import Image, ImageDraw
+        except ImportError as exc:
+            self.append_activity(f"托盘不可用，请先安装 Console 依赖：{exc}")
+            return False
+
+        image = Image.new("RGB", (64, 64), "#1b6f5b")
+        ImageDraw.Draw(image).rounded_rectangle((8, 8, 56, 56), radius=10, fill="#4cd3b5")
+        menu = pystray.Menu(
+            pystray.MenuItem(
+                "显示控制台",
+                lambda _icon, _item: self.root.after(0, self.restore_window),
+            ),
+            pystray.MenuItem(
+                "开机启动",
+                lambda _icon, _item: self.root.after(0, self.toggle_autostart),
+                checked=lambda _item: self.autostart.get(),
+            ),
+            pystray.MenuItem("退出", lambda icon, _item: self.root.after(0, self.exit_application)),
+        )
+        try:
+            self.tray_icon = pystray.Icon(
+                "ashare-ai-native-console",
+                image,
+                "AshareAI Linux 本机运行管理器",
+                menu,
+            )
+            self.tray_icon.run_detached()
+        except Exception as exc:
+            self.tray_icon = None
+            self.append_activity(f"启动托盘失败，将保留在任务栏：{exc}")
+            return False
+        self.tray_started = True
+        return True
+
+    def minimize_to_tray(self) -> None:
+        if self.start_tray():
+            self.root.withdraw()
+        else:
+            self.root.iconify()
+
+    def restore_window(self) -> None:
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def toggle_autostart(self) -> None:
+        self.autostart.set(not self.autostart.get())
+        self._apply_desktop_integration()
+
+    def exit_application(self) -> None:
+        if self.tray_icon is not None:
+            self.tray_icon.stop()
+        self.root.destroy()
 
     def open_runtime(self) -> None:
         path = Path(self.runtime_root.get()).expanduser()
@@ -434,15 +685,59 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--source-root", default=str(source_root))
     parser.add_argument("--root", default=str(default_root))
+    parser.add_argument("--minimized", action="store_true")
+    parser.add_argument("--install-desktop", action="store_true")
+    parser.add_argument("--no-autostart", action="store_true")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    root = Tk()
-    ControlCenter(root, Path(args.controller), Path(args.source_root), Path(args.root))
-    root.mainloop()
-    return 0
+    if args.install_desktop:
+        try:
+            write_desktop_integration(
+                Path(__file__).with_name("ashare-native-console.sh").resolve(),
+                Path(args.controller).resolve(),
+                Path(args.source_root).expanduser().resolve(),
+                Path(args.root).expanduser().resolve(),
+                not args.no_autostart,
+            )
+            return 0
+        except OSError as exc:
+            print(f"保存 Linux 桌面集成失败：{exc}", file=sys.stderr)
+            return 1
+    instance = SingleInstance()
+    if not instance.acquire():
+        instance.notify_existing()
+        return 0
+    try:
+        activation_pending = [False]
+        control_center = [None]
+
+        def handle_activation(_signum, _frame) -> None:
+            if control_center[0] is None:
+                activation_pending[0] = True
+                return
+            with suppress(RuntimeError):
+                root.after(0, control_center[0].restore_window)
+
+        activate_signal = getattr(signal, "SIGUSR1", None)
+        if activate_signal is not None:
+            signal.signal(activate_signal, handle_activation)
+        root = Tk()
+        control_center[0] = ControlCenter(
+            root,
+            Path(args.controller),
+            Path(args.source_root),
+            Path(args.root),
+            start_minimized=args.minimized,
+        )
+        if activation_pending[0]:
+            root.after(0, control_center[0].restore_window)
+        root.mainloop()
+        return 0
+    finally:
+        instance.release()
 
 
 if __name__ == "__main__":

@@ -13,7 +13,9 @@ $cliOutput = Join-Path $PSScriptRoot "AshareAI.NativeControlCenter.Cli.exe"
 $manifest = Join-Path $PSScriptRoot "app.manifest"
 $managerSources = @(
     (Join-Path $PSScriptRoot "Program.cs"),
-    (Join-Path $PSScriptRoot "CommandSupport.cs")
+    (Join-Path $PSScriptRoot "CommandSupport.cs"),
+    (Join-Path $PSScriptRoot "StartupIntegration.cs"),
+    (Join-Path $PSScriptRoot "SingleInstance.cs")
 )
 & $compiler /nologo /target:winexe /optimize+ /platform:anycpu /utf8output `
     /main:AshareAI.NativeControlCenter.Program `
@@ -30,7 +32,9 @@ Write-Host "Built $output"
 $cliSources = @(
     (Join-Path $PSScriptRoot "Cli.cs"),
     (Join-Path $PSScriptRoot "Program.cs"),
-    (Join-Path $PSScriptRoot "CommandSupport.cs")
+    (Join-Path $PSScriptRoot "CommandSupport.cs"),
+    (Join-Path $PSScriptRoot "StartupIntegration.cs"),
+    (Join-Path $PSScriptRoot "SingleInstance.cs")
 )
 & $compiler /nologo /target:exe /optimize+ /platform:anycpu /utf8output `
     /main:AshareAI.NativeControlCenter.CliProgram `
@@ -88,6 +92,7 @@ $setup = Join-Path $dist "AshareAI-Setup.exe"
     "/win32manifest:$(Join-Path $PSScriptRoot 'setup.manifest')" `
     /reference:System.dll /reference:System.Core.dll /reference:System.IO.Compression.dll `
     /reference:System.IO.Compression.FileSystem.dll /reference:System.Windows.Forms.dll `
-    "/resource:$payload,AshareAI.Payload" /out:$setup (Join-Path $PSScriptRoot "Installer.cs")
+    "/resource:$payload,AshareAI.Payload" /out:$setup `
+    (Join-Path $PSScriptRoot "Installer.cs") (Join-Path $PSScriptRoot "StartupIntegration.cs")
 if ($LASTEXITCODE -ne 0) { throw "setup compilation failed with exit code $LASTEXITCODE" }
 Write-Host "Built installer $setup"

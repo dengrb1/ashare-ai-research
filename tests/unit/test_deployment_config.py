@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -246,6 +248,10 @@ def test_native_windows_entry_is_external_and_checksum_verified() -> None:
     assert "--auto-install" in program
     assert "operation != \"status\"" in program
     assert "queuedOperation" in program
+    assert "NotifyIcon" in program
+    assert "MinimizeToTray" in program
+    assert "--minimized" in program
+    assert "StartupEntry" in program
     assert "requireAdministrator" in (gui / "app.manifest").read_text(encoding="utf-8")
     assert (gui / "build.ps1").is_file()
     assert (gui / "Installer.cs").is_file()
@@ -253,6 +259,7 @@ def test_native_windows_entry_is_external_and_checksum_verified() -> None:
     build = (gui / "build.ps1").read_text(encoding="utf-8")
     assert "AshareAI.Payload" in build
     assert "AshareAI.NativeControlCenter.Cli.exe" in build
+    assert "StartupIntegration.cs" in build
     command_support = (gui / "CommandSupport.cs").read_text(encoding="utf-8")
     commands = ("install", "start", "stop", "restart", "repair", "status", "doctor", "open", "logs")
     for command in commands:
@@ -262,6 +269,23 @@ def test_native_windows_entry_is_external_and_checksum_verified() -> None:
     assert "/start-services" in installer_cs
     assert "QuietUninstallString" in installer_cs
     assert "/no-install-deps" in installer_cs
+    assert "CommonStartMenu" in installer_cs
+    assert "StartupEntry.SetEnabled" in installer_cs
+    assert "BuildVisibleArguments" in installer_cs
+    assert "startup registration failed" in installer_cs
+    assert "NoStartup" in installer_cs
+    assert "Arguments" in installer_cs
+    assert (gui / "StartupIntegration.cs").is_file()
+    startup = (gui / "StartupIntegration.cs").read_text(encoding="utf-8")
+    assert "Registry.CurrentUser" in startup
+    assert "CurrentVersion\\Run" in startup
+    assert (gui / "SingleInstance.cs").is_file()
+    single_instance = (gui / "SingleInstance.cs").read_text(encoding="utf-8")
+    assert "Local\\AshareAI.NativeControlCenter" in single_instance
+    assert "Mutex" in single_instance
+    assert "FindWindow" in single_instance
+    assert "TryAcquire" in program
+    assert "SingleInstance.cs" in build
     assert len(searxng["sha256"]) == 64
     assert searxng["archive_url"].endswith(f"{searxng['commit']}.zip")
     assert not (native / "gui.cmd").exists()
@@ -273,6 +297,18 @@ def test_native_windows_entry_is_external_and_checksum_verified() -> None:
     linux_gui_text = (linux_gui / "native_control_center.py").read_text(encoding="utf-8")
     assert "DEFAULT_CONTROLLER" in linux_gui_text
     assert "subprocess.run" in linux_gui_text
+    assert "pystray" in linux_gui_text
+    assert "write_desktop_integration" in linux_gui_text
+    assert "SingleInstance" in linux_gui_text
+    assert "fcntl.flock" in linux_gui_text
+    assert "SIGUSR1" in linux_gui_text
+    assert "--minimized" in linux_gui_text
+    assert (linux_gui / "ashare-native-console.sh").is_file()
+    assert (linux_gui / "requirements.console.lock").is_file()
+    assert "pillow==" in (linux_gui / "requirements.console.lock").read_text(encoding="utf-8")
+    assert "pystray==" in (linux_gui / "requirements.console.lock").read_text(encoding="utf-8")
+    package_builder = (linux_gui / "build-package.sh").read_text(encoding="utf-8")
+    assert 'CONTROLLER_ARGS=(install --root "$ROOT" --source-root "$PACKAGE_DIR/app")' in package_builder
     linux_controller = (linux_gui / "ashare-native-linux.sh").read_text(encoding="utf-8")
     assert "status_json" in linux_controller
     assert "docker compose" not in linux_controller.lower()
@@ -304,6 +340,62 @@ def test_linux_native_status_is_fast_and_safe_before_install(tmp_path: Path) -> 
     assert report["installation"]["status"] == "NOT_INSTALLED"
     assert set(report["ports"]) == {"postgres", "redis", "api", "searxng"}
     assert "T" in report["collected_at"]
+
+
+def test_linux_console_desktop_integration_contains_fixed_runtime_paths(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module_path = ROOT / "linux" / "native-control-center" / "native_control_center.py"
+    spec = importlib.util.spec_from_file_location("ashare_native_console", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+
+    application_path, autostart_path = module.write_desktop_integration(
+        tmp_path / "ashare-native-console.sh",
+        tmp_path / "ashare-native-linux.sh",
+        tmp_path / "app",
+        tmp_path / "runtime",
+        True,
+    )
+    application = application_path.read_text(encoding="utf-8")
+    autostart = autostart_path.read_text(encoding="utf-8")
+    assert '"--root" "' in application
+    assert str(tmp_path / "runtime").replace("\\", "\\\\") in application
+    assert "--minimized" not in application
+    assert "--minimized" in autostart
+    assert autostart_path.is_file()
+
+    module.write_desktop_integration(
+        tmp_path / "ashare-native-console.sh",
+        tmp_path / "ashare-native-linux.sh",
+        tmp_path / "app",
+        tmp_path / "runtime-2",
+        False,
+    )
+    assert not autostart_path.exists()
+
+
+def test_linux_console_single_instance_lock_is_exclusive(tmp_path: Path) -> None:
+    module_path = ROOT / "linux" / "native-control-center" / "native_control_center.py"
+    spec = importlib.util.spec_from_file_location("ashare_native_console_lock", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if module.fcntl is None:
+        return
+
+    lock_path = tmp_path / "console.lock"
+    first = module.SingleInstance(lock_path)
+    second = module.SingleInstance(lock_path)
+    assert first.acquire()
+    assert lock_path.read_text(encoding="ascii") == str(os.getpid())
+    assert not second.acquire()
+    first.release()
+    assert second.acquire()
+    second.release()
 
 
 def test_first_release_policy_fixes_required_constraints() -> None:
