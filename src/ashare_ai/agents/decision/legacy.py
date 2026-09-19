@@ -39,21 +39,30 @@ class LegacyDecisionProvider(DecisionProvider):
     def model_version(self) -> str:
         return self._model_version
 
-    async def predict(self, market_state: MarketState) -> UnifiedDecision:
+    async def predict(
+        self,
+        market_state: MarketState,
+        composite_score: CompositeScore | None = None,
+    ) -> UnifiedDecision:
         """
         将 Legacy 决策逻辑转换为统一协议。
 
-        当前实现为骨架，需要在集成时连接现有的 builtin orchestration 和 scoring formula。
+        Args:
+            market_state: 市场状态输入
+            composite_score: 可选的预计算 CompositeScore（若无则使用简化映射）
+
+        Returns:
+            UnifiedDecision: 统一决策结果
         """
-        # TODO: 调用现有的 builtin 组件和 CompositeScore 计算
-        # 这里先返回一个基于确定性规则的骨架实现
-        logger.warning("LegacyDecisionProvider is using skeleton implementation")
+        if composite_score is not None:
+            return self._convert_from_composite_score(composite_score, market_state)
 
-        # 基于 total_score 的简单映射（占位符）
-        # 实际集成时需要调用 orchestration.builtin 和 scoring.formula
-        total_score = 50.0  # 占位符，实际从 CompositeScore 获取
+        # 未提供 CompositeScore 时使用简化规则（骨架实现）
+        logger.warning(
+            "LegacyDecisionProvider: no composite_score provided, using fallback rules"
+        )
+        total_score = 50.0
 
-        # 根据分数生成确定性的概率分布
         action, action_probs = self._score_to_action(total_score)
         risk, risk_probs = self._score_to_risk(total_score)
         position = self._score_to_position(total_score)
@@ -79,6 +88,39 @@ class LegacyDecisionProvider(DecisionProvider):
             mode="legacy",
             model_version=self._model_version,
             input_manifest_hash=input_manifest,
+        )
+
+    def _convert_from_composite_score(
+        self,
+        composite_score: CompositeScore,
+        market_state: MarketState,
+    ) -> UnifiedDecision:
+        """从 CompositeScore 转换为 UnifiedDecision"""
+        total_score = composite_score.total_score
+
+        action, action_probs = self._score_to_action(total_score)
+        risk, risk_probs = self._score_to_risk(total_score)
+        position = self._score_to_position(total_score)
+        direction_1d, direction_5d, up_over_3pct = self._score_to_direction(total_score)
+
+        return UnifiedDecision(
+            symbol=composite_score.symbol,
+            trading_date=composite_score.trading_date,
+            available_at=market_state.available_at,
+            decision_at=composite_score.decision_at,
+            probabilities=DecisionProbabilities(
+                direction_1d=direction_1d,
+                direction_5d=direction_5d,
+                up_over_3pct_5d=up_over_3pct,
+                action=action_probs,
+                risk=risk_probs,
+            ),
+            action=action,
+            risk=risk,
+            position=position,
+            mode="legacy",
+            model_version=self._model_version,
+            input_manifest_hash=composite_score.agent_bundle_sha256,
         )
 
     def _score_to_action(self, score: float) -> tuple[str, ActionProbabilities]:
