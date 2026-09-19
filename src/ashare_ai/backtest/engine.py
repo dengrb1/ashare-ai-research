@@ -6,6 +6,7 @@ from datetime import date
 from decimal import ROUND_FLOOR, Decimal
 from itertools import pairwise
 from math import sqrt
+from typing import Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
@@ -57,6 +58,7 @@ class BacktestConfig(BaseModel):
     capacity_max_participation: Decimal = Field(gt=0, le=1)
     capacity_max_slippage_bps: Decimal = Field(ge=0)
     capacity_min_fill_rate: Decimal = Field(gt=0, le=1)
+    decision_mode: Literal["legacy", "jev"] | None = None
 
     @model_validator(mode="after")
     def validate_config(self) -> BacktestConfig:

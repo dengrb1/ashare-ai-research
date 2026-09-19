@@ -158,6 +158,13 @@ class Settings(BaseSettings):
     model_gateway_max_concurrency: int = Field(default=8, ge=1, le=128)
     model_settings_encryption_keys: str | None = None
     edge_gateway_encryption_keys: str | None = None
+    # Decision mode configuration
+    decision_mode: Literal["legacy", "jev"] = "legacy"
+    decision_fallback_enabled: bool = False
+    jev_model_dir: Path = Path("data/models/jev")
+    jev_model_version: str = "jev-baseline-v1"
+    jev_device: Literal["auto", "cpu", "cuda"] = "auto"
+    jev_checkpoint: Path | None = None
     edge_gateway_config_dir: Path = Path(".secrets/edge-gateway")
     edge_gateway_log_dir: Path = Path(".secrets/edge-gateway-logs")
     edge_gateway_source_dir: Path = Path("docker/edge-gateway")
