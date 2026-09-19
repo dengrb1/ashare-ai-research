@@ -66,7 +66,53 @@ def predict_command(
 
     try:
         config = load_config()
-        # TODO: 加载 Bundle（需要集成现有 bundle 加载逻辑）
+        # 加载 Bundle - 使用配置的路径
+        from ashare_ai.orchestration.bundle_loader import find_latest_bundle, load_bundle_from_disk
+
+        bundle_dir = config.bundle_storage_dir
+
+        if trading_date is None:
+            date_obj = find_latest_bundle(bundle_dir)
+            if date_obj is None:
+                console.print(f"[red]错误: 在 {bundle_dir} 中未找到任何 Bundle[/red]")
+                raise typer.Exit(1)
+        else:
+            from datetime import date
+            date_obj = date.fromisoformat(trading_date)
+
+        console.print(f"[cyan]加载 Bundle: {date_obj}[/cyan]")
+        bundle = load_bundle_from_disk(bundle_dir, date_obj)
+
+        # 生成决策
+        import asyncio
+        decision = asyncio.run(
+            generate_decision_for_symbol(
+                bundle=bundle,
+                symbol=symbol,
+                trading_date=date_obj,
+                mode=mode,
+            )
+        )
+
+        # 输出结果
+        console.print(f"\n[green]决策结果 ({symbol}):[/green]")
+        console.print(f"  动作: {decision.action}")
+        console.print(f"  风险等级: {decision.risk_level}")
+        console.print(f"  建议仓位: {decision.position_size:.2%}")
+        console.print(f"  置信度: {decision.confidence:.2%}")
+        console.print(f"  预测方向 (1天): {decision.probabilities.direction_1d.value}")
+        console.print(f"  预测方向 (5天): {decision.probabilities.direction_5d.value}")
+        console.print(f"  模型版本: {decision.model_version}")
+
+        if output:
+            import json
+            output_path = Path(output)
+            output_path.write_text(
+                decision.model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+            console.print(f"\n[green]结果已保存到: {output}[/green]")
+
         console.print("[yellow]Warning: Bundle loading not yet integrated[/yellow]")
         console.print(f"[red]Predict command skeleton - symbol={symbol}, mode={mode}[/red]")
 

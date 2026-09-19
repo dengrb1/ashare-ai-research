@@ -74,6 +74,8 @@ from ashare_ai.api.auth import (
 from ashare_ai.api.dependencies import get_auth_context, get_db, get_write_context
 from ashare_ai.api.run_cleanup import TERMINAL_RUN_STATUSES
 from ashare_ai.api.run_cleanup import delete_run as cascade_delete_run
+from ashare_ai.api.decision_endpoints import router as decision_router
+from ashare_ai.api.model_management_endpoints import router as model_management_router
 from ashare_ai.api.schemas import (
     MAX_RESEARCH_SYMBOLS,
     MAX_TRADE_PLAN_SYMBOLS,
@@ -4971,3 +4973,8 @@ def _mount_native_web() -> None:
 
 
 _mount_native_web()
+
+
+# Include decision mode routers
+app.include_router(decision_router)
+app.include_router(model_management_router)

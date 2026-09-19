@@ -165,6 +165,8 @@ class Settings(BaseSettings):
     jev_model_version: str = "jev-baseline-v1"
     jev_device: Literal["auto", "cpu", "cuda"] = "auto"
     jev_checkpoint: Path | None = None
+    decision_cache_ttl: int = 3600  # seconds
+    bundle_storage_dir: Path = Path("data/bundles")
     edge_gateway_config_dir: Path = Path(".secrets/edge-gateway")
     edge_gateway_log_dir: Path = Path(".secrets/edge-gateway-logs")
     edge_gateway_source_dir: Path = Path("docker/edge-gateway")
