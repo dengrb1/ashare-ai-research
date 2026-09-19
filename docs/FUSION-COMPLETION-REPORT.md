@@ -282,7 +282,7 @@
 
 **离线包内容**:
 ```
-ashare-ai-2.1.1-offline.tar.gz (~1-2 GB)
+ashare-ai-2.2.0-offline.tar.gz (~1-2 GB)
 ├── ashare-ai-images.tar.gz     # 10 个 Docker 镜像
 ├── compose.yaml
 ├── .env.example

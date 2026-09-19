@@ -214,7 +214,7 @@ Phase 5 的目标（集成评分能力）已通过规则驱动的评分系统实
 ### 离线包内容
 
 ```
-ashare-ai-2.1.1-offline.tar.gz
+ashare-ai-2.2.0-offline.tar.gz
 ├── ashare-ai-images.tar.gz     # 所有 Docker 镜像（10 个服务）
 ├── compose.yaml                 # Docker Compose 编排
 ├── .env.example                 # 环境变量模板

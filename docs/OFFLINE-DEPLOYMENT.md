@@ -71,7 +71,7 @@
 4. 运行安装脚本：
 
 ```powershell
-cd C:\path\to\ashare-ai-2.1.1
+cd C:\path\to\ashare-ai-2.2.0
 .\scripts\offline-install.ps1 -ImportImages
 ```
 
@@ -84,8 +84,8 @@ cd C:\path\to\ashare-ai-2.1.1
 2. 解压离线部署包：
 
 ```bash
-tar -xzf ashare-ai-2.1.1-offline.tar.gz
-cd ashare-ai-2.1.1
+tar -xzf ashare-ai-2.2.0-offline.tar.gz
+cd ashare-ai-2.2.0
 ```
 
 3. 运行安装脚本：
@@ -358,7 +358,7 @@ docker compose up -d
 
 ## 升级
 
-### 小版本升级 (2.1.1 → 2.1.2)
+### 小版本升级 (2.1.1 → 2.2.0)
 
 1. 停止服务: `docker compose down`
 2. 备份数据（参见"数据备份"）
@@ -487,6 +487,6 @@ docker compose up -d --scale job-worker=3
 
 ---
 
-**版本**: 2.1.1  
+**版本**: 2.2.0
 **更新时间**: 2026-08-26  
 **适用平台**: Windows 10/11, Linux (Ubuntu/CentOS/Debian)

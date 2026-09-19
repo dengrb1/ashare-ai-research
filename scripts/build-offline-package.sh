@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-VERSION="${VERSION:-3.0.0}"
+VERSION="${VERSION:-2.2.0}"
 OUTPUT_DIR="${OUTPUT_DIR:-./dist}"
 INCLUDE_SOURCE="${INCLUDE_SOURCE:-false}"
 
@@ -115,7 +115,7 @@ https://www.docker.com/products/docker-desktop/
 打开 PowerShell（以管理员身份），导航到解压目录：
 
 ```powershell
-cd C:\path\to\ashare-ai-2.1.1
+cd C:\path\to\ashare-ai-2.2.0
 .\scripts\offline-install.ps1 -ImportImages
 ```
 
@@ -154,7 +154,7 @@ sudo systemctl enable docker
 ### 2. 运行安装脚本
 
 ```bash
-cd /path/to/ashare-ai-2.1.1
+cd /path/to/ashare-ai-2.2.0
 chmod +x scripts/offline-install.sh
 sudo ./scripts/offline-install.sh
 ```
