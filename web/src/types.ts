@@ -1,6 +1,6 @@
 export type Role = 'admin' | 'researcher' | 'user'
 
-export type ResearchExecutionMode = 'SERIAL' | 'DUAL'
+export type ResearchExecutionMode = 'SERIAL'
 
 export interface HealthStatus {
   status: string
@@ -95,41 +95,6 @@ export interface RuntimeIdentity {
 export interface SystemSettingsUnlock {
   unlock_token: string
   expires_at: string
-}
-
-export interface EdgeProxyHost {
-  id?: string | null
-  name: string
-  domains: string[]
-  forward_scheme: 'http' | 'https'
-  forward_host: string
-  forward_port: number
-  ssl_enabled: boolean
-  websocket_support: boolean
-  enabled: boolean
-  notes: string
-}
-
-export interface EdgeGatewayConfiguration {
-  configuration_id?: string | null
-  version: number
-  enabled: boolean
-  validation_mode: 'STRICT' | 'COMPATIBLE'
-  proxy_hosts: EdgeProxyHost[]
-  frpc_toml: string
-  config_sha256?: string | null
-  apply_status: string
-  apply_message?: string | null
-  applied_at?: string | null
-  applied_sha256?: string | null
-  source_sync?: boolean
-}
-
-export interface EdgeGatewayLogs {
-  available: boolean
-  message: string
-  lines: string[]
-  updated_at?: string | null
 }
 
 export interface User {
@@ -392,37 +357,6 @@ export interface Snapshot {
   details?: Record<string, unknown>
 }
 
-export interface FinancialSearchResult {
-  query: string
-  provider: string
-  upstream: string
-  mode: 'cli' | 'embedded' | 'direct' | 'ai'
-  searched_at: string
-  elapsed_ms: number
-  entities: Array<{ name: string; code: string; [key: string]: unknown }>
-  recalls: Array<{ type: string; desc: string; content: string; [key: string]: unknown }>
-  raw_sha256: string
-  outcome?: Record<string, unknown>
-  interpretation?: string
-  sources?: Array<{ source: string; uri?: string; fetched_at?: string; report_date?: string | null; notice_date?: string | null }>
-  warnings?: string[]
-  live_data_isolated_from_snapshots: boolean
-}
-
-export interface FinancialSearchStatus {
-  provider: string
-  upstream: string
-  mode: 'cli' | 'embedded' | 'direct' | 'ai'
-  available: boolean
-  configured?: boolean
-  reachable?: boolean
-  degraded?: boolean
-  model?: string | null
-  script_path?: string | null
-  message: string
-  live_data_isolated_from_snapshots: boolean
-}
-
 export interface ModelSettings {
   configuration_id: string | null
   version: number
@@ -431,8 +365,6 @@ export interface ModelSettings {
   provider: string
   base_url: string
   api_key_configured: boolean
-  search_model: string
-  search_reasoning_effort: string
   research_model: string
   research_reasoning_effort: string
   model_profiles: ModelProfile[]
@@ -448,8 +380,6 @@ export interface ModelSettings {
 export interface ModelSettingsDraft {
   base_url: string
   api_key?: string
-  search_model: string
-  search_reasoning_effort: string
   research_model: string
   research_reasoning_effort: string
   model_profiles: ModelProfile[]
@@ -545,6 +475,44 @@ export interface MarketPrefetchResponse {
   quotes: Quote[]
   klines: Record<string, Record<string, KlinePayload>>
   errors: Record<string, string>
+}
+
+export interface TrainingStatus {
+  training_id: string
+  status: 'idle' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | string
+  progress: number
+  current_epoch: number
+  total_epochs: number
+  metrics?: Record<string, unknown> | null
+  started_at?: string | null
+  completed_at?: string | null
+  estimated_completion?: string | null
+  error?: string | null
+}
+
+export interface TrainingHistory {
+  trainings: TrainingStatus[]
+  total: number
+}
+
+export type MonitorSignalType = 'INTRADAY_DROP' | 'VOLUME_BREAKOUT' | 'VOLUME_PRICE_DIVERGENCE' | 'MA_DEATH_CROSS'
+
+export interface MonitorSignal {
+  symbol: string
+  trading_date: string
+  available_at: string
+  decision_at: string
+  signal_type: MonitorSignalType
+  severity: 'LOW' | 'MEDIUM' | 'HIGH'
+  confidence: number
+  evidence: Record<string, unknown>
+  threshold_version: string
+}
+
+export interface MonitorSignalsResponse {
+  items: MonitorSignal[]
+  generated_at: string
+  decision_at: string
 }
 
 export interface DataEnvelope<T> {
@@ -713,6 +681,7 @@ export interface Candidate {
   rank: number
   total_score: number
   base_total_score?: number | null
+  technical_score?: number
   dividend_bonus?: number
   prediction_percentile?: number
   industry_code?: string
@@ -788,6 +757,7 @@ export interface Report {
   object_uri?: string
   created_at?: string
   market_index_snapshot?: MarketIndexSnapshot | null
+  result?: Record<string, unknown>
 }
 
 export interface TradePlan {

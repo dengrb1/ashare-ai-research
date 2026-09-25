@@ -29,11 +29,6 @@ def test_after_close_releases_caches_and_reclaims_process_memory(
     monkeypatch.setattr(api_module, "get_effective_settings", lambda: settings)
     monkeypatch.setattr(api_module, "runtime_mode_policy", lambda _settings: policy)
     monkeypatch.setattr(api_module, "get_market_data_service", Market)
-    monkeypatch.setattr(
-        api_module,
-        "_clear_financial_search_service",
-        lambda: events.append("search-cache-clear"),
-    )
     monkeypatch.setattr(api_module, "is_after_close", lambda _now=None: True)
     def reclaim_runtime_memory(actual: object, *, reason: str, force: bool = False) -> object:
         events.append(("reclaim", actual, reason, force))
@@ -46,7 +41,6 @@ def test_after_close_releases_caches_and_reclaims_process_memory(
 
     assert events == [
         "market-release",
-        "search-cache-clear",
         ("reclaim", settings, "api-after-close", False),
     ]
     assert api_module._market_session_calendar_cache == {}

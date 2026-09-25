@@ -44,6 +44,13 @@ QUEUE_SPECS = (
     ),
     QueueSpec("trade-plan", "ashare:trade-plan:pending", "ashare:trade-plan:processing"),
     QueueSpec("backtest", "ashare:backtest:pending", "ashare:backtest:processing"),
+    QueueSpec("exit-review", "ashare:exit-advice:pending", "ashare:exit-advice:processing"),
+    QueueSpec("jev-training", "ashare:jev-training:pending", "ashare:jev-training:processing"),
+    QueueSpec(
+        "system2-diagnostic",
+        "ashare:system2-diagnostic:pending",
+        "ashare:system2-diagnostic:processing",
+    ),
 )
 
 
@@ -54,8 +61,9 @@ def build_queues(
     lease_seconds: int | None = None,
 ) -> list[tuple[QueueSpec, RedisLeasedQueue]]:
     settings = get_settings()
-    mode = execution_mode or getattr(settings, "research_execution_mode", "SERIAL")
-    active_specs = tuple(spec for spec in QUEUE_SPECS if mode != "DUAL" or spec.kind != "research")
+    # Keep the old call shape for integrations while making topology fixed.
+    del execution_mode
+    active_specs = QUEUE_SPECS
     effective_lease = lease_seconds or settings.worker_lease_seconds
     return [
         (
@@ -111,7 +119,6 @@ def run_loop(*, max_iterations: int | None = None) -> None:
     queues = (
         build_queues(
             client,
-            execution_mode=runtime.execution_mode,
             lease_seconds=runtime.settings.worker_lease_seconds,
         )
         if runtime is not None

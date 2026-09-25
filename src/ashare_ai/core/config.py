@@ -75,28 +75,14 @@ class Settings(BaseSettings):
     memory_reclaim_enabled: bool = True
     memory_reclaim_min_rss_mib: int = Field(default=160, ge=32, le=4096)
     memory_reclaim_cooldown_seconds: int = Field(default=300, ge=30, le=3600)
-    # After close and once all daily research is complete, workers enter deep
-    # standby and the host-side topology controller may stop optional services
-    # (searxng, idle workers) until new work appears.  Default off: opting in
-    # never changes point-in-time research, scoring or audit semantics.
+    # After close and once all daily research is complete, the worker enters deep
+    # standby until new work appears.  This does not change point-in-time
+    # research, scoring or audit semantics.
     energy_saving_enabled: bool = False
-    financial_search_provider: str = "neodata-financial-search"
-    neodata_financial_search_path: Path | None = None
-    neodata_financial_search_mode: Literal["auto", "cli", "embedded"] = "auto"
-    neodata_financial_search_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
-    financial_search_cache_seconds: int = Field(default=15, ge=0, le=300)
-    financial_search_max_concurrency: int = Field(default=4, ge=1, le=32)
-    financial_search_rate_limit_per_minute: int = Field(default=30, ge=1, le=600)
-    searxng_base_url: str = "http://127.0.0.1:8080"
-    searxng_timeout_seconds: float = Field(default=12.0, gt=0, le=60)
-    searxng_max_results: int = Field(default=5, ge=1, le=10)
     ai_chat_rate_limit_per_minute: int = Field(default=10, ge=1, le=120)
     # Quote Bridge integration (supplementary real-time quotes from Tencent/Sina)
     quote_bridge_enabled: bool = True
     quote_bridge_url: str = "http://127.0.0.1:8081"
-    # News Bridge integration (news data from Eastmoney)
-    news_bridge_enabled: bool = True
-    news_bridge_url: str = "http://127.0.0.1:8082"
     # Gateway integration (model proxy)
     gateway_enabled: bool = True
     gateway_url: str = "http://127.0.0.1:8787"
@@ -128,61 +114,41 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-5.6-sol"
     llm_reasoning_effort: str = "high"
     llm_timeout_seconds: float = Field(default=90.0, gt=0, le=600)
-    # Per-run model-agent concurrency. The control plane validates the DUAL-mode
-    # aggregate (two research workers) stays within MODEL_GATEWAY_MAX_CONCURRENCY,
-    # so the upper bound here only mirrors the gateway headroom an operator can
-    # raise.  The default keeps existing single-gateway deployments unchanged.
+    # Per-run model-agent concurrency for the single serial worker.
     llm_agent_max_concurrency: int = Field(default=4, ge=1, le=16)
-    research_execution_mode: Literal["SERIAL", "DUAL"] = "SERIAL"
-    edge_gateway_enabled: bool = False
-    # Public HTTPS edge-gateway (nginx + acme.sh + optional frpc client)
-    # settings.  The environment remains the deployment baseline, but every
-    # value below is also administrator-overridable from the system settings
-    # center; the host-side topology controller injects the persisted values
-    # into the compose subprocess that (re)creates the edge-gateway service.
-    edge_domain: str | None = None
-    edge_acme_email: str | None = None
-    edge_acme_ca_server: str = "letsencrypt"
-    edge_frpc_enabled: bool = False
-    edge_frpc_config_file: str = "./docker/edge-gateway/frpc.disabled.toml"
-    # When enabled, the host-side topology controller force-recreates the
-    # affected Compose services after a persisted topology change instead of
-    # leaving the operator to run the restart command shown in the UI.
+    # Optional interactive Web search.  Search output is never used as a
+    # frozen research snapshot or as a scoring input.
+    searxng_base_url: str = "http://127.0.0.1:8080"
+    searxng_timeout_seconds: float = Field(default=12.0, gt=0, le=60)
+    searxng_max_results: int = Field(default=5, ge=1, le=10)
     auto_restart_enabled: bool = False
-    # Deployment-only capability for the local host task which applies
-    # Compose profiles.  It is never stored in system-configuration history.
-    topology_controller_token: str | None = None
-    # The model gateway is an infrastructure capacity, not a user-editable
-    # model credential.  It remains environment/Compose managed and lets the
-    # control plane fail closed before enabling two research consumers.
     model_gateway_max_concurrency: int = Field(default=8, ge=1, le=128)
     model_settings_encryption_keys: str | None = None
-    edge_gateway_encryption_keys: str | None = None
     # Decision mode configuration
-    decision_mode: Literal["legacy", "jev"] = "legacy"
-    decision_fallback_enabled: bool = False
+    # Jev is the deterministic System-1 decision provider.  The optional
+    # System-2 path is only used when Jev is unavailable or below this score.
+    decision_mode: Literal["legacy", "jev"] = "jev"
+    decision_fallback_enabled: bool = True
+    jev_confidence_threshold: float = Field(default=0.60, ge=0.0, le=1.0)
+    decision_system2_enabled: bool = True
     jev_model_dir: Path = Path("data/models/jev")
     jev_model_version: str = "jev-baseline-v1"
     jev_device: Literal["auto", "cpu", "cuda"] = "auto"
     jev_checkpoint: Path | None = None
+    jev_backend: Literal["local", "live"] = "local"
+    jev_live_base_url: str | None = None
+    jev_live_api_key: str | None = None
+    jev_live_model: str = "jev-live"
+    jev_live_endpoint: str = "/v1/decisions"
+    jev_live_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
     decision_cache_ttl: int = 3600  # seconds
     bundle_storage_dir: Path = Path("data/bundles")
-    edge_gateway_config_dir: Path = Path(".secrets/edge-gateway")
-    edge_gateway_log_dir: Path = Path(".secrets/edge-gateway-logs")
-    edge_gateway_source_dir: Path = Path("docker/edge-gateway")
-    edge_gateway_host_source_dir: Path = Path("docker/edge-gateway")
-    edge_proxy_target_allowlist: str = "web"
     personal_data_encryption_keys: str | None = None
     mipush_app_secret: str | None = None
     mipush_package_name: str | None = None
     mipush_api_url: str = "https://api.xmpush.xiaomi.com/v3/message/regid"
     model_allowed_hosts: str | None = None
     enable_prefect_flows: bool = False
-
-    @field_validator("neodata_financial_search_path", mode="before")
-    @classmethod
-    def empty_neodata_path_is_unconfigured(cls, value: object) -> object:
-        return None if isinstance(value, str) and not value.strip() else value
 
     @field_validator("research_only_mode", mode="before")
     @classmethod
@@ -207,30 +173,6 @@ class Settings(BaseSettings):
     def lock_execution_mode_research_only(cls, value: object) -> str:
         """Execution mode is permanently locked to RESEARCH_ONLY."""
         return "RESEARCH_ONLY"
-
-    @field_validator("edge_domain", mode="before")
-    @classmethod
-    def clean_edge_domain(cls, value: object) -> object:
-        if value is None:
-            return None
-        domain = str(value).strip().lower().rstrip(".")
-        if domain and (
-            domain.startswith(("http://", "https://"))
-            or "/" in domain
-            or any(char.isspace() for char in domain)
-        ):
-            raise ValueError("edge domain must be a bare DNS host name without scheme or path")
-        return domain or None
-
-    @field_validator("edge_acme_email", mode="before")
-    @classmethod
-    def clean_edge_acme_email(cls, value: object) -> object:
-        if value is None:
-            return None
-        email = str(value).strip()
-        if email and ("@" not in email or any(char.isspace() for char in email)):
-            raise ValueError("edge ACME account email must contain @ and no whitespace")
-        return email or None
 
     @property
     def trusted_host_list(self) -> list[str]:
@@ -311,6 +253,8 @@ class Settings(BaseSettings):
             problems.append("MODEL_ALLOWED_HOSTS must explicitly allow model gateway hosts")
         if self.agent_backend == "openai_compatible" and not self.model_settings_encryption_keys:
             problems.append("MODEL_SETTINGS_ENCRYPTION_KEYS is required for the model backend")
+        if self.jev_backend == "live" and (not self.jev_live_base_url or not self.jev_live_api_key):
+            problems.append("JEV_LIVE_BASE_URL and JEV_LIVE_API_KEY are required when JEV_BACKEND=live")
         if not (self.personal_data_encryption_keys or self.model_settings_encryption_keys):
             problems.append(
                 "PERSONAL_DATA_ENCRYPTION_KEYS is required for images and personal archives"

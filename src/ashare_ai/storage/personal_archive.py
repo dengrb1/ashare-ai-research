@@ -373,7 +373,7 @@ def _preview_history_classification(
             "run_id",
             {"user_id", "idempotency_key", "active_research_key"},
         ),
-        ("reports", ReportRow, "report_id", {"object_uri"}),
+        ("reports", ReportRow, "report_id", {"object_uri", "content_sha256"}),
         ("backtests", BacktestRun, "backtest_id", {"user_id", "input_hash"}),
     )
     source_names = {
@@ -536,6 +536,8 @@ def _collect_profile(
     object_refs: dict[str, str] = {}
     excluded_image_records: set[str] = set()
     for row in direct["reports"]:
+        if not row.object_uri or not row.content_sha256:
+            continue
         payload = _read_domain_object(row.object_uri)
         if payload is not None and _looks_like_image(payload):
             excluded_image_records.add(f"report:{row.report_id}")
@@ -711,6 +713,8 @@ def _sanitize_export_record(
 
 
 def _read_domain_object(uri: str) -> bytes | None:
+    if not uri:
+        return None
     try:
         settings = get_effective_settings()
         if uri.startswith("s3://"):
@@ -1434,13 +1438,15 @@ def _import_run_dependents(
             )
         digest = refs.get(f"report:{source_id}")
         payload = objects.get(str(digest))
-        if payload is None or sha256_bytes(payload) != raw.get("content_sha256"):
-            counts["skipped"] += 1
-            continue
+        legacy_object_valid = bool(
+            payload is not None
+            and raw.get("content_sha256")
+            and sha256_bytes(payload) == raw.get("content_sha256")
+        )
         existing_report = session.get(ReportRow, source_id)
-        if existing_report is not None and (
-            existing_report.run_id == run_map[source_run]
-            and existing_report.content_sha256 == raw.get("content_sha256")
+        if existing_report is not None and existing_report.run_id == run_map[source_run] and (
+            existing_report.result == raw.get("result")
+            or (legacy_object_valid and existing_report.content_sha256 == raw.get("content_sha256"))
         ):
             report_map[source_id] = source_id
             counts["skipped"] += 1
@@ -1454,7 +1460,10 @@ def _import_run_dependents(
         if mapped_report is not None:
             if (
                 mapped_report.run_id != run_map[source_run]
-                or mapped_report.content_sha256 != raw.get("content_sha256")
+                or not (
+                    mapped_report.result == raw.get("result")
+                    or (legacy_object_valid and mapped_report.content_sha256 == raw.get("content_sha256"))
+                )
             ):
                 raise PersonalArchiveError(
                     "报告重映射冲突", code="ARCHIVE_ID_CONFLICT"
@@ -1462,11 +1471,15 @@ def _import_run_dependents(
             report_map[source_id] = target_id
             counts["skipped"] += 1
             continue
-        uri = _write_imported_object(
-            user_id, archive_id, "reports", target_id, payload
-        )
         values = _model_values(ReportRow, raw)
-        values.update(report_id=target_id, run_id=run_map[source_run], object_uri=uri)
+        values.update(report_id=target_id, run_id=run_map[source_run])
+        if legacy_object_valid:
+            values["object_uri"] = _write_imported_object(
+                user_id, archive_id, "reports", target_id, payload
+            )
+        else:
+            values["object_uri"] = None
+            values["content_sha256"] = None
         session.add(ReportRow(**values))
         report_map[source_id] = target_id
         counts["inserted"] += 1

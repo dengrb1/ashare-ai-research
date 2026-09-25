@@ -96,7 +96,6 @@ ashare-native-linux.sh doctor --json
 
 - PostgreSQL Linux 二进制包或预构建包产物。
 - Valkey 或 Redis-compatible Linux 二进制包。
-- 固定提交的 SearXNG 源码压缩包。
 - Python 运行时策略：
   - DEB/RPM 包使用系统 Python 3.11 或 3.12 创建私有 venv。
   - AppImage/便携包可携带可重定位 CPython 和私有 venv。
@@ -111,4 +110,5 @@ ashare-native-linux.sh doctor --json
 
 GUI 不承载服务语义，只调用控制器并渲染状态、日志和命令输出。
 
-Edge Gateway 与 Docker 版使用相同的 API、校验、版本和回滚契约。Linux 原生版的 FRP/Nginx 文件位于 `<runtime>/config/edge-gateway`，管理页面可读取直接编辑的 `frpc.toml` 和 `managed.conf`，保存也会通过原生运行组写回该目录。
+原生版与 Docker 版共享 API、评分配置和迁移链。运行组只包含 API、Web、行情桥、模型网关和单一
+`job-worker`，只运行研究队列。

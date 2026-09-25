@@ -39,7 +39,6 @@ from ashare_ai.agents.openai_compatible import (
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.hashing import canonical_json, sha256_bytes, stable_hash
 from ashare_ai.notifications.service import NotificationService
-from ashare_ai.search.web import get_web_search_service
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import (
     AIChatAttachment,
@@ -128,7 +127,6 @@ def _system_context(
         user_id=user_id,
         refs=refs,
         requested_decision_at=decision_at,
-        web_search=False,
         model_configuration_sha256=None,
     )
     return result.context, result.sources
@@ -175,12 +173,12 @@ async def stream_chat_response(
     content: str,
     model: str,
     reasoning_effort: str,
-    web_search: bool,
     attachment_ids: list[str],
     mention_refs: list[dict[str, str]],
     decision_at: datetime | None,
     idempotency_key: str,
     request_id: str,
+    web_search: bool = False,
 ) -> AsyncIterator[dict[str, Any]]:
     now = datetime.now(UTC)
     if decision_at is not None and decision_at.tzinfo is None:
@@ -211,7 +209,7 @@ async def stream_chat_response(
         refs = mention_resolution.refs
         symbols = [item["symbol"] for item in refs]
         runtime = ModelConfigurationService().resolve(session)
-        if runtime is not None and model not in {runtime.search_model, runtime.research_model}:
+        if runtime is not None and model != runtime.research_model:
             raise ValueError("selected model is not allowed")
         attachments = _validate_attachments(
             user_id=user_id,
@@ -455,7 +453,6 @@ async def stream_chat_response(
             user_id=user_id,
             refs=refs,
             requested_decision_at=client_decision_at,
-            web_search=web_search,
             model_configuration_sha256=runtime.config_sha256,
         )
         context_elapsed_ms = round((perf_counter() - started_context) * 1000)
@@ -463,36 +460,19 @@ async def stream_chat_response(
         trading_date = decision_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
         context = context_result.context
         sources = context_result.sources
-        if web_search and client_decision_at is None:
-            public_search = await asyncio.to_thread(get_web_search_service().search, content)
+        if web_search:
+            from ashare_ai.search import get_web_search_service
+
+            web_result = await asyncio.to_thread(get_web_search_service().search, content)
+            sources = [*sources, *web_result.items]
             context["web_search"] = {
-                "query": content,
-                "results": public_search.items,
-                "status": public_search.status,
-            }
-            sources.extend(
-                {
-                    "source": "searxng",
-                    "title": str(item.get("title") or "网页来源"),
-                    "uri": str(item.get("url") or ""),
-                    "available_at": public_search.status.get("searched_at"),
-                }
-                for item in public_search.items
-                if item.get("url")
-            )
-        elif web_search:
-            context["web_search"] = {
-                "query": content,
-                "results": [],
-                "status": {
-                    "state": "EXCLUDED",
-                    "reason_code": "HISTORICAL_WEB_SEARCH_EXCLUDED",
-                },
+                "status": web_result.status,
+                "items": web_result.items,
+                "cache_hit": web_result.cache_hit,
             }
         data_status = {
             **context_result.data_status,
             "mentions": mention_resolution.statuses,
-            "web_search": context.get("web_search", {}).get("status"),
         }
         context["data_status"] = data_status
         _set_message_pit(

@@ -30,6 +30,14 @@ def load_handler(kind: str) -> Callable[[str], Any]:
         from ashare_ai.orchestration.personal_archive_jobs import run_personal_archive_job
 
         return run_personal_archive_job
+    if kind == "system2-diagnostic":
+        from ashare_ai.orchestration.system2_jobs import run_system2_diagnostic_job
+
+        return run_system2_diagnostic_job
+    if kind == "jev-training":
+        from ashare_ai.orchestration.jev_training_jobs import run_jev_training_job
+
+        return run_jev_training_job
     if kind == "maintenance":
         from ashare_ai.orchestration.maintenance_jobs import run_maintenance_job
 
@@ -48,6 +56,8 @@ def main() -> None:
             "backtest",
             "exit-review",
             "personal-archive",
+            "system2-diagnostic",
+            "jev-training",
             "maintenance",
         ),
     )

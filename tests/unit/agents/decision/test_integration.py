@@ -10,8 +10,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
-from decimal import Decimal
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -20,7 +19,7 @@ from ashare_ai.agents.decision.legacy import (
     convert_composite_score_to_decision,
 )
 from ashare_ai.agents.decision.market_state import MarketState
-from ashare_ai.core.contracts import CompositeScore, DataQualityInputs, MarketIndexSnapshot
+from ashare_ai.core.contracts import CompositeScore, MarketIndexSnapshot
 
 
 @pytest.fixture
@@ -29,7 +28,7 @@ def sample_composite_score() -> CompositeScore:
     return CompositeScore(
         symbol="600000.SH",
         trading_date=date(2026, 7, 17),
-        decision_at=datetime(2026, 7, 17, 15, 30, tzinfo=timezone.utc),
+        decision_at=datetime(2026, 7, 17, 15, 30, tzinfo=UTC),
         fundamental_score=75.0,
         technical_score=68.0,
         sentiment_score=72.0,
@@ -50,7 +49,7 @@ def sample_market_state() -> MarketState:
     return MarketState(
         symbol="600000.SH",
         trading_date=date(2026, 7, 17),
-        available_at=datetime(2026, 7, 17, 17, 0, tzinfo=timezone.utc),
+        available_at=datetime(2026, 7, 17, 15, 0, tzinfo=UTC),
         open=10.0,
         high=10.5,
         low=9.8,
@@ -125,7 +124,7 @@ def test_composite_score_with_market_index() -> None:
     composite_score = CompositeScore(
         symbol="600000.SH",
         trading_date=date(2026, 7, 17),
-        decision_at=datetime(2026, 7, 17, 15, 30, tzinfo=timezone.utc),
+        decision_at=datetime(2026, 7, 17, 15, 30, tzinfo=UTC),
         fundamental_score=70.0,
         technical_score=65.0,
         sentiment_score=68.0,
@@ -146,7 +145,7 @@ def test_composite_score_with_market_index() -> None:
     market_state = MarketState(
         symbol="600000.SH",
         trading_date=date(2026, 7, 17),
-        available_at=datetime(2026, 7, 17, 17, 0, tzinfo=timezone.utc),
+        available_at=datetime(2026, 7, 17, 15, 0, tzinfo=UTC),
         open=10.0,
         high=10.2,
         low=9.9,

@@ -19,12 +19,11 @@ from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
-DEFAULT_PORTS = {"postgres": 55432, "redis": 56379, "api": 58000, "searxng": 58080}
+DEFAULT_PORTS = {"postgres": 55432, "redis": 56379, "api": 58000}
 PORT_CANDIDATES = {
     "postgres": (55432, 55433, 55434, 55600, 55601),
     "redis": (56379, 56380, 56381, 55610, 55611),
     "api": (58000, 58001, 58002, 55620, 55621),
-    "searxng": (58080, 58081, 58082, 55630, 55631),
 }
 COMMANDS = {"install", "start", "stop", "restart", "repair", "status", "doctor"}
 
@@ -131,13 +130,10 @@ def management_lock(path: Path) -> Iterator[None]:
 
 class Controller:
     def __init__(
-        self, root: Path, source_root: Path, research_mode: str, workers: int, watchdog: int
+        self, root: Path, source_root: Path
     ) -> None:
         self.root = root.expanduser().resolve()
         self.source_root = source_root.expanduser().resolve()
-        self.research_mode = research_mode
-        self.workers = workers
-        self.watchdog_interval = watchdog
         self.config = self.root / "config"
         self.state = self.root / "state"
         self.logs = self.root / "logs"
@@ -387,7 +383,6 @@ class Controller:
             "redis-server", "valkey-server"
         )
         redis_cli = find_binary("redis-cli", "valkey-cli")
-        searx_check = subprocess.run([str(venv_python), "-c", "import searx"], check=False)
         missing = []
         if not postgres:
             missing.append("pg_ctl")
@@ -395,8 +390,6 @@ class Controller:
             missing.append("redis-server or valkey-server")
         if not redis_cli:
             missing.append("redis-cli or valkey-cli")
-        if searx_check.returncode != 0:
-            missing.append("Python package searx")
         web_dist = self.source_root / "web" / "dist"
         if (web_dist / "index.html").is_file():
             if (self.root / "web").exists():
@@ -413,14 +406,9 @@ class Controller:
             {
                 "DATABASE_URL": f"postgresql+psycopg://ashare:{postgres_password}@127.0.0.1:{self.ports()['postgres']}/ashare",
                 "REDIS_URL": f"redis://:{redis_password}@127.0.0.1:{self.ports()['redis']}/0",
-                "SEARXNG_BASE_URL": f"http://127.0.0.1:{self.ports()['searxng']}/",
                 "POSTGRES_PASSWORD": postgres_password,
                 "REDIS_PASSWORD": redis_password,
                 "ASHARE_NATIVE_WEB_ROOT": str(self.root / "web"),
-                "EDGE_GATEWAY_SOURCE_DIR": str(self.config / "edge-gateway"),
-                "EDGE_GATEWAY_HOST_SOURCE_DIR": str(self.config / "edge-gateway"),
-                "EDGE_GATEWAY_CONFIG_DIR": str(self.config / "edge-gateway"),
-                "EDGE_GATEWAY_LOG_DIR": str(self.root / "logs" / "edge-gateway"),
             }
         )
         atomic_write(
@@ -464,8 +452,6 @@ class Controller:
                         line = re.sub(r"(127\.0\.0\.1:)\d+", rf"\g<1>{selected['postgres']}", line)
                     elif line.startswith("REDIS_URL="):
                         line = re.sub(r"(127\.0\.0\.1:)\d+", rf"\g<1>{selected['redis']}", line)
-                    elif line.startswith("SEARXNG_BASE_URL="):
-                        line = re.sub(r"(127\.0\.0\.1:)\d+", rf"\g<1>{selected['searxng']}", line)
                     updated.append(line)
                 atomic_write(self.env_path, "\n".join(updated) + "\n")
         return selected
@@ -522,12 +508,6 @@ class Controller:
             str(self.source_root / "src") + os.pathsep + environment.get("PYTHONPATH", "")
         )
         environment["ASHARE_NATIVE_WEB_ROOT"] = str(self.root / "web")
-        environment["EDGE_GATEWAY_SOURCE_DIR"] = str(self.config / "edge-gateway")
-        environment["EDGE_GATEWAY_HOST_SOURCE_DIR"] = str(self.config / "edge-gateway")
-        environment["EDGE_GATEWAY_CONFIG_DIR"] = str(self.config / "edge-gateway")
-        environment["EDGE_GATEWAY_LOG_DIR"] = str(self.root / "logs" / "edge-gateway")
-        (self.config / "edge-gateway").mkdir(parents=True, exist_ok=True)
-        (self.root / "logs" / "edge-gateway").mkdir(parents=True, exist_ok=True)
         services: list[dict[str, object]] = []
         self.set_desired_state("RUNNING")
         try:
@@ -584,14 +564,6 @@ class Controller:
                 check=True,
             )
             self.start_process(
-                "searxng",
-                self.identity_invocation(
-                    [python, "-m", "searx.webapp", "--port", str(ports["searxng"])]
-                ),
-                environment,
-                services,
-            )
-            self.start_process(
                 "api",
                 self.identity_invocation(
                     [
@@ -620,14 +592,6 @@ class Controller:
             self.start_process(
                 "job-worker",
                 self.identity_invocation([python, "-m", "ashare_ai.orchestration.serial_worker"]),
-                environment,
-                services,
-            )
-            self.start_process(
-                "exit-advice-worker",
-                self.identity_invocation(
-                    [python, "-m", "ashare_ai.orchestration.exit_advice_worker"]
-                ),
                 environment,
                 services,
             )
@@ -741,9 +705,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-root", default=str(source_root))
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--fast", action="store_true")
-    parser.add_argument("--research-mode", choices=("SERIAL", "DUAL"), default="SERIAL")
-    parser.add_argument("--research-workers", type=int, default=0)
-    parser.add_argument("--watchdog-interval", type=int, default=10)
     return parser.parse_args()
 
 
@@ -752,9 +713,6 @@ def main() -> int:
     controller = Controller(
         Path(args.root),
         Path(args.source_root),
-        args.research_mode,
-        args.research_workers,
-        args.watchdog_interval,
     )
     try:
         if args.command == "status":

@@ -1,4 +1,4 @@
-"""Integration tests for Quote Bridge, News Bridge, and Gateway clients."""
+"""Integration tests for Quote Bridge and Gateway clients."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from httpx import Response
 
 from ashare_ai.agents.gateway_client import GatewayClient
 from ashare_ai.core.config import Settings
-from ashare_ai.market.news_bridge_client import NewsBridgeClient
 from ashare_ai.market.quote_bridge_client import QuoteBridgeClient
 
 
@@ -18,8 +17,6 @@ def test_settings() -> Settings:
     settings = Settings()
     settings.quote_bridge_enabled = True
     settings.quote_bridge_url = "http://localhost:8081"
-    settings.news_bridge_enabled = True
-    settings.news_bridge_url = "http://localhost:8082"
     settings.gateway_enabled = True
     settings.gateway_url = "http://localhost:8787"
     return settings
@@ -98,69 +95,6 @@ class TestQuoteBridgeIntegration:
         client.close()
 
 
-class TestNewsBridgeIntegration:
-    @respx.mock
-    def test_get_news_success(self, test_settings: Settings) -> None:
-        respx.get("http://localhost:8082/news").mock(
-            return_value=Response(
-                200,
-                json=[
-                    {
-                        "title": "公司发布年度报告",
-                        "summary": "业绩增长显著",
-                        "content": "详细内容",
-                        "source": "Eastmoney",
-                        "published_at": "2026-08-26T10:30:00+08:00",
-                        "url": "https://example.com/1",
-                        "symbols": ["000001.SZ"],
-                    },
-                    {
-                        "title": "分析师上调评级",
-                        "summary": "目标价上调",
-                        "content": "详细分析",
-                        "source": "Securities Daily",
-                        "published_at": "2026-08-25T14:20:00+08:00",
-                        "url": "https://example.com/2",
-                        "symbols": ["000001.SZ"],
-                    },
-                ],
-            )
-        )
-
-        client = NewsBridgeClient(test_settings)
-        news = client.get_news(symbol="000001.SZ", limit=20)
-
-        assert len(news) == 2
-        assert news[0]["title"] == "公司发布年度报告"
-        assert news[1]["source"] == "Securities Daily"
-        client.close()
-
-    @respx.mock
-    def test_get_news_category_filter(self, test_settings: Settings) -> None:
-        respx.get("http://localhost:8082/news").mock(
-            return_value=Response(
-                200,
-                json=[
-                    {
-                        "title": "行业新闻",
-                        "summary": "行业动态",
-                        "source": "Eastmoney",
-                        "published_at": "2026-08-26T10:00:00+08:00",
-                        "url": "https://example.com/3",
-                        "symbols": [],
-                    }
-                ],
-            )
-        )
-
-        client = NewsBridgeClient(test_settings)
-        news = client.get_news(category="industry", limit=10)
-
-        assert len(news) == 1
-        assert news[0]["title"] == "行业新闻"
-        client.close()
-
-
 class TestGatewayIntegration:
     @respx.mock
     def test_chat_completion_success(self, test_settings: Settings) -> None:
@@ -224,19 +158,15 @@ class TestHealthChecks:
     @respx.mock
     def test_all_services_health(self, test_settings: Settings) -> None:
         respx.get("http://localhost:8081/health").mock(return_value=Response(200))
-        respx.get("http://localhost:8082/health").mock(return_value=Response(200))
         respx.get("http://localhost:8787/health").mock(return_value=Response(200))
 
         quote_client = QuoteBridgeClient(test_settings)
-        news_client = NewsBridgeClient(test_settings)
         gateway_client = GatewayClient(test_settings)
 
         assert quote_client.health() is True
-        assert news_client.health() is True
         assert gateway_client.health() is True
 
         quote_client.close()
-        news_client.close()
         gateway_client.close()
 
     @respx.mock

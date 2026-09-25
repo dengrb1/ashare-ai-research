@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
+    "framer-motion": "^12.43.0",
     "lucide-react": "^1.25.0",
     "react": "latest",
     "react-dom": "latest",
@@ -31,6 +32,6 @@
     "@types/react": "latest",
     "@types/react-dom": "latest",
     "jsdom": "latest",
-    "vitest": "latest"
+    "vitest": "^5.0.2"
   }
 }

@@ -12,7 +12,7 @@ from typing import Any, Literal, cast
 import psutil
 
 MIB = 1024**2
-DUAL_WORKER_COUNT = 2
+JOB_WORKER_COUNT = 1
 DEFAULT_WORKER_BASELINE_BYTES = 192 * MIB
 DEFAULT_WORKER_LIMIT_BYTES = 700 * MIB
 PROJECTED_HEADROOM_BYTES = 512 * MIB
@@ -122,26 +122,21 @@ def _worker_measurements(
     return values
 
 
-def _dual_estimate(
+def _job_worker_estimate(
     workers: list[dict[str, object]], *, available_bytes: int, memory_percent: float
 ) -> dict[str, object]:
-    observed = _worker_measurements(workers, "research-worker", "memory_used_bytes")
-    source = "research-worker"
-    if not observed:
-        observed = _worker_measurements(workers, "job-worker", "memory_used_bytes")
-        source = "job-worker"
+    observed = _worker_measurements(workers, "job-worker", "memory_used_bytes")
+    source = "job-worker"
     if observed:
         per_worker_typical = int(statistics.median(observed))
     else:
         per_worker_typical = DEFAULT_WORKER_BASELINE_BYTES
         source = "fallback"
 
-    limits = _worker_measurements(workers, "research-worker", "memory_limit_bytes")
-    if not limits:
-        limits = _worker_measurements(workers, "job-worker", "memory_limit_bytes")
+    limits = _worker_measurements(workers, "job-worker", "memory_limit_bytes")
     per_worker_ceiling = max(limits) if limits else DEFAULT_WORKER_LIMIT_BYTES
-    typical_increment = DUAL_WORKER_COUNT * per_worker_typical
-    ceiling_increment = DUAL_WORKER_COUNT * per_worker_ceiling
+    typical_increment = JOB_WORKER_COUNT * per_worker_typical
+    ceiling_increment = JOB_WORKER_COUNT * per_worker_ceiling
     projected_available = available_bytes - typical_increment
 
     level: Literal["NORMAL", "WARNING", "CRITICAL"] = "NORMAL"
@@ -157,11 +152,11 @@ def _dual_estimate(
     if memory_percent >= 80:
         messages.append("MEMORY_USAGE_HIGH")
     if available_bytes < ceiling_increment:
-        messages.append("DUAL_CEILING_EXCEEDS_AVAILABLE")
+        messages.append("JOB_WORKER_CEILING_EXCEEDS_AVAILABLE")
     if projected_available < PROJECTED_HEADROOM_BYTES:
-        messages.append("DUAL_PROJECTED_HEADROOM_LOW")
+        messages.append("JOB_WORKER_PROJECTED_HEADROOM_LOW")
     return {
-        "worker_replicas": DUAL_WORKER_COUNT,
+        "worker_replicas": JOB_WORKER_COUNT,
         "estimate_source": source,
         "typical_per_worker_bytes": per_worker_typical,
         "typical_increment_bytes": typical_increment,
@@ -183,10 +178,10 @@ def sample_runtime_resources(workers: list[dict[str, object]]) -> dict[str, Any]
         "CONTAINER" if Path("/.dockerenv").exists() or cgroup_memory()[1] else "HOST"
     )
     warnings: list[str] = []
-    dual = _dual_estimate(
+    estimate = _job_worker_estimate(
         workers, available_bytes=int(memory.available), memory_percent=memory_percent
     )
-    level = str(dual["level"])
+    level = str(estimate["level"])
     if cpu_percent >= 90:
         warnings.append("CPU_USAGE_HIGH")
         if level == "NORMAL":
@@ -195,7 +190,7 @@ def sample_runtime_resources(workers: list[dict[str, object]]) -> dict[str, Any]
         warnings.append("DISK_USAGE_HIGH")
         if level == "NORMAL":
             level = "WARNING"
-    warnings = [*cast(list[str], dual["messages"]), *warnings]
+    warnings = [*cast(list[str], estimate["messages"]), *warnings]
 
     api_service = sample_current_service(service_id="api", role="api")
     services = [api_service]
@@ -237,7 +232,7 @@ def sample_runtime_resources(workers: list[dict[str, object]]) -> dict[str, Any]
             "percent": round(float(disk.percent), 1),
         },
         "services": services,
-        "topology_estimate": dual,
+        "topology_estimate": estimate,
         "level": level,
         "warnings": warnings,
     }

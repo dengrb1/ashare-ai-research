@@ -13,9 +13,6 @@ if [[ -z "${ASHARE_NATIVE_ROOT:-}" && -f "$SCRIPT_DIR/runtime-root.txt" ]]; then
 fi
 SOURCE_ROOT=""
 JSON=0
-RESEARCH_MODE="SERIAL"
-RESEARCH_WORKERS=0
-WATCHDOG_INTERVAL=10
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -35,18 +32,6 @@ while [[ $# -gt 0 ]]; do
       JSON=1
       shift
       ;;
-    --research-mode)
-      RESEARCH_MODE="$2"
-      shift 2
-      ;;
-    --research-workers)
-      RESEARCH_WORKERS="$2"
-      shift 2
-      ;;
-    --watchdog-interval)
-      WATCHDOG_INTERVAL="$2"
-      shift 2
-      ;;
     --help|-h)
       cat <<'EOF'
 AshareAI Linux native controller
@@ -58,9 +43,6 @@ Options:
   --root <path>
   --source-root <path>
   --json
-  --research-mode SERIAL|DUAL
-  --research-workers 0..2
-  --watchdog-interval <seconds>
 EOF
       exit 0
       ;;
@@ -80,7 +62,6 @@ if [[ -f "$PYTHON_CONTROLLER" ]]; then
   if [[ "$JSON" -eq 1 ]]; then controller_args+=("--json"); fi
   if [[ "$COMMAND" == "status" ]]; then controller_args+=("--fast"); fi
   if [[ "$COMMAND" == "install" || "$COMMAND" == "start" || "$COMMAND" == "restart" ]]; then
-    controller_args+=("--research-mode" "$RESEARCH_MODE" "--research-workers" "$RESEARCH_WORKERS" "--watchdog-interval" "$WATCHDOG_INTERVAL")
   fi
   exec python3 "$PYTHON_CONTROLLER" "${controller_args[@]}"
 fi
@@ -126,7 +107,7 @@ payload = {
     "services": [],
     "desired_state": desired,
     "runtime_healthy": False,
-    "ports": {"postgres": 55432, "redis": 56379, "api": 58000, "searxng": 58080},
+    "ports": {"postgres": 55432, "redis": 56379, "api": 58000},
     "watchdog_task": {"registered": False, "state": "Missing", "task_name": "ashare-ai-native-watchdog"},
     "watchdog": None,
 }

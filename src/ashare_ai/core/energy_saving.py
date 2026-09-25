@@ -2,8 +2,8 @@
 
 After the daily research run completes and the market is closed, the system may
 enter a low-activity state: workers stop per-second queue polling, publish
-``energy_saving`` heartbeats, and the host-side topology controller may stop the
-optional services (searxng, idle workers) for the night.  The API, scheduler,
+``energy_saving`` heartbeats, and the host-side runtime may stop the optional
+services (idle workers) for the night. The API, scheduler,
 PostgreSQL and Redis stay up, so reads, auth and on-demand re-enable keep
 working.
 

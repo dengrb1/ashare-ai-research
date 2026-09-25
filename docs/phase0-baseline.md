@@ -27,7 +27,7 @@ The ashare-ai-src repository is already a **pure research system** with no live 
 - **Cache/Queue**: Redis (in compose.yaml)
 - **Workers**: 
   - `job-worker` (serial, 700MB limit)
-  - Optional `research-worker` (DUAL profile)
+  - Single `job-worker` for all research queues
   - Optional `backtest-worker` (parallel-workers profile)
   - Optional `worker` (parallel-workers profile)
 

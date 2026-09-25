@@ -10,13 +10,12 @@ API 端点扩展 - 模型管理。
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
-from ashare_ai.core.config import load_config
-from ashare_ai.gui.model_management import ModelManager, ModelMetadata, ModelUploadRequest
+from ashare_ai.core.config import get_settings
+from ashare_ai.gui.model_management import ModelManager, ModelMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +24,7 @@ router = APIRouter(prefix="/api/v1/decision/models", tags=["decision-models"])
 
 def _get_model_manager() -> ModelManager:
     """获取模型管理器实例"""
-    config = load_config()
+    config = get_settings()
     return ModelManager(model_dir=config.jev_model_dir)
 
 
@@ -56,7 +55,7 @@ async def get_model_details(version: str) -> ModelMetadata:
 async def upload_model(
     file: Annotated[UploadFile, File(..., description="模型文件（zip 或目录）")],
     version: Annotated[str, Form(..., description="模型版本")],
-    description: Annotated[str | None, Form(None, description="模型描述")] = None,
+    description: Annotated[str | None, Form(description="模型描述")] = None,
 ) -> ModelMetadata:
     """
     上传新模型。

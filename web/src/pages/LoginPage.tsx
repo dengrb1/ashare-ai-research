@@ -24,7 +24,7 @@ export function LoginPage() {
 
   return <div className="login-page">
     <div className="login-theme"><ThemeToggle /></div>
-    <div className="login-atmosphere"><div className="grid-glow" /><div className="market-lines" /></div>
+    <div className="login-atmosphere" aria-hidden="true"><div className="grid-glow" /><div className="market-lines" /></div>
     <section className="login-copy">
       <div className="brand login-brand"><span className="brand-mark">霁</span><div><strong>霁衡智研</strong><small>A-SHARE INTELLIGENCE</small></div></div>
       <div><span className="kicker">POINT-IN-TIME · DETERMINISTIC · AUDITABLE</span><h1>在噪声之上，<br />建立可验证的判断。</h1><p>面向 A 股研究团队的多用户投研与回测终端。实时行情与冻结快照严格隔离，每个结论都可复现、可追溯。</p></div>
@@ -33,10 +33,10 @@ export function LoginPage() {
     <section className="login-card-wrap">
       <form className="login-card" onSubmit={submit}>
         <div><span className="eyebrow">SECURE ACCESS</span><h2>登录研究终端</h2><p>仅管理员创建的内部账户可以访问</p></div>
-        <label>用户名<input autoFocus autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} placeholder="请输入用户名" required /></label>
-        <label>密码<input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="请输入密码" required /></label>
-        {error && <div className="notice error">{error}</div>}
-        <button className="primary large" disabled={submitting}>{submitting ? '正在验证…' : '进入终端'}<span>→</span></button>
+        <label htmlFor="login-username">用户名<input id="login-username" autoFocus autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} placeholder="请输入用户名" required /></label>
+        <label htmlFor="login-password">密码<input id="login-password" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="请输入密码" required /></label>
+        {error && <div className="notice error" role="alert">{error}</div>}
+        <button type="submit" className="primary large" disabled={submitting} aria-busy={submitting}>{submitting ? '正在验证…' : '进入终端'}<span aria-hidden="true">→</span></button>
         <small className="security-note">会话使用 HttpOnly Cookie · CSRF 防护 · Argon2 密码哈希</small>
       </form>
     </section>

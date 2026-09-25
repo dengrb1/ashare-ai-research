@@ -29,7 +29,7 @@ describe('login flow', () => {
     await userEvent.type(screen.getByPlaceholderText('请输入密码'), 'secure-password')
     await userEvent.click(screen.getByRole('button', { name: /进入终端/ }))
 
-    expect(await screen.findByRole('heading', { name: '全局仪表盘' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '盘面监控' })).toBeInTheDocument()
     expect(screen.getByText('v2.2.0', { selector: '.app-version' })).toBeInTheDocument()
     const loginCall = mockFetch.mock.calls.find(([url]) => String(url).endsWith('/auth/login'))
     expect(loginCall?.[1]).toMatchObject({ method: 'POST', credentials: 'include' })
@@ -37,7 +37,7 @@ describe('login flow', () => {
   })
 
   it('keeps the assets page heading when nginx redirects to a trailing slash', () => {
-    expect(titleForPathname('/assets/')).toEqual(['自选与持仓', '关注列表与个人持仓记录'])
+    expect(titleForPathname('/assets/')).toEqual(['盘面监控', '实时行情、K 线与确定性告警'])
   })
 
   it('opens and closes the mobile navigation drawer without leaving page scroll locked', async () => {
@@ -51,7 +51,7 @@ describe('login flow', () => {
     vi.stubGlobal('fetch', mockFetch)
 
     const view = render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>)
-    await waitFor(() => expect(view.container.querySelector('h1')).toHaveTextContent('全局仪表盘'))
+    await waitFor(() => expect(view.container.querySelector('h1')).toHaveTextContent('盘面监控'))
     const menuButton = view.container.querySelector<HTMLButtonElement>('.mobile-menu-button')!
     const overlay = view.container.querySelector<HTMLButtonElement>('.nav-overlay')!
 

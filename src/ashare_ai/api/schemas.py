@@ -40,58 +40,7 @@ class HealthResponse(BaseModel):
     auto_trading_enabled: bool = False
     execution_mode: str = "RESEARCH_ONLY"
     quote_bridge: dict[str, Any] | None = None
-    news_bridge: dict[str, Any] | None = None
     gateway: dict[str, Any] | None = None
-
-
-class SearchEntity(BaseModel):
-    model_config = ConfigDict(extra="allow", frozen=True)
-
-    name: str
-    code: str
-
-
-class SearchRecall(BaseModel):
-    model_config = ConfigDict(extra="allow", frozen=True)
-
-    type: str
-    desc: str
-    content: str
-
-
-class FinancialSearchResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    query: str
-    provider: str
-    upstream: str
-    mode: Literal["cli", "embedded", "direct", "ai"]
-    searched_at: datetime
-    elapsed_ms: int = Field(ge=0)
-    entities: tuple[SearchEntity, ...]
-    recalls: tuple[SearchRecall, ...]
-    raw_sha256: str = Field(min_length=64, max_length=64)
-    outcome: dict[str, Any] = Field(default_factory=dict)
-    interpretation: str = ""
-    sources: tuple[dict[str, Any], ...] = ()
-    warnings: tuple[str, ...] = ()
-    live_data_isolated_from_snapshots: bool = True
-
-
-class FinancialSearchStatus(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    provider: str
-    upstream: str
-    mode: Literal["cli", "embedded", "direct", "ai"]
-    available: bool
-    configured: bool = False
-    reachable: bool = False
-    degraded: bool = False
-    model: str | None = None
-    script_path: str | None = None
-    message: str
-    live_data_isolated_from_snapshots: bool = True
 
 
 class LoginRequest(BaseModel):
@@ -173,8 +122,6 @@ class ModelProfileSettings(BaseModel):
 class ModelSettingsRequest(BaseModel):
     base_url: str = Field(min_length=8, max_length=2048)
     api_key: str | None = Field(default=None, max_length=4096)
-    search_model: str = Field(default="gpt-5.6-luna", min_length=1, max_length=128)
-    search_reasoning_effort: str = Field(default="low", pattern=r"^(low|medium|high|xhigh)$")
     research_model: str = Field(default="gpt-5.6-sol", min_length=1, max_length=128)
     research_reasoning_effort: str = Field(default="high", pattern=r"^(low|medium|high|xhigh)$")
     model_profiles: list[ModelProfileSettings] = Field(default_factory=list, max_length=32)
@@ -195,8 +142,6 @@ class ModelSettingsResponse(BaseModel):
     provider: str
     base_url: str
     api_key_configured: bool
-    search_model: str
-    search_reasoning_effort: str
     research_model: str
     research_reasoning_effort: str
     model_profiles: list[ModelProfileSettings] = Field(default_factory=list)
@@ -243,24 +188,23 @@ class ModelListResponse(BaseModel):
 class SystemSettingsRequest(BaseModel):
     """Partial admin update; omitted fields retain their active override."""
 
-    research_execution_mode: Literal["SERIAL", "DUAL"] | None = None
-    edge_gateway_enabled: bool | None = None
-    edge_domain: str | None = Field(default=None, max_length=253)
-    edge_acme_email: str | None = Field(default=None, max_length=320)
-    edge_acme_ca_server: str | None = Field(default=None, min_length=1, max_length=128)
-    edge_frpc_enabled: bool | None = None
-    edge_frpc_config_file: str | None = Field(default=None, min_length=1, max_length=1024)
     auto_restart_enabled: bool | None = None
     llm_agent_max_concurrency: int | None = Field(default=None, ge=1, le=4)
+    jev_confidence_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    decision_system2_enabled: bool | None = None
+    jev_model_version: str | None = Field(default=None, min_length=1, max_length=128)
+    jev_backend: Literal["local", "live"] | None = None
+    jev_live_base_url: str | None = Field(default=None, max_length=2048)
+    jev_live_model: str | None = Field(default=None, min_length=1, max_length=128)
+    jev_live_endpoint: str | None = Field(default=None, pattern=r"^/[^\s]+$", max_length=256)
+    jev_live_timeout_seconds: float | None = Field(default=None, gt=0, le=120)
+    jev_live_api_key: str | None = Field(default=None, min_length=1, max_length=4096)
     object_store_endpoint: str | None = Field(default=None, max_length=2048)
     object_store_bucket: str | None = Field(default=None, min_length=1, max_length=255)
     object_store_secure: bool | None = None
     tushare_token: str | None = Field(default=None, min_length=1, max_length=4096)
     object_store_access_key: str | None = Field(default=None, min_length=1, max_length=4096)
     object_store_secret_key: str | None = Field(default=None, min_length=1, max_length=4096)
-    searxng_base_url: str | None = Field(default=None, min_length=8, max_length=2048)
-    searxng_timeout_seconds: float | None = Field(default=None, gt=0, le=60)
-    searxng_max_results: int | None = Field(default=None, ge=1, le=10)
     market_cache_seconds: int | None = Field(default=None, ge=1, le=300)
     market_kline_cache_seconds: int | None = Field(default=None, ge=15, le=3600)
     market_prefetch_max_workers: int | None = Field(default=None, ge=1, le=16)
@@ -273,9 +217,6 @@ class SystemSettingsRequest(BaseModel):
     api_runtime_mode: Literal["LIGHTWEIGHT", "SUPREME"] | None = None
     api_runtime_auto_close: bool | None = None
     energy_saving_enabled: bool | None = None
-    financial_search_cache_seconds: int | None = Field(default=None, ge=0, le=300)
-    financial_search_max_concurrency: int | None = Field(default=None, ge=1, le=32)
-    financial_search_rate_limit_per_minute: int | None = Field(default=None, ge=1, le=600)
     daily_research_start_hour: int | None = Field(default=None, ge=0, le=23)
     daily_research_start_minute: int | None = Field(default=None, ge=0, le=59)
     daily_research_retry_minutes: int | None = Field(default=None, ge=1, le=60)
@@ -307,72 +248,11 @@ class SystemSettingsUnlockResponse(BaseModel):
     expires_at: datetime
 
 
-class EdgeProxyHost(BaseModel):
-    id: str | None = None
-    name: str = Field(min_length=1, max_length=80)
-    domains: list[str] = Field(min_length=1, max_length=8)
-    forward_scheme: Literal["http", "https"] = "http"
-    forward_host: str = Field(min_length=1, max_length=253)
-    forward_port: int = Field(default=80, ge=1, le=65535)
-    ssl_enabled: bool = True
-    websocket_support: bool = True
-    enabled: bool = True
-    notes: str = Field(default="", max_length=240)
-
-
-class EdgeGatewayConfigurationRequest(BaseModel):
-    enabled: bool = False
-    validation_mode: Literal["STRICT", "COMPATIBLE"] = "STRICT"
-    proxy_hosts: list[EdgeProxyHost] = Field(default_factory=list, max_length=32)
-    frpc_toml: str = Field(default="", max_length=65536)
-
-
-class EdgeGatewayValidateRequest(BaseModel):
-    validation_mode: Literal["STRICT", "COMPATIBLE"] = "STRICT"
-    proxy_hosts: list[EdgeProxyHost] = Field(default_factory=list, max_length=32)
-    frpc_toml: str = Field(default="", max_length=65536)
-
-
-class EdgeGatewayConfigurationResponse(BaseModel):
-    configuration_id: str | None = None
-    version: int
-    enabled: bool
-    validation_mode: Literal["STRICT", "COMPATIBLE"] = "STRICT"
-    proxy_hosts: list[EdgeProxyHost] = Field(default_factory=list)
-    frpc_toml: str = ""
-    config_sha256: str | None = None
-    apply_status: str
-    apply_message: str | None = None
-    applied_at: datetime | None = None
-    applied_sha256: str | None = None
-    source_sync: bool = False
-
-
-class EdgeGatewayValidationResponse(BaseModel):
-    valid: bool = True
-    nginx_sha256: str
-    proxy_count: int
-
-
-class EdgeGatewayLogsResponse(BaseModel):
-    available: bool
-    message: str
-    lines: list[str] = Field(default_factory=list)
-    updated_at: datetime | None = None
-
-
-class EdgeGatewayAppliedRequest(BaseModel):
-    configuration_id: str
-    sha256: str = Field(min_length=64, max_length=64)
-    status: Literal["APPLIED", "FAILED"]
-    message: str | None = Field(default=None, max_length=500)
-
-
 class WorkerHealthResponse(BaseModel):
     worker_id: str
     role: str
     healthy: bool
-    loaded_mode: Literal["SERIAL", "DUAL", "UNKNOWN"] = "UNKNOWN"
+    loaded_mode: Literal["SERIAL", "UNKNOWN"] = "UNKNOWN"
     topology_sha256: str | None = None
     last_heartbeat_at: datetime | None = None
     memory_used_bytes: int | None = Field(default=None, ge=0)
@@ -397,7 +277,7 @@ class SystemSettingsResponse(BaseModel):
     secret_sources: dict[str, Literal["database", "environment"]]
     read_only_environment: dict[str, Any]
     topology_sha256: str
-    actual_loaded_mode: Literal["SERIAL", "DUAL", "UNKNOWN"] = "UNKNOWN"
+    actual_loaded_mode: Literal["SERIAL", "UNKNOWN"] = "UNKNOWN"
     restart_required: bool
     workers: list[WorkerHealthResponse] = Field(default_factory=list)
     queues: dict[str, QueueSummaryResponse] = Field(default_factory=dict)
@@ -478,9 +358,9 @@ class ServiceResourceResponse(BaseModel):
     collected_at: datetime | None = None
 
 
-class DualMemoryEstimateResponse(BaseModel):
+class WorkerMemoryEstimateResponse(BaseModel):
     worker_replicas: int = Field(ge=1)
-    estimate_source: Literal["research-worker", "job-worker", "fallback"]
+    estimate_source: Literal["job-worker", "fallback"]
     typical_per_worker_bytes: int = Field(ge=0)
     typical_increment_bytes: int = Field(ge=0)
     maximum_increment_bytes: int = Field(ge=0)
@@ -497,7 +377,7 @@ class SystemResourcesResponse(BaseModel):
     cpu: CpuMetricResponse
     disk: ResourceMetricResponse
     services: list[ServiceResourceResponse] = Field(default_factory=list)
-    topology_estimate: DualMemoryEstimateResponse
+    topology_estimate: WorkerMemoryEstimateResponse
     level: Literal["NORMAL", "WARNING", "CRITICAL"]
     warnings: list[str] = Field(default_factory=list)
 
@@ -912,10 +792,29 @@ class AIChatSendRequest(BaseModel):
     content: str = Field(min_length=1, max_length=8000)
     model: str = Field(min_length=1, max_length=128)
     reasoning_effort: Literal["low", "medium", "high", "xhigh"] = "medium"
-    web_search: bool = True
     attachment_ids: list[str] = Field(default_factory=list, max_length=4)
     mention_refs: list[AIChatMentionRef] = Field(default_factory=list, max_length=5)
     decision_at: datetime | None = None
+    web_search: bool = False
+
+
+class WebSearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=256)
+    max_results: int = Field(default=5, ge=1, le=5)
+
+
+class WebSearchItem(BaseModel):
+    title: str
+    url: str
+    snippet: str = ""
+    engine: str
+    published_at: str | None = None
+
+
+class WebSearchResponse(BaseModel):
+    items: list[WebSearchItem] = Field(default_factory=list)
+    status: dict[str, Any] = Field(default_factory=dict)
+    cache_hit: bool = False
 
 
 class AIChatAttachmentResponse(OrmResponse):
@@ -958,8 +857,29 @@ class PersonalArchiveJobResponse(OrmResponse):
 class AIModelOptionsResponse(BaseModel):
     models: list[str]
     reasoning_efforts: list[Literal["low", "medium", "high", "xhigh"]]
-    web_search_available: bool
     cache_enabled: bool = True
+
+
+class MonitorSignalResponse(BaseModel):
+    """A PIT validated deterministic alert for the monitor surface."""
+
+    symbol: str
+    trading_date: date
+    available_at: datetime
+    decision_at: datetime
+    signal_type: Literal[
+        "INTRADAY_DROP", "VOLUME_BREAKOUT", "VOLUME_PRICE_DIVERGENCE", "MA_DEATH_CROSS"
+    ]
+    severity: Literal["LOW", "MEDIUM", "HIGH"]
+    confidence: float = Field(ge=0, le=1)
+    evidence: dict[str, Any]
+    threshold_version: str
+
+
+class MonitorSignalsResponse(BaseModel):
+    items: list[MonitorSignalResponse] = Field(default_factory=list)
+    generated_at: datetime
+    decision_at: datetime
 
 
 class AppCapabilitiesResponse(BaseModel):
@@ -1384,12 +1304,6 @@ class SnapshotResponse(OrmResponse):
     details: dict[str, Any]
 
 
-class ReportBodyResponse(BaseModel):
-    report_id: str
-    content_type: str
-    content: str
-
-
 class MarketSessionStatus(BaseModel):
     state: Literal["OPEN", "PRE_OPEN", "BREAK", "CLOSED", "UNKNOWN"]
     as_of: datetime
@@ -1482,7 +1396,8 @@ class ReportResponse(OrmResponse):
     run_id: str
     trading_date: date
     report_type: str
-    object_uri: str
-    content_sha256: str
+    result: dict[str, Any] = Field(default_factory=dict)
+    object_uri: str | None = None
+    content_sha256: str | None = None
     created_at: datetime
     market_index_snapshot: MarketIndexSnapshot | None = None

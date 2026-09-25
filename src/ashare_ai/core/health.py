@@ -1,22 +1,19 @@
-"""Infrastructure health check for Gateway and Bridge services."""
+"""Infrastructure health check for the model gateway and quote bridge."""
 
 from __future__ import annotations
 
 import logging
 from typing import Any
 
-import httpx
-
 from ashare_ai.agents.gateway_client import get_gateway_client
 from ashare_ai.core.config import Settings
-from ashare_ai.market.news_bridge_client import get_news_bridge_client
 from ashare_ai.market.quote_bridge_client import get_quote_bridge_client
 
 logger = logging.getLogger(__name__)
 
 
 def check_infrastructure_health(settings: Settings) -> dict[str, dict[str, Any]]:
-    """Check health status of Gateway, Quote Bridge, and News Bridge.
+    """Check health status of Gateway and Quote Bridge.
 
     Returns:
         Dictionary with service status, each containing:
@@ -40,23 +37,6 @@ def check_infrastructure_health(settings: Settings) -> dict[str, dict[str, Any]]
             result["quote_bridge"] = {
                 "status": "unavailable",
                 "url": settings.quote_bridge_url,
-                "error": str(exc),
-            }
-
-    # Check News Bridge using the client
-    if settings.news_bridge_enabled:
-        try:
-            client = get_news_bridge_client(settings)
-            is_healthy = client.health()
-            result["news_bridge"] = {
-                "status": "ok" if is_healthy else "unavailable",
-                "url": settings.news_bridge_url,
-            }
-            client.close()
-        except Exception as exc:
-            result["news_bridge"] = {
-                "status": "unavailable",
-                "url": settings.news_bridge_url,
                 "error": str(exc),
             }
 

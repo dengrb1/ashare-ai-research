@@ -4,10 +4,6 @@ param(
     [string]$Command = "status",
     [string]$Root,
     [string]$SourceRoot,
-    [ValidateSet("SERIAL", "DUAL")]
-    [string]$ResearchMode = "SERIAL",
-    [ValidateRange(0, 2)]
-    [int]$ResearchWorkers = 0,
     [ValidateRange(5, 300)]
     [int]$WatchdogIntervalSeconds = 10,
     [switch]$Json,
@@ -22,7 +18,6 @@ $script:NativeVersion = "2026.08.06.3"
 $script:PostgresPort = 55432
 $script:RedisPort = 56379
 $script:ApiPort = 58000
-$script:SearxngPort = 58080
 $script:ScriptRoot = (Resolve-Path $PSScriptRoot).Path
 $script:SourceRoot = if ($SourceRoot) {
     (Resolve-Path $SourceRoot).Path
@@ -228,7 +223,6 @@ function Get-NativePortCandidates([string]$role) {
         "postgres" { return @(55432, 55433, 55434, 55600, 55601, 55602) }
         "redis" { return @(56379, 56380, 56381, 55610, 55611) }
         "api" { return @(58000, 58001, 58002, 55620, 55621) }
-        "searxng" { return @(58080, 58081, 58082, 55630, 55631) }
         default { throw "unknown native port role: $role" }
     }
 }
@@ -238,7 +232,6 @@ function Write-NativePortConfig {
         postgres = $script:PostgresPort
         redis = $script:RedisPort
         api = $script:ApiPort
-        searxng = $script:SearxngPort
     }
     Write-AtomicText $script:PortsPath ($ports | ConvertTo-Json -Depth 5)
     $pathsFile = Join-Path $script:Root "config\native-paths.json"
@@ -247,7 +240,6 @@ function Write-NativePortConfig {
         $paths.postgres_port = $script:PostgresPort
         $paths.redis_port = $script:RedisPort
         $paths.api_port = $script:ApiPort
-        $paths.searxng_port = $script:SearxngPort
         Write-AtomicText $pathsFile ($paths | ConvertTo-Json -Depth 8)
     }
 }
@@ -260,8 +252,6 @@ function Update-NativeEnvPorts {
             [regex]::Replace($line, "@127\.0\.0\.1:\d+/", "@127.0.0.1:$script:PostgresPort/")
         } elseif ($line -like "REDIS_URL=*") {
             [regex]::Replace($line, "@127\.0\.0\.1:\d+/", "@127.0.0.1:$script:RedisPort/")
-        } elseif ($line -like "SEARXNG_BASE_URL=*") {
-            [regex]::Replace($line, "127\.0\.0\.1:\d+", "127.0.0.1:$script:SearxngPort")
         } else {
             $line
         }
@@ -339,11 +329,10 @@ function Reconcile-NativePorts {
         postgres = $script:PostgresPort
         redis = $script:RedisPort
         api = $script:ApiPort
-        searxng = $script:SearxngPort
     }
     $used = @()
     $selected = [ordered]@{}
-    foreach ($role in @("postgres", "redis", "api", "searxng")) {
+    foreach ($role in @("postgres", "redis", "api")) {
         $port = [int]$current[$role]
         $free = ($used -notcontains $port) -and (@(Get-ListeningProcessIds $port).Count -eq 0) -and (Test-NativePortAvailable $port)
         if ($free) {
@@ -356,18 +345,16 @@ function Reconcile-NativePorts {
     }
     $changed = ($selected.postgres -ne $script:PostgresPort -or
         $selected.redis -ne $script:RedisPort -or
-        $selected.api -ne $script:ApiPort -or
-        $selected.searxng -ne $script:SearxngPort)
+        $selected.api -ne $script:ApiPort)
     $script:PostgresPort = [int]$selected.postgres
     $script:RedisPort = [int]$selected.redis
     $script:ApiPort = [int]$selected.api
-    $script:SearxngPort = [int]$selected.searxng
     if ($changed) {
         Update-NativeEnvPorts
         Write-NativePortConfig
         Write-NativeEvent "persisted a new conflict-free native port set" "WARN"
     }
-    foreach ($port in @($script:PostgresPort, $script:RedisPort, $script:ApiPort, $script:SearxngPort)) {
+    foreach ($port in @($script:PostgresPort, $script:RedisPort, $script:ApiPort)) {
         Assert-NativePortFree $port
     }
 }
@@ -378,26 +365,24 @@ function Initialize-NativePorts {
         try { $existing = Get-Content -Raw -LiteralPath $script:PortsPath | ConvertFrom-Json } catch { $existing = $null }
     }
     $existingPorts = @()
-    if ($existing -and $existing.postgres -and $existing.redis -and $existing.api -and $existing.searxng) {
-        $existingPorts = @([int]$existing.postgres, [int]$existing.redis, [int]$existing.api, [int]$existing.searxng)
+    if ($existing -and $existing.postgres -and $existing.redis -and $existing.api) {
+        $existingPorts = @([int]$existing.postgres, [int]$existing.redis, [int]$existing.api)
     }
-    $existingUsable = $existingPorts.Count -eq 4 -and
+    $existingUsable = $existingPorts.Count -eq 3 -and
         (@($existingPorts | Where-Object { $_ -le 0 -or @(Get-ListeningProcessIds $_).Count -gt 0 -or -not (Test-NativePortAvailable $_) }).Count -eq 0) -and
-        (@($existingPorts | Select-Object -Unique).Count -eq 4)
+        (@($existingPorts | Select-Object -Unique).Count -eq 3)
     if ($existingUsable) {
         $script:PostgresPort = [int]$existing.postgres
         $script:RedisPort = [int]$existing.redis
         $script:ApiPort = [int]$existing.api
-        $script:SearxngPort = [int]$existing.searxng
         return
     }
-    if ($existingPorts.Count -eq 4) {
+    if ($existingPorts.Count -eq 3) {
         Write-NativeEvent "saved native ports are occupied; selecting a new port set" "WARN"
     }
     $script:PostgresPort = Select-NativePort @(55432, 55433, 55434, 55600, 55601, 55602)
     $script:RedisPort = Select-NativePort @(56379, 56380, 56381, 55610, 55611) @($script:PostgresPort)
     $script:ApiPort = Select-NativePort @(58000, 58001, 58002, 55620, 55621) @($script:PostgresPort, $script:RedisPort)
-    $script:SearxngPort = Select-NativePort @(58080, 58081, 58082, 55630, 55631) @($script:PostgresPort, $script:RedisPort, $script:ApiPort)
 }
 
 function Get-ArtifactChecksum($artifact) {
@@ -452,40 +437,6 @@ function Expand-VerifiedArtifact($artifact, [string]$archivePath) {
         New-Item -ItemType Directory -Force -Path $destination | Out-Null
         Expand-Archive -LiteralPath $archivePath -DestinationPath $destination -Force
     }
-    return $destination
-}
-
-function Install-Searxng($artifact) {
-    if (-not $artifact.commit -or -not $artifact.archive_url -or -not $artifact.sha256) { throw "SearXNG artifact lock is incomplete" }
-    $destination = Join-Path $script:Root ("deps\searxng\{0}" -f $artifact.version)
-    $archivePath = Join-Path $script:Root ("downloads\searxng-{0}.zip" -f $artifact.version)
-    $bundledArchive = Join-Path $script:SourceRoot "vendor\searxng.zip"
-    if (-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) {
-        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $archivePath) | Out-Null
-        if (Test-Path -LiteralPath $bundledArchive -PathType Leaf) { Copy-Item -Force -LiteralPath $bundledArchive -Destination $archivePath }
-        else { Invoke-WebRequest -UseBasicParsing -Uri $artifact.archive_url -OutFile $archivePath }
-    }
-    $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash
-    if (-not $actualHash.Equals([string]$artifact.sha256, [StringComparison]::OrdinalIgnoreCase)) { throw "SearXNG archive checksum mismatch: expected $($artifact.sha256), got $actualHash" }
-    if (Test-Path -LiteralPath $destination) { Remove-Item -Recurse -Force -LiteralPath $destination }
-    New-Item -ItemType Directory -Force -Path $destination | Out-Null
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $zip = [IO.Compression.ZipFile]::OpenRead($archivePath)
-    $destinationRoot = ([IO.Path]::GetFullPath($destination)).TrimEnd("\") + "\"
-    try {
-        foreach ($entry in $zip.Entries) {
-            $parts = $entry.FullName -split "/", 2
-            if ($parts.Count -lt 2) { continue }
-            $relative = $parts[1]
-            if ([string]::IsNullOrWhiteSpace($relative) -or $relative -eq "utils" -or $relative.StartsWith("utils/")) { continue }
-            $target = [IO.Path]::GetFullPath((Join-Path $destination $relative.Replace("/", "\")))
-            if (-not $target.StartsWith($destinationRoot, [StringComparison]::OrdinalIgnoreCase)) { throw "SearXNG archive path escapes destination: $relative" }
-            if ($entry.FullName.EndsWith("/")) { New-Item -ItemType Directory -Force -Path $target | Out-Null }
-            else { New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null; [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true) }
-        }
-    } finally { $zip.Dispose() }
-    if (-not (Test-Path -LiteralPath (Join-Path $destination "setup.py") -PathType Leaf) -or -not (Test-Path -LiteralPath (Join-Path $destination "searx\__init__.py") -PathType Leaf)) { throw "SearXNG runtime source extraction is incomplete" }
-    @("import getpass", "import os", "", "class _PasswdEntry:", "    def __init__(self, name, uid):", "        self.pw_name = name", "        self.pw_uid = uid", "", "def getpwuid(uid):", "    return _PasswdEntry(getpass.getuser() or os.environ.get('USERNAME', 'unknown'), uid)") | Set-Content -LiteralPath (Join-Path $destination "pwd.py") -Encoding ASCII
     return $destination
 }
 
@@ -791,7 +742,6 @@ function Write-NativeEnv([string]$postgresPassword, [string]$redisPassword, [str
     $postgresPort = $script:PostgresPort
     $redisPort = $script:RedisPort
     $apiPort = $script:ApiPort
-    $searxngPort = $script:SearxngPort
     $envText = @"
 APP_ENV=development
 DATABASE_URL=postgresql+psycopg://ashare:$postgresPassword@127.0.0.1:$postgresPort/ashare
@@ -801,7 +751,6 @@ PRIVATE_OBJECT_ROOT=$($script:Root.Replace('\', '/'))/data/private
 POLICY_CONFIG_PATH=$($script:Root.Replace('\', '/'))/configs/first_release.v3.json
 DEPENDENCY_LOCK_PATH=$($script:Root.Replace('\', '/'))/requirements.lock
 NATIVE_WEB_ROOT=$($script:Root.Replace('\', '/'))/web
-SEARXNG_BASE_URL=http://127.0.0.1:$searxngPort
 TRUSTED_HOSTS=127.0.0.1,localhost
 WEB_BIND_ADDRESS=127.0.0.1
 ADMIN_USERNAME=$AdminUsername
@@ -824,32 +773,6 @@ PYTHONUNBUFFERED=1
     [System.IO.File]::WriteAllText((Join-Path $script:Root "config\postgres-password.txt"), $postgresPassword, $utf8NoBom)
     [System.IO.File]::WriteAllText((Join-Path $script:Root "config\redis-password.txt"), $redisPassword, $utf8NoBom)
     [System.IO.File]::WriteAllText((Join-Path $script:Root "config\admin-credentials.txt"), ("username=$AdminUsername`npassword=$adminPassword"), $utf8NoBom)
-}
-
-function Write-NativeSearxSettings([string]$redisPassword) {
-    $settingsPath = Join-Path $script:Root "config\searxng-settings.yml"
-    $settings = @"
-use_default_settings: true
-
-server:
-  secret_key: "ashare-internal-search-no-public-session-v1"
-  limiter: false
-  image_proxy: false
-  bind_address: 127.0.0.1
-  port: $script:SearxngPort
-
-valkey:
-  url: "redis://:$redisPassword@127.0.0.1:$script:RedisPort/0"
-
-search:
-  safe_search: 1
-  formats:
-    - html
-    - json
-"@
-    # UTF-8 without BOM: Set-Content -Encoding UTF8 would prepend a BOM and PyYAML
-    # would parse the first key as "﻿use_default_settings".
-    [System.IO.File]::WriteAllText($settingsPath, $settings, [System.Text.UTF8Encoding]::new($false))
 }
 
 function Invoke-NativePython([string[]]$arguments) {
@@ -937,13 +860,12 @@ function Get-NativePortsFromFile {
     if (-not (Test-Path -LiteralPath $script:PortsPath -PathType Leaf)) { return $false }
     try {
         $ports = Get-Content -Raw -LiteralPath $script:PortsPath | ConvertFrom-Json
-        if (-not $ports.postgres -or -not $ports.redis -or -not $ports.api -or -not $ports.searxng) {
+        if (-not $ports.postgres -or -not $ports.redis -or -not $ports.api) {
             return $false
         }
         $script:PostgresPort = [int]$ports.postgres
         $script:RedisPort = [int]$ports.redis
         $script:ApiPort = [int]$ports.api
-        $script:SearxngPort = [int]$ports.searxng
         return $true
     } catch {
         return $false
@@ -970,7 +892,6 @@ function Get-NativeServicePort([string]$role) {
         "postgres" { return $script:PostgresPort }
         "redis" { return $script:RedisPort }
         "api" { return $script:ApiPort }
-        "searxng" { return $script:SearxngPort }
         default { return 0 }
     }
 }
@@ -991,10 +912,6 @@ function Test-NativeServiceHealthy($service, $services) {
         switch ([string]$service.role) {
             "api" {
                 $response = Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 -Uri "http://127.0.0.1:$script:ApiPort/api/v1/health"
-                return $response.StatusCode -eq 200
-            }
-            "searxng" {
-                $response = Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 -Uri "http://127.0.0.1:$script:SearxngPort/healthz"
                 return $response.StatusCode -eq 200
             }
             "postgres" {
@@ -1393,7 +1310,6 @@ function Invoke-Install {
     if ($manifest.platform -ne "windows-amd64") { throw "unsupported native dependency platform" }
     $postgres = $manifest.artifacts | Where-Object id -eq "postgres"
     $redis = $manifest.artifacts | Where-Object id -eq "redis-compatible"
-    $searxng = $manifest.artifacts | Where-Object id -eq "searxng"
     $postgresArchive = Get-VerifiedArchive $postgres
     $redisArchive = Get-VerifiedArchive $redis
     $postgresRoot = Expand-VerifiedArtifact $postgres $postgresArchive
@@ -1450,20 +1366,6 @@ function Invoke-Install {
     if ($LASTEXITCODE -ne 0) { throw "native Python dependency installation failed" }
     & $venvPython -m pip install --no-deps $script:SourceRoot
     if ($LASTEXITCODE -ne 0) { throw "native application installation failed" }
-    $searxngRoot = Install-Searxng $searxng
-    $gitConfigPath = Join-Path $script:Root "config\gitconfig"
-    @"
-[safe]
-    directory = $($searxngRoot.Replace('\', '/'))
-"@ | Set-Content -LiteralPath $gitConfigPath -Encoding ASCII
-    $searxRequirements = Get-ChildItem -LiteralPath $searxngRoot -File -Filter "requirements*.txt" -ErrorAction SilentlyContinue
-    foreach ($requirements in $searxRequirements) {
-        & $venvPython -m pip install --requirement $requirements.FullName
-        if ($LASTEXITCODE -ne 0) { throw "SearXNG dependency installation failed: $($requirements.Name)" }
-    }
-    $searxngImportPath = $searxngRoot.Replace("\", "/")
-    & $venvPython -c "import sys; sys.path.insert(0, '$searxngImportPath'); import searx"
-    if ($LASTEXITCODE -ne 0) { throw "SearXNG source import validation failed" }
     $prebuiltWeb = Join-Path $script:SourceRoot "web\dist"
     if (Test-Path -LiteralPath (Join-Path $prebuiltWeb "index.html") -PathType Leaf) {
         $runtimeWeb = Join-Path $script:Root "web"
@@ -1500,14 +1402,12 @@ function Invoke-Install {
     Write-AtomicText (Join-Path $script:Root "config\native-paths.json") (([ordered]@{
         postgres_bin = $postgresBin
         redis_bin = $redisBin
-        searxng_root = $searxngRoot
         python_exe = $pythonExecutablePath
         pythonw_exe = $pythonwPath
         python_site_packages = $pythonSitePackages
         postgres_port = $script:PostgresPort
         redis_port = $script:RedisPort
         api_port = $script:ApiPort
-        searxng_port = $script:SearxngPort
         version = $script:NativeVersion
     } | ConvertTo-Json -Depth 8))
     Write-NativePortConfig
@@ -1658,40 +1558,16 @@ function Invoke-StartCore([switch]$ForWatchdog) {
         Wait-RedisReady $redisCli $redisPassword
         Assert-NativePortOwned $script:RedisPort $services
         Invoke-NativePython @("-m", "ashare_ai.cli", "migrate")
-        Write-NativeSearxSettings $redisPassword
-        $searxEnv = @{}
-        foreach ($key in $envValues.Keys) { $searxEnv[$key] = $envValues[$key] }
-        $searxEnv.SEARXNG_SETTINGS_PATH = (Join-Path $script:Root "config\searxng-settings.yml")
-        $searxEnv.SEARXNG_BASE_URL = "http://127.0.0.1:$script:SearxngPort/"
-        $searxEnv.GIT_CONFIG_GLOBAL = (Join-Path $script:Root "config\gitconfig")
-        $searxPython = $pythonWindowlessExecutable
-        Assert-NativePortFree $script:SearxngPort
-        $services += Start-ManagedProcess "searxng" $searxPython @("-m", "searx.webapp") $paths.searxng_root $searxEnv "searxng" $null $serviceCredential
-        Write-NativeEvent "searxng process started pid=$($services[-1].pid)"
-        Wait-NativeHttp "http://127.0.0.1:$script:SearxngPort/healthz"
-        Assert-NativePortOwned $script:SearxngPort $services
         $apiEnv = @{}
         foreach ($key in $envValues.Keys) { $apiEnv[$key] = $envValues[$key] }
         $apiEnv.ASHARE_NATIVE_WEB_ROOT = (Join-Path $script:Root "web")
-        $apiEnv.EDGE_GATEWAY_SOURCE_DIR = (Join-Path $script:Root "config\edge-gateway")
-        $apiEnv.EDGE_GATEWAY_HOST_SOURCE_DIR = (Join-Path $script:Root "config\edge-gateway")
-        $apiEnv.EDGE_GATEWAY_CONFIG_DIR = (Join-Path $script:Root "config\edge-gateway")
-        $apiEnv.EDGE_GATEWAY_LOG_DIR = (Join-Path $script:Root "logs\edge-gateway")
-        New-Item -ItemType Directory -Force -Path $apiEnv.EDGE_GATEWAY_SOURCE_DIR | Out-Null
-        New-Item -ItemType Directory -Force -Path $apiEnv.EDGE_GATEWAY_LOG_DIR | Out-Null
         Assert-NativePortFree $script:ApiPort
-        $services += Start-ManagedProcess "api" $searxPython @("-m", "ashare_ai.cli", "api", "--host", "127.0.0.1", "--port", "$script:ApiPort") $script:Root $apiEnv "api" $null $serviceCredential
+        $services += Start-ManagedProcess "api" $pythonWindowlessExecutable @("-m", "ashare_ai.cli", "api", "--host", "127.0.0.1", "--port", "$script:ApiPort") $script:Root $apiEnv "api" $null $serviceCredential
         Write-NativeEvent "api process started pid=$($services[-1].pid)"
         Wait-NativeHttp "http://127.0.0.1:$script:ApiPort/api/v1/health"
         Assert-NativePortOwned $script:ApiPort $services
         $services += [pscustomobject]@{ name = "web"; role = "web"; pid = $services[-1].pid; embedded_in = "api"; started_at = [DateTime]::UtcNow.ToString("o") }
-        $services += Start-ManagedProcess "job-worker" $searxPython @("-m", "ashare_ai.orchestration.serial_worker") $script:Root $envValues "job-worker" $null $serviceCredential
-        $services += Start-ManagedProcess "exit-advice-worker" $searxPython @("-m", "ashare_ai.orchestration.exit_advice_worker") $script:Root $envValues "exit-advice-worker" $null $serviceCredential
-        if ($ResearchMode -eq "DUAL" -and $ResearchWorkers -gt 0) {
-            for ($index = 1; $index -le $ResearchWorkers; $index++) {
-                $services += Start-ManagedProcess ("research-worker-{0}" -f $index) $searxPython @("-m", "ashare_ai.orchestration.research_worker") $script:Root $envValues "research-worker" $null $serviceCredential
-            }
-        }
+        $services += Start-ManagedProcess "job-worker" $pythonWindowlessExecutable @("-m", "ashare_ai.orchestration.serial_worker") $script:Root $envValues "job-worker" $null $serviceCredential
         Write-State $services
         Write-NativeEvent "native process group is healthy"
     } catch {
@@ -1892,7 +1768,6 @@ function Invoke-Status {
         postgres = $script:PostgresPort
         redis = $script:RedisPort
         api = $script:ApiPort
-        searxng = $script:SearxngPort
     })
     $report | Add-Member -NotePropertyName watchdog_task -NotePropertyValue $task
     $report | Add-Member -NotePropertyName watchdog -NotePropertyValue $watchdog
@@ -1902,7 +1777,7 @@ function Invoke-Status {
     if ($services.Count -eq 0) { Write-Host "Native runtime is stopped"; return }
     $report.services | Format-Table service, role, pid, healthy, working_set_mib, embedded_in -AutoSize
     Write-Host ("Desired state: {0}; health: {1}" -f $report.desired_state, $report.runtime_healthy)
-    Write-Host ("Ports: postgres={0}, redis={1}, api={2}, searxng={3}" -f $script:PostgresPort, $script:RedisPort, $script:ApiPort, $script:SearxngPort)
+    Write-Host ("Ports: postgres={0}, redis={1}, api={2}" -f $script:PostgresPort, $script:RedisPort, $script:ApiPort)
     $watchdogStatus = if ($watchdog) { $watchdog.status } else { "MISSING" }
     Write-Host ("Watchdog task: {0} ({1}); process: {2}" -f $task.task_name, $task.state, $watchdogStatus)
     Write-Host ("Identity mode: {0}" -f $report.identity_mode)
@@ -1920,8 +1795,8 @@ function Invoke-Doctor {
     $checks += [pscustomobject]@{ check = "watchdog-task"; status = if ($task.registered) { "PASS" } else { "FAIL" }; detail = $task.task_name }
     $checks += [pscustomobject]@{ check = "desired-state"; status = if ((Get-NativeDesiredState) -in @("RUNNING", "STOPPED")) { "PASS" } else { "FAIL" }; detail = (Get-NativeDesiredState) }
     $portsReady = Get-NativePortsFromFile
-    $portValues = @($script:PostgresPort, $script:RedisPort, $script:ApiPort, $script:SearxngPort)
-    $checks += [pscustomobject]@{ check = "port-configuration"; status = if ($portsReady -and (@($portValues | Select-Object -Unique).Count -eq 4)) { "PASS" } else { "FAIL" }; detail = ($portValues -join ",") }
+    $portValues = @($script:PostgresPort, $script:RedisPort, $script:ApiPort)
+    $checks += [pscustomobject]@{ check = "port-configuration"; status = if ($portsReady -and (@($portValues | Select-Object -Unique).Count -eq 3)) { "PASS" } else { "FAIL" }; detail = ($portValues -join ",") }
     $checks += [pscustomobject]@{ check = "docker-wsl-processes"; status = if (@(Get-Process -Name "docker*","wsl*" -ErrorAction SilentlyContinue).Count -eq 0) { "PASS" } else { "WARN" }; detail = "native entry does not start Docker or WSL" }
     if ($Json) { $checks | ConvertTo-Json -Depth 5; return }
     $checks | Format-Table check, status, detail -AutoSize

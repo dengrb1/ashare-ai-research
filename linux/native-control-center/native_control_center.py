@@ -11,7 +11,7 @@ import threading
 import webbrowser
 from contextlib import suppress
 from pathlib import Path
-from tkinter import BooleanVar, IntVar, StringVar, Tk, filedialog, messagebox, ttk
+from tkinter import BooleanVar, StringVar, Tk, filedialog, messagebox, ttk
 
 try:
     import fcntl
@@ -203,9 +203,6 @@ class ControlCenter:
         self.controller = controller
         self.source_root = source_root
         self.runtime_root = StringVar(value=str(runtime_root))
-        self.research_mode = StringVar(value="SERIAL")
-        self.research_workers = IntVar(value=0)
-        self.watchdog_interval = IntVar(value=10)
         self.auto_refresh = BooleanVar(value=True)
         self.status_busy = False
         self.action_busy = False
@@ -275,47 +272,11 @@ class ControlCenter:
             column=3,
             padx=(8, 0),
         )
-        ttk.Label(config, text="模式").grid(row=1, column=0, sticky="w", pady=(12, 0))
-        ttk.Combobox(
-            config,
-            textvariable=self.research_mode,
-            values=("SERIAL", "DUAL"),
-            width=10,
-            state="readonly",
-        ).grid(row=1, column=1, sticky="w", pady=(12, 0))
-        ttk.Label(config, text="研究进程").grid(
-            row=1,
-            column=1,
-            sticky="w",
-            padx=(130, 0),
-            pady=(12, 0),
-        )
-        ttk.Spinbox(
-            config,
-            textvariable=self.research_workers,
-            from_=0,
-            to=2,
-            width=5,
-        ).grid(row=1, column=1, sticky="w", padx=(200, 0), pady=(12, 0))
-        ttk.Label(config, text="看门狗秒数").grid(
-            row=1,
-            column=1,
-            sticky="w",
-            padx=(280, 0),
-            pady=(12, 0),
-        )
-        ttk.Spinbox(
-            config,
-            textvariable=self.watchdog_interval,
-            from_=5,
-            to=300,
-            width=6,
-        ).grid(row=1, column=1, sticky="w", padx=(380, 0), pady=(12, 0))
         ttk.Checkbutton(config, text="自动刷新", variable=self.auto_refresh).grid(
             row=1,
             column=1,
             sticky="w",
-            padx=(470, 0),
+            padx=(0, 0),
             pady=(12, 0),
         )
         ttk.Checkbutton(
@@ -323,7 +284,7 @@ class ControlCenter:
             text="开机启动",
             variable=self.autostart,
             command=self._apply_desktop_integration,
-        ).grid(row=1, column=1, sticky="w", padx=(560, 0), pady=(12, 0))
+        ).grid(row=1, column=1, sticky="w", padx=(100, 0), pady=(12, 0))
 
         actions = ttk.Frame(self.root, style="Card.TFrame", padding=10)
         actions.pack(fill="x", padx=14, pady=8)
@@ -545,15 +506,6 @@ class ControlCenter:
                 "--source-root",
                 str(self.source_root),
             ]
-            if command in {"install", "start", "restart"}:
-                args += [
-                    "--research-mode",
-                    self.research_mode.get(),
-                    "--research-workers",
-                    str(self.research_workers.get()),
-                    "--watchdog-interval",
-                    str(self.watchdog_interval.get()),
-                ]
             if as_json:
                 args.append("--json")
             result = subprocess.run(args, text=True, capture_output=True, check=False)

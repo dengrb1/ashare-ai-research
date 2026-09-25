@@ -1,2 +1,0 @@
-# This inert file keeps the optional bind mount valid when EDGE_FRPC_ENABLED=false.
-# Never put a real frps address or token in a tracked file.

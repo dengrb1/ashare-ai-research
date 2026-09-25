@@ -1,43 +1,42 @@
-"""
-API 端点：Jev 模型训练和管理。
-
-提供 REST API 用于：
-- POST /api/v1/training/jev/trigger - 触发训练任务
-- GET /api/v1/training/jev/status/{training_id} - 查询训练状态
-- POST /api/v1/training/jev/cancel/{training_id} - 取消训练
-- GET /api/v1/training/jev/history - 训练历史
-"""
+"""Authenticated Jev model training controls backed by the job-worker queue."""
 
 from __future__ import annotations
 
-import logging
-from datetime import datetime
-from typing import Annotated, Literal
+import json
+from datetime import UTC, datetime
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, HTTPException, Query
+import redis
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-logger = logging.getLogger(__name__)
+from ashare_ai.api.auth import AuthContext, require_admin
+from ashare_ai.api.dependencies import get_auth_context, get_write_context
+from ashare_ai.core.config import get_settings
+from ashare_ai.orchestration.jev_training_jobs import (
+    STATUS_PREFIX,
+    cancel_jev_training,
+    enqueue_jev_training,
+    get_jev_training_status,
+)
 
 router = APIRouter(prefix="/api/v1/training", tags=["training"])
+Current = Annotated[AuthContext, Depends(get_auth_context)]
+Writer = Annotated[AuthContext, Depends(get_write_context)]
 
 
 class TrainingTriggerRequest(BaseModel):
-    """训练触发请求"""
-
     force: bool = False
-    dataset_config: dict | None = None
+    dataset_config: dict[str, Any] | None = None
 
 
 class TrainingStatusResponse(BaseModel):
-    """训练状态响应"""
-
     training_id: str
-    status: Literal["idle", "queued", "running", "completed", "failed", "cancelled"]
-    progress: float = 0.0
+    status: str
+    progress: float = Field(ge=0, le=1)
     current_epoch: int = 0
     total_epochs: int = 0
-    metrics: dict | None = None
+    metrics: dict[str, Any] | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
     estimated_completion: datetime | None = None
@@ -45,176 +44,129 @@ class TrainingStatusResponse(BaseModel):
 
 
 class TrainingHistoryResponse(BaseModel):
-    """训练历史响应"""
-
     trainings: list[TrainingStatusResponse]
     total: int
 
 
 class TrainingTriggerResponse(BaseModel):
-    """训练触发响应"""
-
-    status: str = "success"
+    status: str = "queued"
     training_id: str
-    estimated_duration_minutes: int
+    estimated_duration_minutes: int = 120
     message: str
 
 
-@router.post("/jev/trigger", response_model=TrainingTriggerResponse)
-async def trigger_jev_training(
-    request: Annotated[TrainingTriggerRequest, Body(..., description="Training trigger request")],
-) -> TrainingTriggerResponse:
-    """
-    触发 Jev 模型训练任务。
+def _client() -> redis.Redis:
+    return redis.Redis.from_url(get_settings().redis_url, decode_responses=True)
 
-    Args:
-        request: 训练请求配置
 
-    Returns:
-        TrainingTriggerResponse: 训练任务信息
-
-    Raises:
-        HTTPException: 触发失败时抛出
-    """
+def _parse_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
     try:
-        # TODO: 实现实际的训练任务调度
-        # 1. 验证条件（是否已有运行中的训练）
-        # 2. 创建训练任务记录
-        # 3. 提交到后台队列
-        # 4. 返回任务 ID
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
-        logger.warning("Jev training trigger not yet fully implemented")
 
-        training_id = f"train_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+def _response(status: dict[str, str]) -> TrainingStatusResponse:
+    result: dict[str, Any] | None = None
+    if status.get("result"):
+        try:
+            parsed = json.loads(status["result"])
+            result = parsed if isinstance(parsed, dict) else {"value": parsed}
+        except json.JSONDecodeError:
+            result = {"raw": status["result"]}
+    try:
+        progress = float(status.get("progress", "0"))
+    except ValueError:
+        progress = 0.0
+    if progress > 1:
+        progress /= 100
+    return TrainingStatusResponse(
+        training_id=status.get("training_id", ""),
+        status=status.get("status", "UNKNOWN").lower(),
+        progress=max(0.0, min(1.0, progress)),
+        current_epoch=int(status.get("current_epoch", "0") or 0),
+        total_epochs=int(status.get("total_epochs", "0") or 0),
+        metrics=result,
+        started_at=_parse_datetime(status.get("started_at")),
+        completed_at=_parse_datetime(status.get("completed_at")),
+        estimated_completion=_parse_datetime(status.get("estimated_completion")),
+        error=status.get("error"),
+    )
 
-        return TrainingTriggerResponse(
-            training_id=training_id,
-            estimated_duration_minutes=120,
-            message="Training job queued successfully",
-        )
 
-    except Exception as e:
-        logger.error(f"Failed to trigger training: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+def _require_admin(context: Current) -> AuthContext:
+    require_admin(context)
+    return context
+
+
+Admin = Annotated[AuthContext, Depends(_require_admin)]
+
+
+@router.post("/jev/trigger", response_model=TrainingTriggerResponse, status_code=202)
+def trigger_jev_training(
+    request: Annotated[TrainingTriggerRequest, Body(...)],
+    context: Writer,
+) -> TrainingTriggerResponse:
+    require_admin(context)
+    training_id = enqueue_jev_training(
+        user_id=context.user.user_id,
+        force=request.force,
+        dataset_config=request.dataset_config,
+    )
+    return TrainingTriggerResponse(
+        training_id=training_id,
+        message="Jev 训练任务已进入 job-worker 队列",
+    )
 
 
 @router.get("/jev/status/{training_id}", response_model=TrainingStatusResponse)
-async def get_training_status(
-    training_id: str = Query(..., description="Training job ID"),
-) -> TrainingStatusResponse:
-    """
-    查询训练任务状态。
-
-    Args:
-        training_id: 训练任务 ID
-
-    Returns:
-        TrainingStatusResponse: 训练状态
-
-    Raises:
-        HTTPException: 查询失败时抛出
-    """
-    try:
-        # TODO: 从数据库或缓存查询训练状态
-        logger.warning(f"Querying training status for {training_id}")
-
-        return TrainingStatusResponse(
-            training_id=training_id,
-            status="completed",
-            progress=1.0,
-            current_epoch=100,
-            total_epochs=100,
-            metrics={
-                "val_loss": 1.123,
-                "val_accuracy": {
-                    "direction_1d": 0.58,
-                    "direction_5d": 0.62,
-                    "action": 0.65,
-                },
-            },
-            started_at=datetime.now(),
-            completed_at=datetime.now(),
-        )
-
-    except Exception as e:
-        logger.error(f"Failed to get training status: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+def get_training_status(training_id: str, context: Admin) -> TrainingStatusResponse:
+    status = get_jev_training_status(_client(), training_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="training job not found")
+    return _response(status)
 
 
-@router.post("/jev/cancel/{training_id}")
-async def cancel_training(
-    training_id: str = Query(..., description="Training job ID"),
-) -> dict[str, str]:
-    """
-    取消训练任务。
+@router.get("/jev/status/current", response_model=TrainingStatusResponse)
+def get_current_training_status(context: Admin) -> TrainingStatusResponse:
+    client = _client()
+    latest: dict[str, str] | None = None
+    for key in client.scan_iter(match=f"{STATUS_PREFIX}*"):
+        values = client.hgetall(key)
+        if not values or latest is None or values.get("created_at", "") > latest.get("created_at", ""):
+            latest = dict(values)
+    if latest is None:
+        return TrainingStatusResponse(training_id="none", status="idle", progress=0)
+    return _response(latest)
 
-    Args:
-        training_id: 训练任务 ID
 
-    Returns:
-        dict: 取消结果
-
-    Raises:
-        HTTPException: 取消失败时抛出
-    """
-    try:
-        # TODO: 实现任务取消逻辑
-        logger.warning(f"Cancelling training {training_id}")
-
-        return {
-            "status": "cancelled",
-            "training_id": training_id,
-            "message": "Training job cancelled successfully",
-        }
-
-    except Exception as e:
-        logger.error(f"Failed to cancel training: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+@router.post("/jev/cancel/{training_id}", response_model=TrainingStatusResponse)
+def cancel_training(training_id: str, context: Writer) -> TrainingStatusResponse:
+    require_admin(context)
+    status = cancel_jev_training(_client(), training_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="training job not found")
+    return _response(status)
 
 
 @router.get("/jev/history", response_model=TrainingHistoryResponse)
-async def get_training_history(
+def get_training_history(
+    context: Admin,
     limit: int = Query(10, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ) -> TrainingHistoryResponse:
-    """
-    查询训练历史。
-
-    Args:
-        limit: 返回数量
-        offset: 偏移量
-
-    Returns:
-        TrainingHistoryResponse: 训练历史列表
-
-    Raises:
-        HTTPException: 查询失败时抛出
-    """
-    try:
-        # TODO: 从数据库查询历史训练记录
-        logger.warning(f"Querying training history (limit={limit}, offset={offset})")
-
-        trainings = [
-            TrainingStatusResponse(
-                training_id="train_20260920_153045",
-                status="completed",
-                progress=1.0,
-                current_epoch=100,
-                total_epochs=100,
-                metrics={
-                    "val_loss": 1.123,
-                    "val_accuracy": {
-                        "direction_1d": 0.58,
-                        "action": 0.62,
-                    },
-                },
-                started_at=datetime.now(),
-                completed_at=datetime.now(),
-            ),
-        ]
-
-        return TrainingHistoryResponse(trainings=trainings, total=1)
-
-    except Exception as e:
-        logger.error(f"Failed to get training history: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    client = _client()
+    statuses: list[dict[str, str]] = []
+    for key in client.scan_iter(match=f"{STATUS_PREFIX}*"):
+        values = client.hgetall(key)
+        if values:
+            statuses.append(dict(values))
+    statuses.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+    selected = statuses[offset : offset + limit]
+    return TrainingHistoryResponse(
+        trainings=[_response(item) for item in selected],
+        total=len(statuses),
+    )

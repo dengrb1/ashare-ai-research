@@ -473,8 +473,6 @@ def test_admin_delete_user_anonymizes_history_and_purges_private_objects(
         base_url="https://example.test",
         encrypted_api_key="encrypted",
         encryption_key_id="key-id",
-        search_model="model-a",
-        search_reasoning_effort="low",
         research_model="model-b",
         research_reasoning_effort="high",
         model_profiles=[],

@@ -16,13 +16,17 @@ def test_research_queue_uses_its_delayed_queue() -> None:
     assert research.delayed == "ashare:research:delayed"
 
 
-def test_dual_job_worker_does_not_build_a_research_consumer() -> None:
-    queues = serial_worker.build_queues(object(), execution_mode="DUAL")
+def test_job_worker_builds_one_consumer_for_every_research_queue() -> None:
+    queues = serial_worker.build_queues(object())
 
     assert [spec.kind for spec, _queue in queues] == [
         "personal-archive",
+        "research",
         "trade-plan",
         "backtest",
+        "exit-review",
+        "jev-training",
+        "system2-diagnostic",
     ]
 
 

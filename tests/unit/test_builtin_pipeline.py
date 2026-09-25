@@ -479,11 +479,13 @@ def test_small_custom_research_succeeds_reports_all_symbols_and_freezes_advice_s
         assert snapshot.details["snapshot_purpose"] == "SINGLE_SYMBOL_ADVICE"
         report = session.get(ReportRow, report_id)
         assert report is not None
-        html = backend.object_store.get(report.object_uri).decode("utf-8")
-        assert all(symbol in html for symbol in targets)
-        assert "暂不买入" in html
-        assert "T+1 交易时序" in html
-        assert "最早可卖日" in html
+        assert report.object_uri is None
+        assert report.content_sha256 is None
+        assert isinstance(report.result, dict)
+        report_symbols = {row["symbol"] for row in report.result["report_symbols"]}
+        assert set(targets) <= report_symbols
+        assert any(row["recommendation"] == "NO_BUY" for row in report.result["report_symbols"])
+        assert report.result["t1_earliest_sell_date"] is not None
         assert candidate_id == backend._stage_digest(run_id, "candidates")
 
 
@@ -545,7 +547,10 @@ def test_builtin_demo_runs_full_daily_flow_and_is_reproducible(tmp_path) -> None
         assert portfolio is not None and len(portfolio.positions) == 15
         report = session.scalar(select(ReportRow).where(ReportRow.run_id == first["run_id"]))
         assert report is not None
-        assert backend.object_store.get(report.object_uri).startswith(b"<!doctype html>")
+        assert report.object_uri is None
+        assert report.content_sha256 is None
+        assert isinstance(report.result, dict)
+        assert len(report.result["report_symbols"]) == 20
         event_types = set(
             session.scalars(
                 select(AuditEvent.event_type).where(AuditEvent.run_id == first["run_id"])

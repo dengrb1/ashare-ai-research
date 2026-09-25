@@ -19,17 +19,6 @@
       "github_release_api": "https://api.github.com/repos/tporadowski/redis/releases/tags/v5.0.14.1",
       "asset_name": "Redis-x64-5.0.14.1.zip",
       "sha256": "018ea18a35876383cbb5f4cd0258adfc87747cf9d619bce1cf73a2e36f720ccf"
-    },
-    {
-      "id": "searxng",
-      "version": "2026.7.31-057a77168",
-      "kind": "git",
-      "url": "https://github.com/searxng/searxng.git",
-      "archive_url": "https://github.com/searxng/searxng/archive/057a77168d3175ce2e42e5b10f46a8df073886d5.zip",
-      "sha256": "b7e3dcc5f8c9ed749df7dd261ee4e22d7b46f552602d1ff2dd08978074b4b5a3",
-      "tag": "master",
-      "commit": "057a77168d3175ce2e42e5b10f46a8df073886d5",
-      "commit_prefix": "057a77168"
     }
   ]
 }

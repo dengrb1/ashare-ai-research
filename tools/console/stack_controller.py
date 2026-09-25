@@ -43,7 +43,6 @@ SERVICE_DEFINITIONS: tuple[tuple[str, str, str], ...] = (
     ("gateway", "Model Gateway", "http://127.0.0.1:8787/health/ready"),
     ("local_model", "Local Model", "http://127.0.0.1:8080/health"),
     ("quote_bridge", "Quote Bridge", "http://127.0.0.1:8081/health"),
-    ("news_bridge", "News Bridge", "http://127.0.0.1:8082/health"),
 )
 
 
@@ -52,7 +51,6 @@ DEFAULT_PORTS: dict[str, int] = {
     "gateway": 8787,
     "local_model": 8080,
     "quote_bridge": 8081,
-    "news_bridge": 8082,
 }
 
 
@@ -81,7 +79,7 @@ def _configured_port(settings: Mapping[str, object], name: str) -> int:
 
 
 def service_definitions(repo_root: Path | None = None) -> tuple[tuple[str, str, str], ...]:
-    """Return the five existing probes, honoring configured component ports."""
+    """Return the four existing probes, honoring configured component ports."""
 
     settings = _read_runtime_settings(repo_root)
     return (
@@ -89,7 +87,6 @@ def service_definitions(repo_root: Path | None = None) -> tuple[tuple[str, str, 
         ("gateway", "Model Gateway", f"http://127.0.0.1:{_configured_port(settings, 'gateway')}/health/ready"),
         ("local_model", "Local Model", f"http://127.0.0.1:{_configured_port(settings, 'local_model')}/health"),
         ("quote_bridge", "Quote Bridge", f"http://127.0.0.1:{_configured_port(settings, 'quote_bridge')}/health"),
-        ("news_bridge", "News Bridge", f"http://127.0.0.1:{_configured_port(settings, 'news_bridge')}/health"),
     )
 
 

@@ -26,7 +26,6 @@ from ashare_ai.storage.models import (
     ModelProbeLog,
 )
 
-Purpose = Literal["search", "research"]
 CachePolicy = Literal["GROK", "OPENAI", "COMPATIBLE"]
 
 
@@ -102,8 +101,6 @@ class ModelRuntimeProfile(ModelProfileDraft):
 class ModelSettingsDraft:
     base_url: str
     api_key: str | None
-    search_model: str = "gpt-5.6-luna"
-    search_reasoning_effort: str = "low"
     research_model: str = "gpt-5.6-sol"
     research_reasoning_effort: str = "high"
     model_profiles: tuple[ModelProfileDraft, ...] = ()
@@ -120,17 +117,14 @@ class ModelRuntimeConfiguration:
     provider: str
     base_url: str
     api_key: str
-    search_model: str
-    search_reasoning_effort: str
     research_model: str
     research_reasoning_effort: str
     model_profiles: tuple[ModelRuntimeProfile, ...]
     timeout_seconds: float
     enabled: bool
 
-    def model_for(self, purpose: Purpose) -> tuple[str, str]:
-        if purpose == "search":
-            return self.search_model, self.search_reasoning_effort
+    def model_for(self, purpose: str = "research") -> tuple[str, str]:
+        del purpose
         return self.research_model, self.research_reasoning_effort
 
     def profile_for(self, model: str) -> ModelRuntimeProfile:
@@ -146,8 +140,6 @@ class ModelRuntimeConfiguration:
             "version": self.version,
             "config_sha256": self.config_sha256,
             "provider": self.provider,
-            "search_model": self.search_model,
-            "search_reasoning_effort": self.search_reasoning_effort,
             "research_model": self.research_model,
             "research_reasoning_effort": self.research_reasoning_effort,
             "model_profiles": [profile.public_dict() for profile in self.model_profiles],
@@ -222,8 +214,6 @@ class ModelConfigurationService:
             ModelSettingsDraft(
                 base_url=runtime.base_url,
                 api_key=runtime.api_key,
-                search_model="gpt-5.6-luna",
-                search_reasoning_effort="low",
                 research_model=runtime.research_model,
                 research_reasoning_effort=runtime.research_reasoning_effort,
                 model_profiles=runtime.model_profiles,
@@ -247,21 +237,18 @@ class ModelConfigurationService:
         api_key = draft.api_key or (current.api_key if current else None)
         if not api_key:
             raise ModelSettingsError("API key is required")
-        _validate_effort(draft.search_reasoning_effort)
         _validate_effort(draft.research_reasoning_effort)
-        if not draft.search_model.strip() or not draft.research_model.strip():
-            raise ModelSettingsError("search and research models are required")
+        if not draft.research_model.strip():
+            raise ModelSettingsError("research model is required")
         if not 1 <= draft.timeout_seconds <= 600:
             raise ModelSettingsError("timeout_seconds must be between 1 and 600")
         profiles = _normalize_profiles(
             draft.model_profiles,
-            models=(draft.search_model.strip(), draft.research_model.strip()),
+            models=(draft.research_model.strip(),),
         )
         config_hash = _config_hash(
             base_url=base_url,
             api_key=api_key,
-            search_model=draft.search_model.strip(),
-            search_reasoning_effort=draft.search_reasoning_effort,
             research_model=draft.research_model.strip(),
             research_reasoning_effort=draft.research_reasoning_effort,
             model_profiles=[profile.public_dict() for profile in profiles],
@@ -285,8 +272,6 @@ class ModelConfigurationService:
                 base_url=base_url,
                 encrypted_api_key=fernet.encrypt(api_key.encode()).decode(),
                 encryption_key_id=key_id,
-                search_model=draft.search_model.strip(),
-                search_reasoning_effort=draft.search_reasoning_effort,
                 research_model=draft.research_model.strip(),
                 research_reasoning_effort=draft.research_reasoning_effort,
                 model_profiles=[_profile_storage_dict(profile) for profile in profiles],
@@ -338,17 +323,12 @@ class ModelConfigurationService:
             raise ModelSettingsError("API key is required")
         profiles = _normalize_profiles(
             draft.model_profiles,
-            models=(draft.search_model.strip(), draft.research_model.strip()),
+            models=(draft.research_model.strip(),),
         )
         profile_by_model = {item.model: item for item in profiles}
-        configured_models = (
-            (draft.search_model.strip(), draft.search_reasoning_effort),
-            (draft.research_model.strip(), draft.research_reasoning_effort),
-        )
+        configured_models = ((draft.research_model.strip(), draft.research_reasoning_effort),)
         purposes: dict[str, list[str]] = {}
-        for purpose, (model, _effort) in zip(
-            ("search", "research"), configured_models, strict=True
-        ):
+        for purpose, (model, _effort) in zip(("research",), configured_models, strict=True):
             purposes.setdefault(model, []).append(purpose)
         clients: list[OpenAICompatibleStructuredLLMClient] = []
         diagnostics: list[ModelProbeDiagnostic] = []
@@ -463,8 +443,8 @@ class ModelConfigurationService:
                 diagnostics.append(
                     _probe_diagnostic(
                         client=stream_client,
-                        model=draft.search_model.strip(),
-                        purpose="search",
+                        model=draft.research_model.strip(),
+                        purpose="research",
                         outcome="SUCCEEDED" if streaming_supported else "FAILED",
                         error_code=None if streaming_supported else "MODEL_STREAMING_UNSUPPORTED",
                         message=(
@@ -481,8 +461,8 @@ class ModelConfigurationService:
                 diagnostics.append(
                     _probe_diagnostic(
                         client=stream_client,
-                        model=draft.search_model.strip(),
-                        purpose="search",
+                        model=draft.research_model.strip(),
+                        purpose="research",
                         outcome="FAILED",
                         error_code="MODEL_STREAM_PROBE_TIMEOUT",
                         message="流式探测超时，将使用非流式降级",
@@ -497,8 +477,8 @@ class ModelConfigurationService:
                 diagnostics.append(
                     _probe_diagnostic(
                         client=stream_client,
-                        model=draft.search_model.strip(),
-                        purpose="search",
+                        model=draft.research_model.strip(),
+                        purpose="research",
                         outcome="FAILED",
                         error_code=_safe_error_code(exc),
                         message="流式探测失败，将使用非流式降级",
@@ -513,7 +493,7 @@ class ModelConfigurationService:
                 if streaming_supported
                 else "所有已配置模型的 Responses API 结构化探测成功；搜索模型流式响应将降级"
             ),
-            model=draft.search_model.strip(),
+            model=draft.research_model.strip(),
             checked_at=checked_at,
             structured_output_supported=True,
             streaming_supported=streaming_supported,
@@ -606,13 +586,11 @@ class ModelConfigurationService:
             provider=row.provider,
             base_url=row.base_url,
             api_key=api_key,
-            search_model=row.search_model,
-            search_reasoning_effort=row.search_reasoning_effort,
             research_model=row.research_model,
             research_reasoning_effort=row.research_reasoning_effort,
             model_profiles=_profiles_from_storage(
                 row.model_profiles,
-                models=(row.search_model, row.research_model),
+                models=(row.research_model,),
             ),
             timeout_seconds=row.timeout_seconds,
             enabled=row.enabled,
@@ -629,13 +607,11 @@ class ModelConfigurationService:
         config_hash = _config_hash(
             base_url=base_url,
             api_key=self.settings.llm_api_key,
-            search_model="gpt-5.6-luna",
-            search_reasoning_effort="low",
             research_model=self.settings.llm_model,
             research_reasoning_effort=self.settings.llm_reasoning_effort,
             model_profiles=[
                 _default_profile(model).public_dict()
-                for model in ("gpt-5.6-luna", self.settings.llm_model)
+                for model in (self.settings.llm_model,)
             ],
             timeout_seconds=self.settings.llm_timeout_seconds,
             enabled=True,
@@ -648,12 +624,10 @@ class ModelConfigurationService:
             provider="openai-compatible",
             base_url=base_url,
             api_key=self.settings.llm_api_key,
-            search_model="gpt-5.6-luna",
-            search_reasoning_effort="low",
             research_model=self.settings.llm_model,
             research_reasoning_effort=self.settings.llm_reasoning_effort,
             model_profiles=_normalize_profiles(
-                (), models=("gpt-5.6-luna", self.settings.llm_model)
+                (), models=(self.settings.llm_model,)
             ),
             timeout_seconds=self.settings.llm_timeout_seconds,
             enabled=True,
@@ -759,7 +733,7 @@ def _profile_storage_dict(profile: ModelRuntimeProfile) -> dict[str, Any]:
 def _normalize_profiles(
     raw_profiles: tuple[ModelProfileDraft, ...] | list[ModelProfileDraft],
     *,
-    models: tuple[str, str],
+    models: tuple[str, ...],
 ) -> tuple[ModelRuntimeProfile, ...]:
     by_model: dict[str, ModelRuntimeProfile] = {}
     for raw in raw_profiles:
@@ -794,7 +768,7 @@ def _normalize_profiles(
 
 
 def _profiles_from_storage(
-    raw_profiles: object, *, models: tuple[str, str]
+    raw_profiles: object, *, models: tuple[str, ...]
 ) -> tuple[ModelRuntimeProfile, ...]:
     profiles: list[ModelProfileDraft] = []
     if isinstance(raw_profiles, list):

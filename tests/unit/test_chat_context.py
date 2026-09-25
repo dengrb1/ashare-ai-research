@@ -9,7 +9,6 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from ashare_ai.agents.chat_context import ChatContextService, resolve_security_mentions
-from ashare_ai.search.news import NewsSearchResult
 from ashare_ai.storage.models import (
     Base,
     CandidateRow,
@@ -162,28 +161,7 @@ class _Market:
         }
 
 
-class _News:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def search_for_security(self, **_: object) -> NewsSearchResult:
-        self.calls += 1
-        return NewsSearchResult(
-            items=[
-                {
-                    "title": "顺络电子公告",
-                    "url": "https://example.test/news",
-                    "snippet": "fixture",
-                    "engine": "fixture",
-                    "published_at": "2026-07-19T00:00:00+08:00",
-                }
-            ],
-            status={"state": "AVAILABLE", "reason_code": "OK", "source": "searxng"},
-            cache_hit=False,
-        )
-
-
-def test_live_context_contains_market_kline_news_and_reuses_user_cache() -> None:
+def test_live_context_contains_market_kline_and_reuses_user_cache() -> None:
     engine = _engine()
     Base.metadata.create_all(engine)
     now = datetime(2026, 7, 20, 8, tzinfo=UTC)
@@ -202,10 +180,8 @@ def test_live_context_contains_market_kline_news_and_reuses_user_cache() -> None
         )
         session.commit()
     market = _Market(now)
-    news = _News()
     service = ChatContextService(
         market=market,
-        news=news,  # type: ignore[arg-type]
         session_factory=lambda: Session(engine),
     )
     refs = [{"symbol": "002138.SZ", "name": "顺络电子"}]
@@ -214,23 +190,22 @@ def test_live_context_contains_market_kline_news_and_reuses_user_cache() -> None
         user_id="chat-user",
         refs=refs,
         requested_decision_at=None,
-        web_search=True,
         model_configuration_sha256="a" * 64,
     )
     second = service.build(
         user_id="chat-user",
         refs=refs,
         requested_decision_at=None,
-        web_search=True,
         model_configuration_sha256="a" * 64,
     )
 
     assert first.context["quotes"]["002138.SZ"]["price"] == 31.5
     assert first.context["daily_bars"]["002138.SZ"]
-    assert first.context["news"]["002138.SZ"][0]["title"] == "顺络电子公告"
+    assert first.context["news"]["002138.SZ"] == []
+    assert first.data_status["news"]["002138.SZ"]["reason_code"] == "NEWS_DISABLED"
     assert first.data_status["quotes"]["002138.SZ"]["state"] == "AVAILABLE"
     assert second.context_cache_hit is True
-    assert market.quote_calls == market.kline_calls == news.calls == 1
+    assert market.quote_calls == market.kline_calls == 1
 
 
 def test_historical_bars_require_a_committed_user_manifest_before_decision(monkeypatch) -> None:
@@ -286,7 +261,6 @@ def test_historical_bars_require_a_committed_user_manifest_before_decision(monke
 
     service = ChatContextService(
         market=object(),
-        news=object(),  # type: ignore[arg-type]
         session_factory=lambda: Session(engine),
     )
     from ashare_ai.orchestration import builtin_backtest
@@ -473,14 +447,12 @@ def test_published_research_context_uses_user_owned_pit_report_metadata() -> Non
 
     service = ChatContextService(
         market=object(),
-        news=object(),
         session_factory=lambda: Session(engine),  # type: ignore[arg-type]
     )
     mentioned = service.build(
         user_id="research-user",
         refs=[{"symbol": "002138.SZ", "name": "顺络电子"}],
         requested_decision_at=decision_at,
-        web_search=False,
         model_configuration_sha256="a" * 64,
     )
     entry = mentioned.context["latest_published_research"]["002138.SZ"]
@@ -497,7 +469,6 @@ def test_published_research_context_uses_user_owned_pit_report_metadata() -> Non
         user_id="research-user",
         refs=[],
         requested_decision_at=decision_at,
-        web_search=False,
         model_configuration_sha256="a" * 64,
     )
     assert (

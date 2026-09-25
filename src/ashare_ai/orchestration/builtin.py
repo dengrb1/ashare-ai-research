@@ -74,7 +74,6 @@ from ashare_ai.portfolio.risk import (
     transition_drawdown_state,
 )
 from ashare_ai.reports.chinese_summary import component_summary, symbol_summary
-from ashare_ai.reports.daily import DailyReportService
 from ashare_ai.scoring.dividends import calculate_dividend_bonus
 from ashare_ai.scoring.formula import (
     FORMULA_VERSION,
@@ -105,6 +104,17 @@ M = TypeVar("M", bound=BaseModel)
 T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
+
+
+def _structured_report_value(value: object) -> object:
+    """Serialize report inputs without rendering or persisting HTML."""
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    raise TypeError(f"unsupported structured report value: {type(value).__name__}")
 
 _RESEARCH_COMPONENT_PROMPT_VERSION = "builtin-llm-v3"
 _RESEARCH_COMPONENT_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
@@ -1629,10 +1639,7 @@ class BuiltinDailyBackend:
                 (item for item in bundle.trading_calendar if item > bundle.next_trading_date),
                 None,
             )
-            report = DailyReportService(session, self.object_store).generate(
-                run_id=run_id,
-                trading_date=bundle.trading_date,
-                context={
+            result = {
                     "trading_date": bundle.trading_date.isoformat(),
                     "decision_at": bundle.decision_at.isoformat(),
                     "run_status": "FUSED" if risk_state == "OBSERVE_ONLY" else "SUCCEEDED",
@@ -1676,16 +1683,23 @@ class BuiltinDailyBackend:
                     "input_hash": run.input_hash,
                     "formula_version": self.policy.scoring.formula_version,
                     "trade_rule_version": RULESET_VERSION,
-                },
+            }
+            report = ReportRow(
+                run_id=run_id,
+                trading_date=bundle.trading_date,
+                report_type="DAILY_RESEARCH",
+                result=json.loads(json.dumps(result, default=_structured_report_value)),
+                created_at=datetime.now(SHANGHAI),
             )
+            session.add(report)
+            session.flush()
             session.commit()
         self._write_stage(
             run_id,
             "report",
             {
                 "report_id": report.report_id,
-                "uri": report.object_uri,
-                "sha256": report.content_sha256,
+                "result": report.result,
             },
         )
         return report.report_id

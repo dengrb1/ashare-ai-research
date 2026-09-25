@@ -1,19 +1,6 @@
-"""Interactive financial search isolated from frozen research snapshots."""
+"""Bounded interactive Web search, isolated from frozen research snapshots."""
 
-from __future__ import annotations
+from ashare_ai.search.searxng import SearXNGSearchClient
+from ashare_ai.search.web import WebSearchResult, WebSearchService, get_web_search_service
 
-from importlib import import_module
-from typing import Any
-
-__all__ = [
-    "FinancialSearchResponse",
-    "FinancialSearchService",
-    "FinancialSearchStatus",
-    "get_financial_search_service",
-]
-
-
-def __getattr__(name: str) -> Any:
-    if name not in __all__:
-        raise AttributeError(name)
-    return getattr(import_module("ashare_ai.search.service"), name)
+__all__ = ["SearXNGSearchClient", "WebSearchResult", "WebSearchService", "get_web_search_service"]

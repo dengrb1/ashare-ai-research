@@ -12,6 +12,7 @@ from ashare_ai.quant.qlib_gateway import (
     validate_prediction_frame,
     validate_training_frame,
 )
+from ashare_ai.quant.evolution import EvolutionCandidate, EvolutionMetrics, EvolutionResult, StrategyEvolutionService, StrategyGenome
 
 __all__ = [
     "PredictionBatch",
@@ -26,4 +27,9 @@ __all__ = [
     "rolling_splits",
     "validate_prediction_frame",
     "validate_training_frame",
+    "EvolutionCandidate",
+    "EvolutionMetrics",
+    "EvolutionResult",
+    "StrategyEvolutionService",
+    "StrategyGenome",
 ]

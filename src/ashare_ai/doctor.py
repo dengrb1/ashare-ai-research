@@ -118,13 +118,11 @@ def _object_store(settings: Settings) -> str:
 
 def _worker_modules() -> str:
     for module_name in (
-        "ashare_ai.orchestration.research_worker",
-        "ashare_ai.orchestration.backtest_worker",
         "ashare_ai.orchestration.serial_worker",
         "ashare_ai.orchestration.redis_queue",
     ):
         import_module(module_name)
-    return "research/backtest worker modules are importable"
+    return "serial job-worker modules are importable"
 
 
 def _market() -> str:

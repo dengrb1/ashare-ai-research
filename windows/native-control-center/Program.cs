@@ -168,9 +168,6 @@ namespace AshareAI.NativeControlCenter
         private readonly Label ports = new Label();
         private readonly Label footer = new Label();
         private readonly TextBox root = new TextBox();
-        private readonly ComboBox mode = new ComboBox();
-        private readonly NumericUpDown workers = new NumericUpDown();
-        private readonly NumericUpDown watchdogInterval = new NumericUpDown();
         private readonly CheckBox autoRefresh = new CheckBox();
         private readonly Button openWeb = new Button();
         private readonly CheckBox autoStart = new CheckBox();
@@ -202,7 +199,6 @@ namespace AshareAI.NativeControlCenter
             LoadSettings();
             try { autoStart.Checked = StartupEntry.IsEnabled(Application.ExecutablePath); } catch { autoStart.Checked = false; }
             InitializeTray();
-            workers.Enabled = String.Equals(Convert.ToString(mode.SelectedItem), "DUAL", StringComparison.Ordinal);
             poll.Interval = 500;
             poll.Tick += PollTick;
             refresh.Interval = 10000;
@@ -289,14 +285,8 @@ namespace AshareAI.NativeControlCenter
             StyleButton(openRoot, false); openRoot.Click += delegate { Directory.CreateDirectory(root.Text.Trim()); Process.Start("explorer.exe", Quote(root.Text.Trim())); }; settings.Controls.Add(openRoot);
             var save = new Button { Text = "保存", Location = new Point(942, 13), Size = new Size(42, 28), Anchor = AnchorStyles.Top | AnchorStyles.Right };
             StyleButton(save, true); save.Click += delegate { SaveSettings(); }; settings.Controls.Add(save);
-            settings.Controls.Add(Label("模式", 18, 55, 54, 24));
-            mode.DropDownStyle = ComboBoxStyle.DropDownList; mode.Location = new Point(100, 52); mode.Size = new Size(112, 25); mode.Items.AddRange(new object[] { "SERIAL", "DUAL" }); mode.SelectedItem = "SERIAL"; settings.Controls.Add(mode);
-            settings.Controls.Add(Label("研究进程", 232, 55, 70, 24));
-            workers.Location = new Point(304, 52); workers.Size = new Size(58, 25); workers.Minimum = 0; workers.Maximum = 2; settings.Controls.Add(workers);
-            settings.Controls.Add(Label("看门狗秒数", 388, 55, 84, 24));
-            watchdogInterval.Location = new Point(478, 52); watchdogInterval.Size = new Size(66, 25); watchdogInterval.Minimum = 5; watchdogInterval.Maximum = 300; watchdogInterval.Value = 10; settings.Controls.Add(watchdogInterval);
-            autoRefresh.Text = "自动刷新"; autoRefresh.Location = new Point(576, 53); autoRefresh.Size = new Size(110, 24); autoRefresh.Checked = true; settings.Controls.Add(autoRefresh);
-            autoStart.Text = "开机启动"; autoStart.Location = new Point(700, 53); autoStart.Size = new Size(110, 24); settings.Controls.Add(autoStart);
+            autoRefresh.Text = "自动刷新"; autoRefresh.Location = new Point(100, 53); autoRefresh.Size = new Size(110, 24); autoRefresh.Checked = true; settings.Controls.Add(autoRefresh);
+            autoStart.Text = "开机启动"; autoStart.Location = new Point(224, 53); autoStart.Size = new Size(110, 24); settings.Controls.Add(autoStart);
             autoStart.CheckedChanged += delegate { if (IsHandleCreated) ApplyStartupSetting(); };
             Controls.Add(settings);
 
@@ -323,7 +313,6 @@ namespace AshareAI.NativeControlCenter
             var logsPage = new TabPage("看门狗日志"); ConfigureTextBox(watchdogLog); logsPage.Controls.Add(watchdogLog); tabs.TabPages.Add(logsPage);
             tabs.SelectedIndexChanged += delegate { if (tabs.SelectedTab == logsPage) LoadWatchdogLog(); }; Controls.Add(tabs);
             footer.Text = "就绪"; footer.Location = new Point(16, 670); footer.Size = new Size(980, 24); footer.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right; footer.ForeColor = Color.FromArgb(75, 85, 99); Controls.Add(footer);
-            mode.SelectedIndexChanged += delegate { workers.Enabled = Convert.ToString(mode.SelectedItem) == "DUAL"; if (!workers.Enabled) workers.Value = 0; };
         }
 
         private void ConfigureTextBox(TextBox box) { box.Dock = DockStyle.Fill; box.Multiline = true; box.ReadOnly = true; box.ScrollBars = ScrollBars.Both; box.WordWrap = false; box.Font = new Font("Consolas", 9F); }
@@ -335,8 +324,8 @@ namespace AshareAI.NativeControlCenter
         private string RuntimeRootConfigPath { get { return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "runtime-root.txt"); } }
         private void SaveRuntimeRootSelection() { try { File.WriteAllText(RuntimeRootConfigPath, Path.GetFullPath(root.Text.Trim()) + Environment.NewLine, Encoding.UTF8); } catch (Exception error) { AddActivity("保存运行目录失败：" + error.Message); } }
         private void ApplyStartupSetting() { try { StartupEntry.SetEnabled(Application.ExecutablePath, StartupEntry.BuildArguments(options.SourceRoot, Path.GetFullPath(root.Text.Trim())), autoStart.Checked); AddActivity(autoStart.Checked ? "已启用开机启动" : "已关闭开机启动"); } catch (Exception error) { AddActivity("保存开机启动设置失败：" + error.Message); } }
-        private void SaveSettings() { SaveRuntimeRootSelection(); Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)); var data = new Dictionary<string, object> { { "research_mode", Convert.ToString(mode.SelectedItem) }, { "research_workers", (int)workers.Value }, { "watchdog_interval_seconds", (int)watchdogInterval.Value }, { "auto_refresh", autoRefresh.Checked } }; File.WriteAllText(SettingsPath, json.Serialize(data), Encoding.UTF8); ApplyStartupSetting(); AddActivity("设置已保存到 " + SettingsPath); }
-        private void LoadSettings() { if (!File.Exists(SettingsPath)) return; try { var data = json.DeserializeObject(File.ReadAllText(SettingsPath)) as Dictionary<string, object>; if (data == null) return; if (data.ContainsKey("research_mode")) mode.SelectedItem = Convert.ToString(data["research_mode"]); if (data.ContainsKey("research_workers")) workers.Value = Math.Min(2, Math.Max(0, Convert.ToDecimal(data["research_workers"]))); if (data.ContainsKey("watchdog_interval_seconds")) watchdogInterval.Value = Math.Min(300, Math.Max(5, Convert.ToDecimal(data["watchdog_interval_seconds"]))); if (data.ContainsKey("auto_refresh")) autoRefresh.Checked = Convert.ToBoolean(data["auto_refresh"]); } catch (Exception error) { AddActivity("读取管理器设置失败：" + error.Message); } }
+        private void SaveSettings() { SaveRuntimeRootSelection(); Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)); var data = new Dictionary<string, object> { { "auto_refresh", autoRefresh.Checked } }; File.WriteAllText(SettingsPath, json.Serialize(data), Encoding.UTF8); ApplyStartupSetting(); AddActivity("设置已保存到 " + SettingsPath); }
+        private void LoadSettings() { if (!File.Exists(SettingsPath)) return; try { var data = json.DeserializeObject(File.ReadAllText(SettingsPath)) as Dictionary<string, object>; if (data == null) return; if (data.ContainsKey("auto_refresh")) autoRefresh.Checked = Convert.ToBoolean(data["auto_refresh"]); } catch (Exception error) { AddActivity("读取管理器设置失败：" + error.Message); } }
         private void AddActivity(string message) { activity.AppendText("[" + DateTime.Now.ToString("HH:mm:ss") + "] " + message + Environment.NewLine); }
         private static string Quote(string value) { return "\"" + value.Replace("\"", "\\\"") + "\""; }
         private static bool HasNativeInstallation(string runtime)
@@ -375,7 +364,6 @@ namespace AshareAI.NativeControlCenter
             }
             Directory.CreateDirectory(Path.Combine(runtime, "logs"));
             var arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File " + Quote(controller) + " -Command " + operation + " -Root " + Quote(runtime) + " -SourceRoot " + Quote(options.SourceRoot);
-            if (operation == "start" || operation == "restart" || operation == "install") arguments += " -ResearchMode " + Convert.ToString(mode.SelectedItem) + " -ResearchWorkers " + workers.Value + " -WatchdogIntervalSeconds " + watchdogInterval.Value;
             if (asJson) arguments += " -Json";
             if (operation == "status") arguments += " -Fast";
             activeOperation = operation; activeOutput.Clear(); activeError.Clear(); refreshPending = false; SetBusy(true, "正在执行“" + OperationName(operation) + "”…", operation != "status"); AddActivity("正在运行：" + OperationName(operation));
@@ -410,7 +398,7 @@ namespace AshareAI.NativeControlCenter
         {
             lastReport = report; var desired = TextValue(report, "desired_state", "STOPPED"); var healthy = BoolValue(report, "runtime_healthy"); state.Text = StatusName(desired); state.ForeColor = healthy ? Color.FromArgb(19, 128, 74) : Color.FromArgb(190, 76, 20); health.Text = "健康状态：" + (healthy ? "健康" : "未就绪"); memory.Text = "内存：" + TextValue(report, "total_working_set_mib", "0") + " MiB";
             var watch = report.ContainsKey("watchdog") && report["watchdog"] is Dictionary<string, object> ? TextValue((Dictionary<string, object>)report["watchdog"], "status", "MISSING") : "MISSING"; watchdog.Text = "看门狗：" + StatusName(watch);
-            var p = report.ContainsKey("ports") ? report["ports"] as Dictionary<string, object> : null; ports.Text = p == null ? "端口：--" : String.Format("端口：PG {0}  Redis {1}\r\nAPI {2}  搜索 {3}", TextValue(p, "postgres", "--"), TextValue(p, "redis", "--"), TextValue(p, "api", "--"), TextValue(p, "searxng", "--")); openWeb.Enabled = healthy && p != null;
+            var p = report.ContainsKey("ports") ? report["ports"] as Dictionary<string, object> : null; ports.Text = p == null ? "端口：--" : String.Format("端口：PG {0}  Redis {1}\r\nAPI {2}", TextValue(p, "postgres", "--"), TextValue(p, "redis", "--"), TextValue(p, "api", "--")); openWeb.Enabled = healthy && p != null;
             services.Rows.Clear(); var rows = report.ContainsKey("services") ? report["services"] as IEnumerable : null; if (rows != null) foreach (var item in rows) { var row = item as Dictionary<string, object>; if (row != null) services.Rows.Add(TextValue(row, "service", ""), TextValue(row, "role", ""), TextValue(row, "pid", ""), BoolValue(row, "healthy") ? "是" : "否", TextValue(row, "working_set_mib", "0"), TextValue(row, "embedded_in", "")); }
         }
 

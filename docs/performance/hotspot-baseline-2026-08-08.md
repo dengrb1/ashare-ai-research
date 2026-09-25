@@ -53,10 +53,9 @@ for full jobs, but material for tiny isolated operations and supports keeping wo
 long-lived while isolating only heavy jobs.
 
 API import RSS changed only marginally (about 106.0 MiB to 105.8 MiB median), so the
-API-specific 20 MiB gate is **not claimed**. The financial-search implementation is now
-confirmed absent from `sys.modules` at API startup. The material memory saving comes
-from profile-gating the separate searxng container; it is absent from the default stack
-and remains available through `--profile search` with `SEARXNG_BASE_URL` configured.
+API-specific 20 MiB gate is **not claimed**. Search and external news modules are absent
+from the research-only API startup path. The material memory saving comes from keeping
+heavy market and model work in short-lived isolated processes.
 
 ## Rust / serialization gate
 

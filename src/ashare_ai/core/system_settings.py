@@ -23,32 +23,28 @@ from ashare_ai.core.config import Settings, get_settings
 from ashare_ai.core.hashing import stable_hash
 from ashare_ai.storage.models import (
     ActiveSystemConfiguration,
-    BacktestRun,
-    JobRun,
     SystemConfigurationVersion,
 )
 
-ExecutionMode = Literal["SERIAL", "DUAL"]
+ExecutionMode = Literal["SERIAL"]
 
 # Keep this explicit allow-list close to Settings.  Database, Redis, auth,
 # encryption, policies and filesystem topology deliberately never appear here.
 PUBLIC_SETTING_FIELDS = frozenset(
     {
-        "research_execution_mode",
-        "edge_gateway_enabled",
-        "edge_domain",
-        "edge_acme_email",
-        "edge_acme_ca_server",
-        "edge_frpc_enabled",
-        "edge_frpc_config_file",
         "auto_restart_enabled",
         "llm_agent_max_concurrency",
+        "jev_confidence_threshold",
+        "decision_system2_enabled",
+        "jev_model_version",
+        "jev_backend",
+        "jev_live_base_url",
+        "jev_live_model",
+        "jev_live_endpoint",
+        "jev_live_timeout_seconds",
         "object_store_endpoint",
         "object_store_bucket",
         "object_store_secure",
-        "searxng_base_url",
-        "searxng_timeout_seconds",
-        "searxng_max_results",
         "market_cache_seconds",
         "market_kline_cache_seconds",
         "market_prefetch_max_workers",
@@ -61,9 +57,6 @@ PUBLIC_SETTING_FIELDS = frozenset(
         "api_runtime_mode",
         "api_runtime_auto_close",
         "energy_saving_enabled",
-        "financial_search_cache_seconds",
-        "financial_search_max_concurrency",
-        "financial_search_rate_limit_per_minute",
         "daily_research_start_hour",
         "daily_research_start_minute",
         "daily_research_retry_minutes",
@@ -82,18 +75,10 @@ PUBLIC_SETTING_FIELDS = frozenset(
 SECRET_SETTING_FIELDS = frozenset(
     {
         "tushare_token",
+        "jev_live_api_key",
         "object_store_access_key",
         "object_store_secret_key",
     }
-)
-TOPOLOGY_FIELDS = frozenset(
-    {"research_execution_mode", "llm_agent_max_concurrency", "edge_gateway_enabled"}
-)
-_ACTIVE_RESEARCH_STATUSES = frozenset(
-    {"PENDING", "QUEUED", "RUNNING", "PROCESSING", "DATA_READINESS_WAITING", "CANCEL_REQUESTED"}
-)
-_ACTIVE_BACKTEST_STATUSES = frozenset(
-    {"PENDING", "QUEUED", "RUNNING", "PROCESSING", "CANCEL_REQUESTED"}
 )
 
 
@@ -113,15 +98,14 @@ class SystemRuntimeSettings:
 
     @property
     def execution_mode(self) -> ExecutionMode:
-        return self.settings.research_execution_mode
+        return "SERIAL"
 
     @property
     def topology_sha256(self) -> str:
         return stable_hash(
             {
-                "research_execution_mode": self.settings.research_execution_mode,
+                "job_worker_topology": "single-v1",
                 "llm_agent_max_concurrency": self.settings.llm_agent_max_concurrency,
-                "edge_gateway_enabled": self.settings.edge_gateway_enabled,
             }
         )
 
@@ -327,9 +311,8 @@ class SystemConfigurationService:
                         for field in sorted(PUBLIC_SETTING_FIELDS)
                     },
                     "topology": {
-                        "research_execution_mode": self.settings.research_execution_mode,
+                        "job_worker_topology": "single-v1",
                         "llm_agent_max_concurrency": self.settings.llm_agent_max_concurrency,
-                        "edge_gateway_enabled": self.settings.edge_gateway_enabled,
                     },
                 }
             ),
@@ -405,59 +388,10 @@ class SystemConfigurationService:
     def _validate_transition(
         self, session: Session, current: SystemRuntimeSettings, target: Settings
     ) -> None:
-        if target.research_execution_mode == "DUAL":
-            required_gateway_capacity = 2 * target.llm_agent_max_concurrency
-            if target.model_gateway_max_concurrency < required_gateway_capacity:
-                raise SystemSettingsError(
-                    "DUAL mode requires model gateway capacity of at least "
-                    f"{required_gateway_capacity}; raise MODEL_GATEWAY_MAX_CONCURRENCY "
-                    "or lower per-run concurrency"
-                )
-        # The edge-gateway entrypoint fails closed at container start without a
-        # public domain and ACME email, so refuse to persist an enabled gateway
-        # that can never boot.  The frpc config file itself is a host-side,
-        # untracked file; only its non-empty path is validated here and the
-        # topology controller checks the file exists before starting the service.
-        if target.edge_gateway_enabled:
-            if not target.edge_domain:
-                raise SystemSettingsError(
-                    "enabling the public edge gateway requires a public domain "
-                    "(EDGE_DOMAIN / edge_domain)"
-                )
-            if not target.edge_acme_email:
-                raise SystemSettingsError(
-                    "enabling the public edge gateway requires an ACME account "
-                    "email (EDGE_ACME_EMAIL / edge_acme_email)"
-                )
-            if target.edge_frpc_enabled and not target.edge_frpc_config_file.strip():
-                raise SystemSettingsError(
-                    "enabling the edge frpc client requires a non-empty frpc config "
-                    "file path (EDGE_FRPC_CONFIG_FILE / edge_frpc_config_file)"
-                )
-        if current.execution_mode != target.research_execution_mode:
-            active_research = int(
-                session.scalar(
-                    select(func.count()).select_from(JobRun).where(
-                        JobRun.run_type == "DAILY", JobRun.status.in_(_ACTIVE_RESEARCH_STATUSES)
-                    )
-                )
-                or 0
-            )
-            active_backtests = int(
-                session.scalar(
-                    select(func.count()).select_from(BacktestRun).where(
-                        BacktestRun.status.in_(_ACTIVE_BACKTEST_STATUSES)
-                    )
-                )
-                or 0
-            )
-            if active_research or active_backtests:
-                raise SystemSettingsError(
-                    "cannot change research execution mode while "
-                    f"{active_research} research run(s) or {active_backtests} backtest(s) "
-                    "are active; "
-                    "wait for completion or cancel them first"
-                )
+        # The research-only product has one worker topology. Keep the hook for
+        # callers that persist settings, but there is no topology transition to
+        # validate or restart.
+        del session, current, target
 
     def _cipher(self) -> tuple[MultiFernet, str]:
         raw = self.settings.model_settings_encryption_keys or ""

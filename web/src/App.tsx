@@ -3,27 +3,12 @@ import { AuthProvider, useAuth } from './context/AuthContext'
 import { MarketProvider } from './context/MarketContext'
 import { AppShell } from './components/AppShell'
 import { LoginPage } from './pages/LoginPage'
-import { DashboardPage } from './pages/DashboardPage'
-import { MarketPage } from './pages/MarketPage'
-import { AssetsPage } from './pages/AssetsPage'
-import { ResearchPage } from './pages/ResearchPage'
-import { CandidatesPage } from './pages/CandidatesPage'
-import { PortfolioPage } from './pages/PortfolioPage'
-import { ReportsPage } from './pages/ReportsPage'
-import { RunsPage } from './pages/RunsPage'
-import { BacktestPage } from './pages/BacktestPage'
-import { AdminPage } from './pages/AdminPage'
-import { FinancialSearchPage } from './pages/FinancialSearchPage'
-import { ModelSettingsPage } from './pages/ModelSettingsPage'
-import { SystemSettingsPage } from './pages/SystemSettingsPage'
-import { EdgeGatewayPage } from './pages/EdgeGatewayPage'
-import { ExitAdvicePage } from './pages/ExitAdvicePage'
-import { AIChatPage } from './pages/AIChatPage'
-import { JevModelPage } from './pages/JevModelPage'
-import { JevTrainingPage } from './pages/JevTrainingPage'
+import { MonitorPage } from './pages/MonitorPage'
+import { StrategiesPage } from './pages/StrategiesPage'
+import { AICopilotPage } from './pages/AICopilotPage'
+import { SettingsPage } from './pages/SettingsPage'
 import { ThemeProvider } from './context/ThemeContext'
 import { RefreshProvider } from './context/RefreshContext'
-import { PersonalDataPage } from './pages/PersonalDataPage'
 import { ToastProvider } from './context/ToastContext'
 
 function ProtectedApp() {
@@ -39,25 +24,15 @@ function AppRoutes() {
     <Route path="/login" element={user ? <Navigate to="/" replace /> : <LoginPage />} />
     <Route element={<ProtectedApp />}>
       <Route element={<AppShell />}>
-        <Route index element={<DashboardPage />} />
-        <Route path="market" element={<MarketPage />} />
-        <Route path="search" element={<FinancialSearchPage />} />
-        <Route path="assets" element={<AssetsPage />} />
-        <Route path="profile-data" element={<PersonalDataPage />} />
-        <Route path="research" element={<ResearchPage />} />
-        <Route path="exit-advice" element={<ExitAdvicePage />} />
-        <Route path="ai-chat" element={<AIChatPage />} />
-        <Route path="candidates" element={<CandidatesPage />} />
-        <Route path="portfolio" element={<PortfolioPage />} />
-        <Route path="reports" element={<ReportsPage />} />
-        <Route path="runs" element={<RunsPage />} />
-        <Route path="backtest" element={<BacktestPage />} />
-        <Route path="admin/edge-gateway" element={<EdgeGatewayPage />} />
-        <Route path="admin" element={<AdminPage />} />
-        <Route path="admin/models" element={<ModelSettingsPage />} />
-        <Route path="admin/jev-model" element={<JevModelPage />} />
-        <Route path="admin/jev-training" element={<JevTrainingPage />} />
-        <Route path="admin/system-settings" element={<SystemSettingsPage />} />
+        <Route index element={<MonitorPage />} />
+        <Route path="monitor" element={<MonitorPage />} />
+        <Route path="strategies" element={<StrategiesPage />} />
+        <Route path="copilot" element={<AICopilotPage />} />
+        <Route path="settings" element={<SettingsPage />} />
+        {['dashboard', 'market', 'assets', 'exit-advice', 'portfolio'].map((path) => <Route key={path} path={path} element={<Navigate to="/monitor" replace />} />)}
+        {['research', 'candidates', 'reports', 'backtest', 'runs'].map((path) => <Route key={path} path={path} element={<Navigate to="/strategies" replace />} />)}
+        <Route path="ai-chat" element={<Navigate to="/copilot" replace />} />
+        {['admin', 'admin/models', 'admin/system-settings', 'admin/jev-model', 'admin/jev-training', 'profile-data', 'search', 'admin/edge-gateway'].map((path) => <Route key={path} path={path} element={<Navigate to="/settings" replace />} />)}
       </Route>
     </Route>
     <Route path="*" element={<Navigate to="/" replace />} />

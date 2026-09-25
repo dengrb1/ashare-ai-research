@@ -1,4 +1,4 @@
-import type { AIChatAttachment, AIChatMessage, AIChatThread, AICostSummary, AssetState, AuditEvent, BuyEntryMonitor, Candidate, DataEnvelope, ExitAdvice, FinancialSearchResult, FinancialSearchStatus, HealthStatus, KlineBar, KlineQueryOptions, MarketPrefetchResponse, MarketServiceStatus, ModelProbeLog, ModelSettings, ModelSettingsDraft, Notification, NotificationSummary, PersonalArchiveJob, Portfolio, Quote, Report, ReportExecutionStatus, ReportSymbol, ResearchSettings, ResearchSubmission, Run, RunActivityResponse, Score, Snapshot, SystemResources, SystemSettings, SystemSettingsDraft, SystemSettingsUnlock, TokenPair, TradeAdviceMonitor, TradePlan, User } from './types'
+import type { AIChatAttachment, AIChatMessage, AIChatThread, AICostSummary, AssetState, AuditEvent, BuyEntryMonitor, Candidate, DataEnvelope, ExitAdvice, HealthStatus, KlineBar, KlineQueryOptions, MarketPrefetchResponse, MarketServiceStatus, ModelProbeLog, ModelSettings, ModelSettingsDraft, MonitorSignalsResponse, Notification, NotificationSummary, PersonalArchiveJob, Portfolio, Quote, Report, ReportExecutionStatus, ReportSymbol, ResearchSettings, ResearchSubmission, Run, RunActivityResponse, Score, Snapshot, SystemResources, SystemSettings, SystemSettingsDraft, SystemSettingsUnlock, TokenPair, TradeAdviceMonitor, TradePlan, TrainingHistory, TrainingStatus, User } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api/v1').replace(/\/$/, '')
 
@@ -98,7 +98,7 @@ export const api = {
   markAllNotificationsRead: (idempotencyKey = crypto.randomUUID()) => request<NotificationSummary>('/notifications/read-all', { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey } }),
   deleteNotification: (notificationId: string) => request<void>(`/notifications/${encodeURIComponent(notificationId)}`, { method: 'DELETE' }),
   clearNotifications: (idempotencyKey = crypto.randomUUID()) => request<NotificationSummary>('/notifications/clear', { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey } }),
-  aiModels: () => request<{ models: string[]; reasoning_efforts: string[]; web_search_available: boolean; cache_enabled: boolean }>('/ai/models'),
+  aiModels: () => request<{ models: string[]; reasoning_efforts: string[]; cache_enabled: boolean }>('/ai/models'),
   aiCostSummary: (options: { days?: number; limit?: number; before?: string; threadId?: string } = {}) => request<AICostSummary>(`/ai/costs${params({ days: options.days, limit: options.limit, before: options.before, thread_id: options.threadId })}`),
   aiChatThreads: () => request<AIChatThread[]>('/ai/chat/threads'),
   aiChatThreadIndex: (options: { cursor?: string; q?: string; archived?: boolean; limit?: number } = {}) => request<{ items: AIChatThread[]; next_cursor?: string | null }>(`/ai/chat/thread-index${params({ cursor: options.cursor, q: options.q, archived: options.archived ? 'true' : undefined, limit: options.limit })}`),
@@ -122,6 +122,11 @@ export const api = {
   },
   personalImport: (archiveId: string) => request<PersonalArchiveJob>(`/me/data-imports/${encodeURIComponent(archiveId)}`),
   applyPersonalImport: (archiveId: string, mergeOptions: Record<string, unknown>, idempotencyKey: string) => request<PersonalArchiveJob>(`/me/data-imports/${encodeURIComponent(archiveId)}/apply`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ merge_options: mergeOptions }) }),
+  jevTrainingStatus: (trainingId: string) => request<TrainingStatus>(`/training/jev/status/${encodeURIComponent(trainingId)}`),
+  currentJevTraining: () => request<TrainingStatus>('/training/jev/status/current'),
+  jevTrainingHistory: (limit = 20) => request<TrainingHistory>(`/training/jev/history?limit=${limit}`),
+  triggerJevTraining: (payload: { force?: boolean; dataset_config?: Record<string, unknown> } = {}) => request<{ training_id: string; status: string; message: string }>('/training/jev/trigger', { method: 'POST', body: JSON.stringify(payload) }),
+  cancelJevTraining: (trainingId: string) => request<TrainingStatus>(`/training/jev/cancel/${encodeURIComponent(trainingId)}`, { method: 'POST' }),
 
   quote: async (symbol: string, refresh = false, signal?: AbortSignal) => normalizeQuote(await request<RawQuote>(`/market/quotes/${encodeURIComponent(symbol)}${params({ refresh: refresh ? 'true' : undefined })}`, { signal })),
   quotes: async (symbols: string[], refresh = false, signal?: AbortSignal) => {
@@ -156,8 +161,9 @@ export const api = {
   },
   marketStatus: () => request<MarketServiceStatus>('/market/status'),
   marketIndices: (refresh = false) => request<{ quotes: RawQuote[]; labels: Record<string, string> }>(`/market/indices${params({ refresh: refresh ? 'true' : undefined })}`).then((payload) => ({ ...payload, quotes: (payload.quotes || []).map(normalizeQuote) })),
-  financialSearch: (query: string) => request<FinancialSearchResult>(`/search/financial${params({ q: query })}`),
-  financialSearchStatus: () => request<FinancialSearchStatus>('/search/status'),
+  monitorSignals: (symbols: string[], options: { period?: string; limit?: number; refresh?: boolean; decisionAt?: string } = {}) => request<MonitorSignalsResponse>(`/monitor/signals${params({ symbols: symbols.join(','), period: options.period || '5m', limit: options.limit || 120, refresh: options.refresh ? 'true' : undefined, decision_at: options.decisionAt })}`),
+  decisionModels: () => request<{ models: Array<{ version: string; path: string; mode: string }>; current_version?: string | null }>('/decision/models'),
+  decisionMode: () => request<{ decision_mode: string; confidence_threshold: number; system2_enabled: boolean }>('/decision/mode'),
 
   scores: (date: string, runId?: string) => request<Score[]>(`/scores/${date}${params({ run_id: runId })}`),
   score: (date: string, symbol: string, runId?: string) => request<Score>(`/scores/${date}/${encodeURIComponent(symbol)}${params({ run_id: runId })}`),
@@ -165,7 +171,6 @@ export const api = {
   candidates: (date: string, runId?: string) => request<Candidate[]>(`/candidates/${date}${params({ run_id: runId })}`),
   portfolio: (date: string, runId?: string) => request<Portfolio>(`/portfolios/${date}${params({ run_id: runId })}`),
   report: (date: string, runId?: string) => request<Report>(`/reports/${date}${params({ run_id: runId })}`),
-  reportContent: (reportId: string) => request<{ content?: string; body?: string }>(`/reports/${reportId}/content`),
   reportSymbols: (reportId: string) => request<ReportSymbol[]>(`/reports/${reportId}/symbols`),
   reportExecutionStatus: (reportId: string) => request<ReportExecutionStatus>(`/reports/${reportId}/execution-status`),
   reportTradePlans: (reportId: string) => request<TradePlan[]>(`/reports/${reportId}/trade-plans`),
@@ -208,16 +213,11 @@ export const api = {
   saveSystemSettings: (payload: SystemSettingsDraft, unlockToken: string, idempotencyKey: string = crypto.randomUUID()) => request<SystemSettings>('/admin/system-settings', { method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey, 'X-System-Settings-Unlock': unlockToken }, body: JSON.stringify(payload) }),
   restoreSystemSetting: (field: string, unlockToken: string) => request<SystemSettings>(`/admin/system-settings/${encodeURIComponent(field)}`, { method: 'DELETE', headers: { 'X-System-Settings-Unlock': unlockToken } }),
   restoreAllSystemSettings: (unlockToken: string) => request<SystemSettings>('/admin/system-settings', { method: 'DELETE', headers: { 'X-System-Settings-Unlock': unlockToken } }),
-  edgeGateway: (unlockToken?: string) => request<import('./types').EdgeGatewayConfiguration>('/admin/edge-gateway', { headers: unlockToken ? { 'X-System-Settings-Unlock': unlockToken } : undefined }),
-  edgeGatewayLogs: (limit = 200) => request<import('./types').EdgeGatewayLogs>(`/admin/edge-gateway/logs?limit=${limit}`),
-  validateEdgeGateway: (payload: { validation_mode: 'STRICT' | 'COMPATIBLE'; proxy_hosts: import('./types').EdgeProxyHost[]; frpc_toml: string }) => request<{ valid: boolean; nginx_sha256: string; proxy_count: number }>('/admin/edge-gateway/validate', { method: 'POST', body: JSON.stringify(payload) }),
-  saveEdgeGateway: (payload: { enabled: boolean; validation_mode: 'STRICT' | 'COMPATIBLE'; proxy_hosts: import('./types').EdgeProxyHost[]; frpc_toml: string }, unlockToken: string, idempotencyKey = crypto.randomUUID()) => request<import('./types').EdgeGatewayConfiguration>('/admin/edge-gateway', { method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey, 'X-System-Settings-Unlock': unlockToken }, body: JSON.stringify(payload) }),
-  rollbackEdgeGateway: (unlockToken: string) => request<import('./types').EdgeGatewayConfiguration>('/admin/edge-gateway/rollback', { method: 'POST', headers: { 'X-System-Settings-Unlock': unlockToken } }),
 }
 
 export async function streamAIChat(
   threadId: string,
-  payload: { content: string; model: string; reasoning_effort: string; web_search: boolean; attachment_ids?: string[]; mention_refs?: Array<{ symbol: string; name: string }>; decision_at?: string },
+  payload: { content: string; model: string; reasoning_effort: string; attachment_ids?: string[]; mention_refs?: Array<{ symbol: string; name: string }>; decision_at?: string; web_search?: boolean },
   onEvent: (event: Record<string, unknown>) => void,
   signal?: AbortSignal,
   idempotencyKey: string = crypto.randomUUID(),

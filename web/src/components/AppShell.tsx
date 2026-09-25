@@ -1,10 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router'
-import {
-  Activity, Bell, CandlestickChart, Cpu, FileText, FlaskConical, FolderArchive,
-  History, LayoutDashboard, ListChecks, MessageSquare, Network, PieChart,
-  RefreshCw, Search, Settings, Star, TrendingDown, Users,
-} from 'lucide-react'
+import { Activity, BrainCircuit, FlaskConical, LayoutDashboard, RefreshCw, Settings } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { MARKET_REFRESH_INTERVAL_OPTIONS, useMarket } from '../context/MarketContext'
 import { formatTime } from './Ui'
@@ -19,49 +15,21 @@ type NavItem = { to: string; label: string; icon: typeof LayoutDashboard; end?: 
 type NavGroup = { group: string }
 
 const NAV: Array<NavItem | NavGroup> = [
-  { to: '/', label: '全局仪表盘', icon: LayoutDashboard, end: true },
-  { to: '/market', label: '行情与 K 线', icon: CandlestickChart },
-  { to: '/search', label: '金融数据搜索', icon: Search },
-  { to: '/assets', label: '自选与持仓', icon: Star },
-  { to: '/profile-data', label: '个人档案', icon: FolderArchive },
-  { group: '研究中心' },
-  { to: '/research', label: '每日研究', icon: FlaskConical },
-  { to: '/exit-advice', label: '卖出建议', icon: TrendingDown },
-  { to: '/ai-chat', label: 'AI 股票问答', icon: MessageSquare },
-  { to: '/candidates', label: '候选池', icon: ListChecks },
-  { to: '/portfolio', label: '模拟组合', icon: PieChart },
-  { to: '/reports', label: '研究报告', icon: FileText },
-  { group: '任务与系统' },
-  { to: '/backtest', label: '回测工作台', icon: History },
-  { to: '/runs', label: '运行与审计', icon: Activity },
-  { group: '管理' },
+  { to: '/monitor', label: '盘面监控', icon: LayoutDashboard, end: true },
+  { to: '/strategies', label: '策略工作台', icon: FlaskConical },
+  { to: '/copilot', label: '研究副驾驶', icon: BrainCircuit },
+  { group: '控制面' },
+  { to: '/settings', label: '设置', icon: Settings },
 ]
 
-const ADMIN_NAV: NavItem[] = [
-  { to: '/admin', label: '用户管理', icon: Users, end: true },
-  { to: '/admin/system-settings', label: '系统设置', icon: Settings },
-  { to: '/admin/models', label: '模型设置', icon: Cpu },
-  { to: '/admin/edge-gateway', label: 'Edge Gateway', icon: Network },
-]
+const ADMIN_NAV: NavItem[] = []
 
 const TITLES: Record<string, [string, string]> = {
-  '/': ['全局仪表盘', '研究运行、市场状态与组合概览'],
-  '/market': ['行情与 K 线', '活跃标的按需刷新 · 历史序列后复权'],
-  '/search': ['金融数据搜索', 'AI 解析意图 · 确定性数据源返回金融事实'],
-  '/assets': ['自选与持仓', '关注列表与个人持仓记录'],
-  '/profile-data': ['个人档案', '加密导出 · 安全预览 · 分类合并导入'],
-  '/research': ['每日研究', '基于冻结快照的可复现异步研究'],
-  '/exit-advice': ['卖出建议', '盘中盈利触发 · AI 分档退出研究 · 模拟交易门禁'],
-  '/ai-chat': ['AI 股票问答', '@股票读取系统数据 · 流式持久对话'],
-  '/candidates': ['候选池', '确定性公式评分与风险过滤结果'],
-  '/portfolio': ['模拟组合', '组合权重、行业约束与调仓建议'],
-  '/reports': ['研究报告', '研究结论与可追溯证据摘要'],
-  '/backtest': ['回测工作台', '固定快照上的事件驱动回测'],
-  '/runs': ['运行与审计', '任务状态、失败原因和审计事件'],
-  '/admin/edge-gateway': ['Edge Gateway', 'FRP 隧道与结构化 Nginx 代理主机'],
-  '/admin': ['用户管理', '账户、角色与访问控制'],
-  '/admin/models': ['模型设置', '加密凭据、模型分工、连通性与版本状态'],
-  '/admin/system-settings': ['系统设置', '持久化运行配置与 Worker 执行拓扑'],
+  '/': ['盘面监控', '实时行情、K 线与确定性告警'],
+  '/monitor': ['盘面监控', '实时行情、K 线与确定性告警'],
+  '/strategies': ['策略工作台', '选股池、回测与结构化研究结果'],
+  '/copilot': ['研究副驾驶', 'Jev 裁决与低置信度 System-2 诊断'],
+  '/settings': ['设置', '运行时、模型、Jev 与个人数据'],
 }
 
 export function titleForPathname(pathname: string): [string, string] {
@@ -100,7 +68,9 @@ export function AppShell() {
     }
   }, [menuOpen])
 
-  useEffect(() => { setMenuOpen(false) }, [location.pathname])
+  useEffect(() => {
+    if (menuOpen) setMenuOpen(false)
+  }, [location.pathname])
 
   return <div className="app-shell">
     <button className={`nav-overlay ${menuOpen ? 'visible' : ''}`} aria-label="关闭导航菜单" tabIndex={menuOpen ? 0 : -1} onClick={() => closeMenu()} />

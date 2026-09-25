@@ -141,7 +141,6 @@ NUMBER_FIELDS = {
     "gateway_port",
     "local_model_port",
     "quote_bridge_port",
-    "news_bridge_port",
 }
 
 

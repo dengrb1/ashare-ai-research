@@ -24,7 +24,7 @@
 | 目的 | 接口 | 移动端处理 |
 |---|---|---|
 | 报告头 | `GET /reports/{trading_date}?run_id=...` | 显示报告类型、生成时间和状态 |
-| 报告正文 | `GET /reports/{report_id}/content` | 用受限 HTML/WebView 容器展示；禁止执行脚本、打开任意外链或暴露 `object_uri` |
+| 结构化报告结果 | `GET /reports/{trading_date}?run_id=...` | 渲染 `result` 和 `market_index_snapshot`；不要读取可空的历史对象元数据 |
 | 逐股研究 | `GET /reports/{report_id}/symbols` | 使用服务端排序，保留 `advice_eligible`、`research_status` 和评分 |
 | 冻结评分 | `GET /scores/{date}/{symbol}?run_id=...` | 显示确定性分数与公式版本 |
 | 实时复核 | `/market/quotes`、`/market/klines` | 与冻结结论分区显示，保留来源和延迟标记 |
@@ -47,5 +47,5 @@ idle -> submitting -> queued/waiting -> running -> succeeded|fused|failed|cancel
 
 - `/api/v1` 字段只做新增，客户端对未知字段忽略，对可空新增字段使用安全空状态。
 - 列表、报告与 K 线请求必须传服务端允许的 `limit` 和 `run_id`，不依赖隐式“最新报告”。
-- 记录本地草稿时不保存令牌、完整报告 HTML、审计详情、原始响应或模型提示词；只保存未提交的范围、预算和选择状态。
+- 记录本地草稿时不保存令牌、完整报告结果、审计详情、原始响应或模型提示词；只保存未提交的范围、预算和选择状态。
 - 后续移动端设计应复用报告工作台的信息层级：报告总览、可追溯运行状态、逐股选择、冻结评分、实时复核和模拟方案。至高模式的视觉标识只反映已返回的 `supreme_mode`/`execution_profile`，不在客户端伪造资源状态。

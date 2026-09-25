@@ -264,7 +264,6 @@ curl http://localhost:8787/health
 {
   "status": "ok",
   "quote_bridge": {"status": "ok"},
-  "news_bridge": {"status": "ok"},
   "gateway": {"status": "ok"}
 }
 ```

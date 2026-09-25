@@ -18,23 +18,23 @@ def test_compose_declares_low_memory_control_plane() -> None:
     compose = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
     services = compose["services"]
     assert {
+        "private-data-init",
+        "gateway",
+        "quote-bridge",
         "web",
         "api",
         "job-worker",
-        "worker",
-        "backtest-worker",
-        "research-worker",
         "postgres",
         "redis",
     } <= set(services)
+    assert not (
+        {"worker", "backtest-worker", "research-worker", "exit-advice-worker"}
+        & set(services)
+    )
     assert "minio" not in services["api"]["depends_on"]
     assert "minio" not in services
     assert "minio-init" not in services
-    assert services["research-worker"]["profiles"] == ["dual-research"]
-    assert services["research-worker"]["scale"] == 2
-    assert "healthcheck" in services["research-worker"]
     assert services["job-worker"]["mem_limit"] == "700m"
-    assert services["research-worker"]["mem_limit"] == "700m"
     assert DEFAULT_WORKER_LIMIT_BYTES == 700 * MIB
     assert "scale" not in services["job-worker"]
     assert services["api"]["mem_limit"] == "384m"
@@ -44,9 +44,9 @@ def test_compose_declares_low_memory_control_plane() -> None:
     assert "healthcheck" in services["redis"]
     assert ".env.docker" in services["api"]["env_file"]
     assert "host.docker.internal:host-gateway" in services["job-worker"]["extra_hosts"]
-    assert services["searxng"]["profiles"] == ["search"]
-    assert "searxng" not in services["api"]["depends_on"]
-    assert "searxng" not in services["job-worker"]["depends_on"]
+    assert services["gateway"]["mem_limit"] == "128m"
+    assert "gateway" in services["api"]["depends_on"]
+    assert "quote-bridge" in services["api"]["depends_on"]
     web_loopback = "${WEB_BIND_ADDRESS:-127.0.0.1}"
     api_loopback = "${API_BIND_ADDRESS:-127.0.0.1}"
     service_loopback = "${SERVICE_BIND_ADDRESS:-127.0.0.1}"
@@ -56,77 +56,15 @@ def test_compose_declares_low_memory_control_plane() -> None:
     assert services["redis"]["ports"] == [f"{service_loopback}:6379:6379"]
 
 
-def test_optional_edge_gateway_is_isolated_and_memory_bounded() -> None:
-    compose = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
-    edge = compose["services"]["edge-gateway"]
-    assert edge["profiles"] == ["edge"]
-    assert edge["mem_limit"] == "96m"
-    assert edge["pids_limit"] == 128
-    assert edge["read_only"] is True
-    assert "ports" not in edge
-    assert edge["depends_on"] == {"web": {"condition": "service_healthy"}}
-    assert edge["environment"]["EDGE_FRPC_ENABLED"] == "${EDGE_FRPC_ENABLED:-false}"
-    assert edge["environment"]["EDGE_GATEWAY_RELEASE"] == "alpha"
-    assert edge["labels"]["io.ashare.edge-gateway.release"] == "alpha"
-    assert edge["build"]["args"]["EDGE_GATEWAY_VERSION"] == "${EDGE_GATEWAY_VERSION:-2.0.4-alpha.1}"
-    assert edge["security_opt"] == ["no-new-privileges:true"]
-    assert "NET_BIND_SERVICE" in edge["cap_add"]
-    assert "edge-acme-data:/var/lib/acme" in edge["volumes"]
-    assert "edge-certificates:/etc/edge/certs" in edge["volumes"]
-    assert "edge-gateway-logs:/var/log/edge" in edge["volumes"]
-    assert "/var/lib/acme-webroot:rw,noexec,nosuid,size=4m" in edge["tmpfs"]
-
-
 def test_ghcr_deployment_pulls_every_custom_image() -> None:
     ghcr = yaml.safe_load((ROOT / "compose.ghcr.yaml").read_text(encoding="utf-8"))
     services = ghcr["services"]
     assert "ashare-ai-research:latest" in services["api"]["image"]
     assert "ashare-ai-research-web:latest" in services["web"]["image"]
     assert "ashare-ai-research-postgres:latest" in services["postgres"]["image"]
-    assert "ashare-ai-research-edge-gateway:alpha" in services["edge-gateway"]["image"]
-    for service in ("api", "web", "postgres", "edge-gateway"):
+    assert "ashare-ai-research:latest" in services["job-worker"]["image"]
+    for service in ("api", "web", "job-worker", "postgres"):
         assert services[service]["build"] is None
-
-    workflow = (ROOT / ".github" / "workflows" / "build-and-publish.yml").read_text(
-        encoding="utf-8"
-    )
-    assert "image_name: edge-gateway" in workflow
-    assert 'image_suffix: "-edge-gateway"' in workflow
-    assert "type=raw,value=alpha" in workflow
-
-
-def test_edge_gateway_pins_downloads_and_sanitizes_forwarded_headers() -> None:
-    dockerfile = (ROOT / "docker" / "edge-gateway.Dockerfile").read_text(encoding="utf-8")
-    nginx = (ROOT / "docker" / "edge-gateway" / "edge.conf.template").read_text(encoding="utf-8")
-    entrypoint = (ROOT / "docker" / "edge-gateway" / "entrypoint.sh").read_text(encoding="utf-8")
-    assert "FRP_VERSION=0.68.0" in dockerfile
-    assert "FRP_SHA256=" in dockerfile
-    assert "ACME_SH_VERSION=3.1.1" in dockerfile
-    assert "ACME_SH_SHA256=" in dockerfile
-    assert "sha256sum -c -" in dockerfile
-    assert "chown -R nginx:nginx /var/lib/acme" not in dockerfile
-    assert "chown -R nginx:nginx /var/cache/nginx" in dockerfile
-    assert "EDGE_GATEWAY_VERSION=2.0.4-alpha.1" in dockerfile
-    assert 'org.opencontainers.image.version="${EDGE_GATEWAY_VERSION}"' in dockerfile
-    assert "sed -i 's/\\r$//' /usr/local/bin/edge-gateway-entrypoint" in dockerfile
-    assert "ssl_protocols TLSv1.2 TLSv1.3" in nginx
-    assert "ssl_reject_handshake on" in nginx
-    assert "return 308 https://${EDGE_DOMAIN}$request_uri;" in nginx
-    assert "return 308 https://$host$request_uri;" not in nginx
-    assert "proxy_set_header X-Forwarded-For $remote_addr" in nginx
-    assert "$proxy_add_x_forwarded_for" not in nginx
-    assert "proxy_buffering off" in nginx
-    assert "--keylength ec-256" in entrypoint
-    assert "--issue --webroot \"$ACME_WEBROOT\"" in entrypoint
-    assert "--standalone" not in entrypoint
-    assert "migrate_acme_webroot" in entrypoint
-    assert "BOOTSTRAP_MARKER" in entrypoint
-    assert "EDGE_FRPC_ENABLED=true requires" in entrypoint
-    assert "using /tmp/edge logs until the container is recreated" in entrypoint
-    assert "if ! mkdir -p \"$LOG_DIR\" 2>/dev/null || [ ! -w \"$LOG_DIR\" ]; then" in entrypoint
-    assert 'chown -R nginx:nginx "$ACME_HOME"' not in entrypoint
-    assert "chown -R nginx:nginx /tmp/client_temp" in entrypoint
-
 
 def test_local_and_docker_environment_templates_are_separated() -> None:
     local = (ROOT / ".env.local.example").read_text(encoding="utf-8")
@@ -161,9 +99,6 @@ def test_container_install_uses_dependency_lock() -> None:
     dockerfile = (ROOT / "docker" / "app.Dockerfile").read_text(encoding="utf-8")
     assert "requirements.lock" in dockerfile
     assert "pip install --no-cache-dir --requirement requirements.runtime.lock" in dockerfile
-    assert "NEODATA_FINANCIAL_SEARCH_COMMIT=" in dockerfile
-    assert "NEODATA_FINANCIAL_SEARCH_SHA256=" in dockerfile
-    assert "NEODATA_FINANCIAL_SEARCH_PATH=/opt/neodata-financial-search/query.py" in dockerfile
     lock = (ROOT / "requirements.lock").read_text(encoding="utf-8")
     runtime_lock = (ROOT / "requirements.runtime.lock").read_text(encoding="utf-8")
     assert len(lock) > 100
@@ -203,13 +138,7 @@ def test_native_windows_entry_is_external_and_checksum_verified() -> None:
     native = ROOT / "scripts" / "native"
     lock = json.loads((native / "dependencies.lock.json").read_text(encoding="utf-8"))
     assert lock["platform"] == "windows-amd64"
-    assert {item["id"] for item in lock["artifacts"]} == {
-        "postgres",
-        "redis-compatible",
-        "searxng",
-    }
-    searxng = next(item for item in lock["artifacts"] if item["id"] == "searxng")
-    assert len(searxng["commit"]) == 40
+    assert {item["id"] for item in lock["artifacts"]} == {"postgres", "redis-compatible"}
     installer = (native / "ashare-native.ps1").read_text(encoding="utf-8")
     assert "must be outside the source checkout" in installer
     assert "Get-FileHash -Algorithm SHA256" in installer
@@ -224,7 +153,6 @@ def test_native_windows_entry_is_external_and_checksum_verified() -> None:
     assert 'UserId "SYSTEM"' not in installer
     assert '@("task", "account", "system")' not in installer
     assert "native-ports.json" in installer
-    assert "pwd.py" in installer
     assert "postgres.exe" in installer
     assert "Wait-PostgresReady" in installer
     assert "pg_ctl.exe" in installer
@@ -286,8 +214,6 @@ def test_native_windows_entry_is_external_and_checksum_verified() -> None:
     assert "FindWindow" in single_instance
     assert "TryAcquire" in program
     assert "SingleInstance.cs" in build
-    assert len(searxng["sha256"]) == 64
-    assert searxng["archive_url"].endswith(f"{searxng['commit']}.zip")
     assert not (native / "gui.cmd").exists()
     assert (ROOT / "docs" / "NATIVE_WINDOWS.md").is_file()
     linux_gui = ROOT / "linux" / "native-control-center"
@@ -338,7 +264,7 @@ def test_linux_native_status_is_fast_and_safe_before_install(tmp_path: Path) -> 
     assert report["desired_state"] == "STOPPED"
     assert report["runtime_healthy"] is False
     assert report["installation"]["status"] == "NOT_INSTALLED"
-    assert set(report["ports"]) == {"postgres", "redis", "api", "searxng"}
+    assert set(report["ports"]) == {"postgres", "redis", "api"}
     assert "T" in report["collected_at"]
 
 

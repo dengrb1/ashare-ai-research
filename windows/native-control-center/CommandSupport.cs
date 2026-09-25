@@ -79,7 +79,7 @@ namespace AshareAI.NativeControlCenter
                 "",
                 "命令:",
                 "  install       安装或更新本机运行依赖",
-                "  start         启动 PostgreSQL、Redis、SearXNG、API 和 Worker",
+                "  start         启动 PostgreSQL、Redis、API 和单一 job-worker",
                 "  stop          停止本机运行进程",
                 "  restart       重启本机运行进程",
                 "  repair        修复端口、看门狗任务等本机配置",
@@ -91,9 +91,6 @@ namespace AshareAI.NativeControlCenter
                 "常用选项:",
                 "  --root <path>                 指定运行目录，默认管理器目录下的 runtime",
                 "  --source-root <path>          指定应用载荷目录",
-                "  --research-mode SERIAL|DUAL   启动/安装时设置研究模式",
-                "  --research-workers 0..2       DUAL 模式研究进程数",
-                "  --watchdog-interval <秒>      看门狗间隔，5..300",
                 "  --admin-username <name>       首次安装管理员用户名",
                 "  --admin-password <password>   首次安装管理员密码",
                 "  --tail <lines>                logs 命令输出行数，默认 200"
@@ -113,21 +110,6 @@ namespace AshareAI.NativeControlCenter
             if (request.Json) arguments.Add("-Json");
             if (request.Operation == "status") arguments.Add("-Fast");
             if (request.NoWatchdog) arguments.Add("-NoWatchdog");
-            if (!String.IsNullOrEmpty(request.ResearchMode))
-            {
-                arguments.Add("-ResearchMode");
-                arguments.Add(request.ResearchMode);
-            }
-            if (request.ResearchWorkers.HasValue)
-            {
-                arguments.Add("-ResearchWorkers");
-                arguments.Add(Convert.ToString(request.ResearchWorkers.Value));
-            }
-            if (request.WatchdogIntervalSeconds.HasValue)
-            {
-                arguments.Add("-WatchdogIntervalSeconds");
-                arguments.Add(Convert.ToString(request.WatchdogIntervalSeconds.Value));
-            }
             if (!String.IsNullOrEmpty(request.AdminUsername))
             {
                 arguments.Add("-AdminUsername");
@@ -225,9 +207,6 @@ namespace AshareAI.NativeControlCenter
         public bool MissingCommand;
         public bool Json;
         public bool NoWatchdog;
-        public string ResearchMode;
-        public int? ResearchWorkers;
-        public int? WatchdogIntervalSeconds;
         public string AdminUsername;
         public string AdminPassword;
         public int TailLines = 200;
@@ -267,21 +246,6 @@ namespace AshareAI.NativeControlCenter
                 {
                     request.OptionArgs.Add(value);
                     request.OptionArgs.Add(args[++index]);
-                    continue;
-                }
-                if (lower == "--research-mode" && index + 1 < args.Length)
-                {
-                    request.ResearchMode = args[++index].ToUpperInvariant();
-                    continue;
-                }
-                if (lower == "--research-workers" && index + 1 < args.Length)
-                {
-                    request.ResearchWorkers = Int32.Parse(args[++index]);
-                    continue;
-                }
-                if (lower == "--watchdog-interval" && index + 1 < args.Length)
-                {
-                    request.WatchdogIntervalSeconds = Int32.Parse(args[++index]);
                     continue;
                 }
                 if (lower == "--admin-username" && index + 1 < args.Length)

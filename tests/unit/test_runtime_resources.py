@@ -52,7 +52,7 @@ def test_cgroup_working_set_excludes_inactive_file(monkeypatch, tmp_path: Path) 
     assert service["memory_cache_bytes"] == 250
 
 
-def test_runtime_snapshot_estimates_dual_from_job_worker(monkeypatch) -> None:
+def test_runtime_snapshot_estimates_single_job_worker(monkeypatch) -> None:
     monkeypatch.setattr(
         runtime_resources.psutil,
         "virtual_memory",
@@ -102,8 +102,8 @@ def test_runtime_snapshot_estimates_dual_from_job_worker(monkeypatch) -> None:
     ]
     snapshot = sample_runtime_resources(workers)
     assert snapshot["topology_estimate"]["estimate_source"] == "job-worker"
-    assert snapshot["topology_estimate"]["typical_increment_bytes"] == 400 * MIB
-    assert snapshot["topology_estimate"]["maximum_increment_bytes"] == 1400 * MIB
+    assert snapshot["topology_estimate"]["typical_increment_bytes"] == 200 * MIB
+    assert snapshot["topology_estimate"]["maximum_increment_bytes"] == 700 * MIB
     assert snapshot["level"] == "NORMAL"
     assert "path" not in json.dumps(snapshot, default=str).lower()
 
@@ -140,10 +140,9 @@ def test_worker_heartbeat_adds_resources_and_reads_legacy(monkeypatch) -> None:
     assert current["memory_used_bytes"] == 10
     assert current["memory_limit_bytes"] == 20
 
-    publish_service_heartbeat(client, role="exit-advice-worker")
-    lightweight = next(
-        row for row in read_heartbeats(client) if row["role"] == "exit-advice-worker"
-    )
+    publish_service_heartbeat(client, role="job-worker")
+    lightweight = read_heartbeats(client)[0]
+    assert lightweight["worker_id"] == current["worker_id"]
     assert lightweight["loaded_mode"] == "UNKNOWN"
 
     client.values["ashare:workers:legacy"] = json.dumps(
@@ -151,7 +150,6 @@ def test_worker_heartbeat_adds_resources_and_reads_legacy(monkeypatch) -> None:
     )
     assert {row["worker_id"] for row in read_heartbeats(client)} == {
         "legacy",
-        current["worker_id"],
         lightweight["worker_id"],
     }
 
@@ -173,5 +171,5 @@ def test_observability_redis_failure_does_not_escape(monkeypatch) -> None:
         },
     )
     client = UnavailableRedis()
-    assert publish_service_heartbeat(client, role="exit-advice-worker")
+    assert publish_service_heartbeat(client, role="job-worker")
     assert read_heartbeats(client) == []

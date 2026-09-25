@@ -2,7 +2,7 @@
 
 版本：`v1`  
 基础路径：`/api/v1`  
-契约来源：`src/ashare_ai/api/app.py`、`src/ashare_ai/api/schemas.py` 及 `src/ashare_ai/search/service.py`
+契约来源：`src/ashare_ai/api/app.py` 与 `src/ashare_ai/api/schemas.py`
 
 本文档描述当前代码实际注册的公开 HTTP API。接口只用于研究、评分、报告、回测和模拟组合，不执行真实下单。
 
@@ -165,16 +165,12 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 节能模式 | GET | `/api/v1/admin/energy-saving` | 管理员；当前节能状态只读 |
 | 节能模式 | POST | `/api/v1/admin/energy-saving/enable` | 管理员；重新启用自动进入 |
 | 节能模式 | POST | `/api/v1/admin/energy-saving/disable` | 管理员；强制唤醒一个周期 |
-| Edge Gateway | GET/PUT | `/api/v1/admin/edge-gateway` | 管理员；写入需解锁与幂等键 |
-| Edge Gateway 校验 | POST | `/api/v1/admin/edge-gateway/validate` | 管理员；结构化 Nginx/FRP 校验 |
-| Edge Gateway 回滚 | POST | `/api/v1/admin/edge-gateway/rollback` | 管理员；写入需解锁 |
 | 研究结果 | GET | `/api/v1/scores/{trading_date}` | 登录 |
 | 研究结果 | GET | `/api/v1/scores/{trading_date}/{symbol}` | 登录 |
 | 研究结果 | GET | `/api/v1/scores/{trading_date}/{symbol}/lineage` | 登录 |
 | 研究结果 | GET | `/api/v1/candidates/{trading_date}` | 登录 |
 | 研究结果 | GET | `/api/v1/portfolios/{trading_date}` | 登录 |
 | 报告 | GET | `/api/v1/reports/{trading_date}` | 登录 |
-| 报告 | GET | `/api/v1/reports/{report_id}/content` | 登录 |
 | 报告 | GET | `/api/v1/reports/{report_id}/symbols` | 登录 |
 | 报告 | GET | `/api/v1/reports/{report_id}/execution-status` | 登录、所有者 |
 | Trade Plan | POST/GET | `/api/v1/reports/{report_id}/trade-plans` | 写入/登录 |
@@ -312,15 +308,13 @@ Web 登录。请求体为 `LoginRequest`：
     "max_research_symbols":100,
     "max_trade_plan_symbols":15,
     "portfolio_target_count":15,
-    "features": {"watchlist_research_selection":true,"formal_watchlist_reports":true,"report_symbol_eligibility":true,"trade_plan_generation":true,"research_cancellation":true,"idempotency_key":true,"paper_portfolio_only":true,"profit_exit_monitor":true,"stop_loss_monitor":true,"buy_entry_monitor":true,"market_refresh_interval_setting":true,"notifications":true,"chat_context_metrics":true,"ai_cost_summary":true,"persistent_ai_chat":true,"chat_images_seven_day_retention":true,"personal_archive_export_import":true,"searxng_web_research":false},
+     "features": {"watchlist_research_selection":true,"formal_watchlist_reports":true,"report_symbol_eligibility":true,"trade_plan_generation":true,"research_cancellation":true,"idempotency_key":true,"paper_portfolio_only":true,"profit_exit_monitor":true,"stop_loss_monitor":true,"buy_entry_monitor":true,"market_refresh_interval_setting":true,"notifications":true,"chat_context_metrics":true,"ai_cost_summary":true,"persistent_ai_chat":true,"chat_images_seven_day_retention":true,"personal_archive_export_import":true},
     "endpoints": {"assets":"/api/v1/assets","exit_monitor_settings":"/api/v1/assets/exit-monitor","market_refresh_settings":"/api/v1/assets/market-refresh","research_runs":"/api/v1/research/runs","research_run":"/api/v1/research/runs/{run_id}","research_settings":"/api/v1/research/settings","exit_advice":"/api/v1/exit-advice","manual_exit_advice":"/api/v1/exit-advice/manual","buy_entry_monitors":"/api/v1/buy-entry-monitors","notifications":"/api/v1/notifications","notification_summary":"/api/v1/notifications/summary","security_resolve":"/api/v1/securities/resolve","chat_metrics":"/api/v1/ai/chat/metrics","ai_costs":"/api/v1/ai/costs","ai_chat_threads":"/api/v1/ai/chat/threads","ai_chat_thread_index":"/api/v1/ai/chat/thread-index","personal_data_exports":"/api/v1/me/data-exports","personal_data_imports":"/api/v1/me/data-imports"}
   }
 }
 ```
 
 `portfolio_target_count` 从版本化策略配置读取，不应由客户端写入或覆盖。
-`searxng_web_research` 由服务端 `SEARXNG_BASE_URL` 动态决定；默认低内存栈为
-`false`，启用 Compose `search` profile 并配置该 URL 后为 `true`。
 
 ### 5.2 卖出建议、买入监控与通知
 
@@ -488,7 +482,7 @@ Trade Plan 只接受报告中通过个股数据门禁、事件风险门禁和验
 
 ### API 运行模式
 
-API 实时行情资源提供两个模式，模式值为 `LIGHTWEIGHT` 或 `SUPREME`。它只影响 API 进程的实时行情适配器、缓存和并发，不改变研究 Worker 的 `SERIAL|DUAL` 拓扑、模型并发、评分公式或点时约束。
+API 实时行情资源提供两个模式，模式值为 `LIGHTWEIGHT` 或 `SUPREME`。它只影响 API 进程的实时行情适配器、缓存和并发，不改变单一 `job-worker` 拓扑、模型并发、评分公式或点时约束。
 
 - `LIGHTWEIGHT`（默认）：使用低驻留的 Sina/Tencent 适配器，最多 128 个进程内行情缓存条目，预取和 provider 并发各为 1，不在 API 启动时预热 AKShare。
 - `SUPREME`：使用可复用的隔离 AKShare 子进程，并按现有行情配置恢复缓存和预取并发；重型 SDK 不进入 API 主解释器。
@@ -516,10 +510,8 @@ curl -sS -X PUT "$BASE_URL/api/v1/admin/runtime/mode" \
 
 ### 节能模式（Energy Saving）
 
-节能模式是收盘后、当日每日研究全部完成后进入的低活动状态：Worker 停止逐秒轮询队列（深度待机，
-心跳携带 `energy_saving=true`），宿主侧拓扑控制器可根据 `/api/internal/topology-desired` 的
-`energy_saving_active` 信号停掉可选服务（`searxng`、空闲的 `job-worker` 与 `exit-advice-worker`），
-仅在夜间保留 API、Web、PostgreSQL 与 Redis。该模式**默认关闭**，需管理员在系统设置中心开启
+节能模式是收盘后、当日每日研究全部完成后进入的低活动状态：单一 `job-worker` 停止逐秒轮询队列（深度待机，
+心跳携带 `energy_saving=true`），仅在夜间保留 API、Web、PostgreSQL 与 Redis。该模式**默认关闭**，需管理员在系统设置中心开启
 `energy_saving_enabled`（或环境变量）。
 
 进入条件（全部满足才进入）：`energy_saving_enabled=true`、已收盘（`is_after_close`）、且没有
@@ -545,26 +537,19 @@ curl -sS -X POST "$BASE_URL/api/v1/admin/energy-saving/disable" \
 注意：`energy_saving_enabled` 属于系统设置中心可热加载的非拓扑字段；`enable`/`disable` 是临时操作
 状态（带 TTL、可逆），不需要系统设置解锁。
 
-### Edge Gateway 配置中心
-
-`GET /api/v1/admin/edge-gateway` 返回当前版本、结构化代理主机、配置哈希、应用状态和 `source_sync`；未携带有效 `X-System-Settings-Unlock` 时不返回 FRP 明文。服务端每次读取都会检查部署配置目录中的 `frpc.toml`/`managed.conf`，外部变更会导入新的不可变版本。`PUT` 使用当前管理员解锁令牌保存最多 32 个代理主机和 64 KiB FRP TOML，FRP 内容使用 `EDGE_GATEWAY_ENCRYPTION_KEYS` 加密，提交按 `Idempotency-Key` 去重。代理目标必须匹配 `EDGE_PROXY_TARGET_ALLOWLIST`（默认 `web`）或私有/回环 IP，禁止自定义 Nginx 指令。
-
-请求和响应中的 `validation_mode` 为 `STRICT` 或 `COMPATIBLE`，默认 `STRICT`。严格模式要求当前 FRP camelCase 字段；兼容模式额外接受旧版 `[common]`、snake_case 连接/代理字段和旧式代理段落名，适合 FRP 0.x 配置。两种模式都会拒绝非法 TOML、非 `127.0.0.1` 的 FRP 本地目标以及非 80/443 的网关端口，不能用来关闭安全门禁。`GET /api/v1/admin/edge-gateway/logs?limit=200` 返回最近 FRP 运行日志；日志只读取部署挂载的日志目录并脱敏 Token、密码、密钥和 Authorization 值。
-
-本机拓扑控制器使用 `GET /api/internal/edge-gateway-config` 读取已校验配置，原子写入未跟踪的 `EDGE_GATEWAY_CONFIG_DIR`，并通过 `POST /api/internal/edge-gateway-applied` 回报应用结果；两个接口只接受 `TOPOLOGY_CONTROLLER_TOKEN`，API 不访问 Docker socket。
-
-`GET /api/internal/topology-desired` 在既有拓扑字段之外新增节能信号：`energy_saving_enabled`、`energy_saving_active`、`energy_saving_since`、`energy_saving_reason`。宿主控制器可在 `energy_saving_active=true` 时停止可选服务（例如 `docker compose -p ashare-ai-src -f compose.yaml stop searxng job-worker exit-advice-worker`），在变为 `false` 后执行 `up -d` 恢复；API 自身不会访问 Docker socket。
+`GET /api/internal/topology-desired` 在既有运行时字段之外返回节能信号：`energy_saving_enabled`、
+`energy_saving_active`、`energy_saving_since` 和 `energy_saving_reason`。宿主控制器只需按该信号
+停止或恢复单一 `job-worker`，API 自身不会访问 Docker socket。
 
 `GET /api/v1/admin/system-settings` 返回有效的公开设置、每项来源（`database|environment`）、不可变配置版本/哈希、敏感项是否已配置、环境只读状态、Worker 心跳、已加载执行模式及各队列 `pending/processing` 摘要。它绝不返回 Tushare、对象存储或模型密钥，也不返回数据库/Redis 地址、认证参数、Fernet 密钥或卷路径。Worker 心跳可以包含清洗后的内存、内存上限和 CPU 指标。
 
-`GET /api/v1/admin/system-resources` 返回服务器或 Docker VM 的内存、CPU、运行文件系统磁盘指标，以及 API/Worker 的清洗后资源占用。Docker Desktop 下总览是整个 Docker VM，并不等于当前 Compose 项目的服务合计；服务表只展示能够通过应用心跳安全采集的 Python 服务。服务的 `memory_used_bytes` 是扣除 cgroup `inactive_file` 后的工作集，可选的 `memory_cache_bytes` 单独表示这部分可回收文件缓存。`scope` 明确区分 `HOST|CONTAINER`。`topology_estimate` 返回 DUAL 的 Worker 数、估算来源、单 Worker 典型占用、典型新增量、最大预算、预计剩余内存和 `NORMAL|WARNING|CRITICAL` 等级；顶层 `warnings` 同时包含内存、CPU 和磁盘提醒。该接口不使用 Docker socket，不返回路径、容器环境变量或未经清洗的运行时配置。
+`GET /api/v1/admin/system-resources` 返回服务器或 Docker VM 的内存、CPU、运行文件系统磁盘指标，以及 API/Worker 的清洗后资源占用。Docker Desktop 下总览是整个 Docker VM，并不等于当前 Compose 项目的服务合计；服务表只展示能够通过应用心跳安全采集的 Python 服务。服务的 `memory_used_bytes` 是扣除 cgroup `inactive_file` 后的工作集，可选的 `memory_cache_bytes` 单独表示这部分可回收文件缓存。`scope` 明确区分 `HOST|CONTAINER`。`topology_estimate` 返回单一 `job-worker` 的估算来源、典型占用、典型新增量、最大预算、预计剩余内存和 `NORMAL|WARNING|CRITICAL` 等级；顶层 `warnings` 同时包含内存、CPU 和磁盘提醒。该接口不使用 Docker socket，不返回路径、容器环境变量或未经清洗的运行时配置。
 
 `PUT /api/v1/admin/system-settings` 接收 `SystemSettingsRequest` 的任意非空子集，支持 `Idempotency-Key`。每次成功保存均创建一个新的不可变 PostgreSQL 版本；同一个键与同一请求体重试不会创建第二个版本，同键不同请求体返回 `409`。可编辑公开字段包括：
 
-- `research_execution_mode=SERIAL|DUAL`、`llm_agent_max_concurrency=1..4`、`edge_gateway_enabled` 与 `auto_restart_enabled`；
-- 公网边缘网关：`edge_domain`（公网 DNS 域名）、`edge_acme_email`（ACME 账号邮箱）、`edge_acme_ca_server`（默认 `letsencrypt`）、`edge_frpc_enabled` 与 `edge_frpc_config_file`（宿主机未跟踪的 frpc.toml 路径）；启用 `edge_gateway_enabled` 时必须同时提供域名与邮箱，启用 `edge_frpc_enabled` 时必须提供非空配置文件路径，否则返回 `422`；
-- 对象存储 endpoint/bucket/TLS，SearXNG 地址/超时/结果数；
-- 行情、金融检索缓存与并发/限流；
+- `llm_agent_max_concurrency=1..4` 与 `auto_restart_enabled`；
+- 对象存储 endpoint/bucket/TLS；
+- 行情缓存与并发/限流；
 - API 实时运行档案 `api_runtime_mode=LIGHTWEIGHT|SUPREME` 与收盘后回收开关 `api_runtime_auto_close`；
 - 每日研究启动与重试间隔、旧版重试窗口兼容值、Worker lease、AKShare 参数、数据包模式、演示数据开关、最低上市日和成交额；旧版窗口仅保持读取/写入兼容，自动补数统一在权威交易日历确定的下一交易日 09:25（上海时间）截止；
 - 可写但永不回显的 `tushare_token`、`object_store_access_key`、`object_store_secret_key`。
@@ -573,15 +558,8 @@ curl -sS -X POST "$BASE_URL/api/v1/admin/energy-saving/disable" \
 
 所有系统设置写操作必须先调用 `POST /api/v1/admin/system-settings/unlock`，请求体为 `{"password":"<CURRENT_ADMIN_PASSWORD>"}`。服务端只验证当前登录管理员自己的密码；成功返回只可用于当前 `user_id + session_id` 的 `unlock_token` 和 `expires_at`，有效期 10 分钟。客户端把令牌放入 `X-System-Settings-Unlock`，不得持久化或记录。缺失、过期、跨用户或跨会话令牌返回 `403` 与 `SYSTEM_SETTINGS_LOCKED`；解锁存储不可用返回 `503`。该安全强化要求旧管理客户端在 PUT/DELETE 前增加解锁步骤，Web Cookie 仍需 CSRF，App Bearer 会话不模拟 Cookie。
 
-`SERIAL` 模式下只有 `job-worker` 领取研究队列，默认 Compose 也不会创建 `research-worker` 容器；`DUAL` 模式下固定两个 `research-worker` 副本领取不同 `run_id`，`job-worker` 仍串行处理个人档案、Trade Plan、回测、调度和清理但跳过研究队列。切换模式会检查活动研究和回测，存在活动任务返回 `422`。内存不再使用固定 4GB 门槛拒绝切换，而由系统资源接口按实测基线和两个 700 MiB Worker 最大预算提供分级提醒；`MODEL_GATEWAY_MAX_CONCURRENCY >= 2 * llm_agent_max_concurrency` 仍是硬性门禁。执行模式和 LLM 并发只在 Worker 启动时读取，保存后响应中的 `restart_required=true` 表示执行响应中 `compose_restart_command` 给出的命令；保存为 `DUAL` 时它会启用 `dual-research` profile，保存为 `SERIAL` 时它会停止现有研究 Worker：
-
-```bash
-docker compose -p ashare-ai-src -f compose.yaml --profile dual-research up -d --force-recreate job-worker research-worker
-```
-
-其他系统设置会在下一次 API 请求、Worker 轮询或任务启动时加载。默认不会创建 `edge-gateway`。安装本机拓扑控制器后，保存 `research_execution_mode`、`edge_gateway_enabled` 或任一公网边缘网关字段会由该受限的本机计划任务自动同步对应的 Compose profile，并把持久化的网关值注入 `edge-gateway` 容器；API 仍不拥有 Docker socket。
-
-`auto_restart_enabled` 默认关闭：此时执行拓扑变化仍需管理员手动运行页面返回的重启命令。开启后，本机拓扑控制器会在检测到“已保存执行拓扑 ≠ Worker 实际加载拓扑”（`restart_required=true`）时自动 `--force-recreate` 重建 `job-worker` 与 DUAL 模式下的两个 `research-worker`，使新拓扑在启动时生效，无需手动重启；`edge-gateway` 只按开关启停、不强制重建。控制器状态文件记录最近一次“已强制应用”的拓扑哈希，因此同一拓扑只强制重建一次，不会因 Worker 心跳延迟或手动 `docker stop` 反复重建。未安装拓扑控制器时该开关不产生效果，页面提示需先安装。内部接口 `GET /api/internal/topology-desired` 除 `research_execution_mode` 与 `edge_gateway_enabled` 外，返回 `auto_restart_enabled`、`restart_required` 与 `topology_sha256` 供控制器决策；同时返回 `edge_domain`、`edge_acme_email`、`edge_acme_ca_server`、`edge_frpc_enabled`、`edge_frpc_config_file`，控制器据此校验并把持久化值注入 `docker compose up edge-gateway` 的子进程环境（网关配置变更会以配置哈希差异触发 `--force-recreate`）。该接口仅限持有 `TOPOLOGY_CONTROLLER_TOKEN` 的本机任务访问。
+系统统一使用单一 `job-worker` 领取研究、回测、Trade Plan、个人档案、退出建议、Jev 训练和 System-2 诊断队列。
+执行模式固定为研究专用 `SERIAL`；低内存、隔离子进程、队列租约和回收策略由 Worker 自身维护。
 
 ## 7. 研究结果、报告和 Trade Plan
 
@@ -636,11 +614,10 @@ docker compose -p ashare-ai-src -f compose.yaml --profile dual-research up -d --
 
 ### `GET /api/v1/reports/{trading_date}`
 
-返回 `ReportResponse`：`report_id`、`run_id`、`trading_date`、`report_type`、`object_uri`、`content_sha256`、`created_at`。
-
-### `GET /api/v1/reports/{report_id}/content`
-
-按需读取报告正文，返回 `ReportBodyResponse`：`report_id`、`content_type`（当前为 `text/html`）和 `content`。内容不可变且经过服务端对象路径校验；对象不可用时返回 `503`。
+返回结构化 `ReportResponse`：`report_id`、`run_id`、`trading_date`、`report_type`、`result`、
+`market_index_snapshot` 和 `created_at`。历史行上的 `object_uri`、`content_sha256` 仅作为可空
+兼容元数据返回，客户端不应依赖它们读取报告正文。报告正文不再渲染为 HTML，也没有 `/content`
+接口；需要逐股票内容时读取 `/reports/{report_id}/symbols`。
 
 ### `GET /api/v1/reports/{report_id}/symbols`
 

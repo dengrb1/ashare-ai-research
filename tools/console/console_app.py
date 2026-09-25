@@ -193,7 +193,6 @@ class TraderConsole:
         self.var_gateway = tk.StringVar(value="未检测")
         self.var_local_model = tk.StringVar(value="未检测")
         self.var_quote_bridge = tk.StringVar(value="未检测")
-        self.var_news_bridge = tk.StringVar(value="未检测")
         self.var_last_check = tk.StringVar(value="尚未检查")
         self.var_last_action = tk.StringVar(value="—")
         self.var_log_title = tk.StringVar(value="LIVE ACTIVITY")
@@ -450,7 +449,7 @@ class TraderConsole:
         card.grid(row=1, column=0, sticky="ew", pady=(0, 13))
         card.columnconfigure(0, weight=0)
         self._label(card, "服务探测", font=(UI_FONT, 10, "bold")).grid(row=0, column=0, sticky="w", padx=(16, 18), pady=13)
-        services = (("api", "控制面", self.var_api), ("gateway", "网关", self.var_gateway), ("local_model", "本地模型", self.var_local_model), ("quote_bridge", "行情桥", self.var_quote_bridge), ("news_bridge", "新闻桥", self.var_news_bridge))
+        services = (("api", "控制面", self.var_api), ("gateway", "网关", self.var_gateway), ("local_model", "本地模型", self.var_local_model), ("quote_bridge", "行情桥", self.var_quote_bridge))
         for column in range(1, len(services) + 1):
             card.columnconfigure(column, weight=1, uniform="service-probe")
         for index, (key, label, variable) in enumerate(services, start=1):
@@ -686,7 +685,7 @@ class TraderConsole:
                 sources.append((name, path))
 
         if self.repo_root is not None:
-            for name, rel in (("API 输出", ".run/api.out.log"), ("API 错误", ".run/api.err.log"), ("Gateway 输出", ".run/gateway.out.log"), ("Gateway 错误", ".run/gateway.err.log"), ("Quote Bridge", ".run/bridge.out.log"), ("News Bridge", ".run/newsbridge.out.log"), ("Trader 日志", "a_share_ai_trader/logs/trader.log")):
+            for name, rel in (("API 输出", ".run/api.out.log"), ("API 错误", ".run/api.err.log"), ("Gateway 输出", ".run/gateway.out.log"), ("Gateway 错误", ".run/gateway.err.log"), ("Quote Bridge", ".run/bridge.out.log"), ("Trader 日志", "a_share_ai_trader/logs/trader.log")):
                 add(name, self.repo_root / rel)
             output_dir = self.repo_root / "output"
             if output_dir.is_dir():
@@ -1452,7 +1451,7 @@ class TraderConsole:
     def _apply_health(self, snapshot: HealthSnapshot) -> None:
         self.var_last_check.set(f"最后检查 {snapshot.checked_at.astimezone().strftime('%H:%M:%S')}")
         self.var_mode.set("模拟盘" if snapshot.mode == "paper" else ("实盘" if snapshot.mode == "live" else snapshot.mode.upper()))
-        values = {"api": self.var_api, "gateway": self.var_gateway, "local_model": self.var_local_model, "quote_bridge": self.var_quote_bridge, "news_bridge": self.var_news_bridge}
+        values = {"api": self.var_api, "gateway": self.var_gateway, "local_model": self.var_local_model, "quote_bridge": self.var_quote_bridge}
         for key, variable in values.items():
             ok = snapshot.is_ok(key)
             variable.set("在线" if ok else "离线")

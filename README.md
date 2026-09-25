@@ -20,7 +20,7 @@ Copy-Item .env.docker.example .env.docker
 docker compose -p ashare-ai-src -f compose.yaml up -d --build
 ```
 
-打开 `http://localhost`。默认 Compose 不启动可选的 SearXNG；需要检索时使用 `--profile search`。Docker 与原生部署共享同一 FastAPI、评分配置和 Alembic 迁移，不存在两套指数评分实现。
+打开 `http://localhost`。Docker 与原生部署共享同一 FastAPI、评分配置和 Alembic 迁移，不存在两套指数评分实现。
 
 ## AI 配置
 
@@ -40,8 +40,8 @@ npm test -- --run
 npm run build
 ```
 
-常驻进程默认使用 `LIGHTWEIGHT` 模式，行情和搜索按需启动；不要在应用启动时预热 AKShare、量化模型或非必要 Worker。生成的 `build/`、密钥、`.env` 和 APK 不提交。
+常驻进程默认使用 `LIGHTWEIGHT` 模式，行情和量化模型按需启动；不要在应用启动时预热 AKShare、量化模型或非必要 Worker。生成的 `build/`、密钥、`.env` 和 APK 不提交。
 
 ## 目录
 
-`src/ashare_ai/` 后端与评分；`web/` React/Vite；`configs/` 版本化配置；`migrations/` 数据库迁移；`docker/` 容器与 Edge Gateway；`docs/` 部署与 API 文档；`tests/` 测试。
+`src/ashare_ai/` 后端与评分；`web/` React/Vite；`configs/` 版本化配置；`migrations/` 数据库迁移；`docker/` 容器与模型网关；`docs/` 部署与 API 文档；`tests/` 测试。

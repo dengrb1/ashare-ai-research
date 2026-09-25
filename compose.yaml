@@ -10,7 +10,7 @@ x-app-service: &app-service
     MKL_NUM_THREADS: "1"
     NUMEXPR_NUM_THREADS: "1"
     ARROW_IO_THREADS: "1"
-    SEARXNG_BASE_URL: "${SEARXNG_BASE_URL:-}"
+    SEARXNG_BASE_URL: "http://searxng:8080"
     PRIVATE_OBJECT_ROOT: "/data/private"
   extra_hosts: ["host.docker.internal:host-gateway"]
   volumes:
@@ -27,57 +27,6 @@ x-app-service: &app-service
       max-file: "3"
 
 services:
-  # Optional public HTTPS edge. It is intentionally profile-gated so the
-  # default local stack stays loopback-only and existing external proxies keep
-  # working unchanged.  EDGE_* values are interpolated from the shell/.env
-  # baseline; with the topology controller installed, the persisted system
-  # settings are injected into its compose subprocess and take precedence.
-  edge-gateway:
-    profiles: ["edge"]
-    build:
-      context: .
-      dockerfile: docker/edge-gateway.Dockerfile
-      args:
-        EDGE_GATEWAY_VERSION: "${EDGE_GATEWAY_VERSION:-2.0.4-alpha.1}"
-    environment:
-      EDGE_DOMAIN: "${EDGE_DOMAIN:-}"
-      EDGE_ACME_EMAIL: "${EDGE_ACME_EMAIL:-}"
-      EDGE_ACME_CA_SERVER: "${EDGE_ACME_CA_SERVER:-letsencrypt}"
-      EDGE_FRPC_ENABLED: "${EDGE_FRPC_ENABLED:-false}"
-      EDGE_GATEWAY_RELEASE: "alpha"
-      EDGE_GATEWAY_LOG_DIR: "/var/log/edge"
-      EDGE_GATEWAY_CONFIG_DIR: "${EDGE_GATEWAY_CONFIG_DIR:-./.secrets/edge-gateway}"
-    labels:
-      io.ashare.edge-gateway.release: "alpha"
-      org.opencontainers.image.version: "${EDGE_GATEWAY_VERSION:-2.0.4-alpha.1}"
-    volumes:
-      - edge-acme-data:/var/lib/acme
-      - edge-certificates:/etc/edge/certs
-      - edge-gateway-logs:/var/log/edge
-      - "${EDGE_FRPC_CONFIG_FILE:-./docker/edge-gateway/frpc.disabled.toml}:/etc/edge/frpc.toml:ro"
-      - "${EDGE_GATEWAY_CONFIG_FILE:-./docker/edge-gateway/managed.disabled.conf}:/etc/edge/managed.conf:ro"
-    depends_on:
-      web:
-        condition: service_healthy
-    restart: unless-stopped
-    read_only: true
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,size=12m
-      # acme.sh and the HTTP challenge location need a writable directory even
-      # though the rest of the gateway filesystem remains read-only.
-      - /var/lib/acme-webroot:rw,noexec,nosuid,size=4m
-    security_opt: ["no-new-privileges:true"]
-    cap_drop: ["ALL"]
-    cap_add: ["NET_BIND_SERVICE", "SETUID", "SETGID", "CHOWN"]
-    pids_limit: 128
-    mem_limit: 96m
-    logging: *bounded-logs
-    healthcheck:
-      test: ["CMD-SHELL", "nginx -t && pidof nginx >/dev/null"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-
   private-data-init:
     image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
     user: "0:0"
@@ -87,8 +36,6 @@ services:
     restart: "no"
     security_opt: ["no-new-privileges:true"]
 
-  # Rust-based model gateway (migrated from QMT repository Phase 2)
-  # Pure proxy layer with no trading logic - forwards requests to LLM providers
   gateway:
     build:
       context: .
@@ -108,8 +55,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # Real-time quote bridge (migrated from QMT repository Phase 2)
-  # Fetches quotes from Tencent/Sina public APIs, stdlib only
   quote-bridge:
     build:
       context: .
@@ -123,25 +68,6 @@ services:
     logging: *bounded-logs
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health', timeout=3)"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-
-  # News feed bridge (migrated from QMT repository Phase 2)
-  # Fetches news from Eastmoney public API, stdlib only
-  news-bridge:
-    build:
-      context: .
-      dockerfile: docker/bridge.Dockerfile
-      target: news-bridge
-    ports: ["${SERVICE_BIND_ADDRESS:-127.0.0.1}:8082:8082"]
-    restart: unless-stopped
-    security_opt: ["no-new-privileges:true"]
-    pids_limit: 32
-    mem_limit: 64m
-    logging: *bounded-logs
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8082/health', timeout=3)"]
       interval: 30s
       timeout: 5s
       retries: 5
@@ -170,20 +96,7 @@ services:
     command: ["sh", "-c", "ashare-ai migrate && ashare-ai api --host 0.0.0.0 --port 8000"]
     ports: ["${API_BIND_ADDRESS:-127.0.0.1}:8000:8000"]
     environment:
-      # The api overrides `environment:`, which under YAML `<<:` replaces the
-      # app-service anchor's map entirely. Re-merge the shared env so the api
-      # keeps PRIVATE_OBJECT_ROOT (and the low-memory thread caps / SEARXNG
-      # base URL) instead of silently dropping them.
       <<: *low-memory-python
-      EDGE_GATEWAY_SOURCE_DIR: "/app/docker/edge-gateway"
-      EDGE_GATEWAY_HOST_SOURCE_DIR: "${EDGE_GATEWAY_SOURCE_DIR:-./docker/edge-gateway}"
-      EDGE_GATEWAY_LOG_DIR: "/data/edge-gateway-logs"
-    volumes:
-      - lake-data:/data/lake
-      - object-data:/data/objects
-      - private-data:/data/private
-      - edge-gateway-logs:/data/edge-gateway-logs:ro
-      - "${EDGE_GATEWAY_SOURCE_DIR:-./docker/edge-gateway}:/app/docker/edge-gateway:rw"
     mem_limit: 384m
     depends_on:
       private-data-init:
@@ -196,107 +109,16 @@ services:
         condition: service_healthy
       quote-bridge:
         condition: service_healthy
-      news-bridge:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')"]
       interval: 30s
       timeout: 5s
       retries: 5
 
-  # Default low-memory worker. It polls all configured queues serially and runs each
-  # heavy job in an isolated child process so completed heaps return to the OS.
   job-worker:
     <<: *app-service
     command: ["python", "-m", "ashare_ai.orchestration.serial_worker"]
     mem_limit: 700m
-    depends_on:
-      api:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "python", "-c", "import redis; from ashare_ai.core.config import get_settings; assert redis.Redis.from_url(get_settings().redis_url).ping()"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-
-  # Legacy optional scheduler/queue workers remain profile-gated.  The normal
-  # deployment topology is the serial job-worker; the two research workers
-  # below are only enabled by the persisted DUAL topology command.
-  worker:
-    <<: *app-service
-    profiles: ["parallel-workers"]
-    command: ["python", "-m", "ashare_ai.orchestration.runner"]
-    mem_limit: 256m
-    depends_on:
-      api:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "python", "-c", "import redis; from ashare_ai.core.config import get_settings; assert redis.Redis.from_url(get_settings().redis_url).ping()"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-
-  backtest-worker:
-    <<: *app-service
-    profiles: ["parallel-workers"]
-    command: ["python", "-m", "ashare_ai.orchestration.backtest_worker"]
-    mem_limit: 700m
-    depends_on:
-      api:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-
-  research-worker:
-    <<: *app-service
-    # This profile is deliberately opt-in.  SERIAL deployments do not create
-    # research-worker containers; the System Settings restart command enables
-    # it only after the persisted topology is changed to DUAL.
-    profiles: ["dual-research"]
-    scale: 2
-    command: ["python", "-m", "ashare_ai.orchestration.research_worker"]
-    mem_limit: 700m
-    depends_on:
-      api:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "python", "-c", "import redis; from ashare_ai.core.config import get_settings; assert redis.Redis.from_url(get_settings().redis_url).ping()"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-
-  trade-plan-worker:
-    <<: *app-service
-    profiles: ["parallel-workers"]
-    command: ["python", "-m", "ashare_ai.orchestration.trade_plan_worker"]
-    mem_limit: 700m
-    depends_on:
-      api:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-
-  exit-advice-worker:
-    <<: *app-service
-    command: ["python", "-m", "ashare_ai.orchestration.exit_advice_worker"]
-    mem_limit: 320m
-    pids_limit: 64
     depends_on:
       api:
         condition: service_healthy
@@ -394,9 +216,6 @@ services:
       retries: 10
 
 volumes:
-  edge-acme-data:
-  edge-certificates:
-  edge-gateway-logs:
   postgres-data:
   redis-data:
   lake-data:

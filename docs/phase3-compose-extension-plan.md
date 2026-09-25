@@ -14,7 +14,7 @@
 - `job-worker` (默认) - 串行处理所有队列，低内存占用 (700MB)
 - `worker` (profile: parallel-workers) - 通用任务 worker
 - `backtest-worker` (profile: parallel-workers) - 回测专用 worker
-- `research-worker` (profile: dual-research) - 研究任务 worker (scale: 2)
+- `job-worker` - 统一研究任务 worker (scale: 1)
 - `trade-plan-worker` (profile: parallel-workers) - 交易计划 worker
 - `exit-advice-worker` - 退出建议 worker (320MB)
 
@@ -49,7 +49,7 @@
 - 队列规范：`QueueSpec(kind, pending, processing, delayed?)`
 - 活动队列：
   1. `personal-archive` - 个人归档任务
-  2. `research` - 研究任务（DUAL 模式下由专用 worker 处理）
+  2. `research` - 研究任务（由统一 `job-worker` 处理）
   3. `trade-plan` - 交易计划优化（模拟）
   4. `backtest` - 回测任务
 

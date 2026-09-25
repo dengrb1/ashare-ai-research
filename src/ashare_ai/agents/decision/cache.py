@@ -41,7 +41,9 @@ class DecisionCache:
     ) -> str:
         """生成缓存键"""
         key_data = f"{symbol}:{trading_date}:{mode}:{model_version}"
-        key_hash = hashlib.md5(key_data.encode()).hexdigest()[:12]
+        # The digest is only a compact, non-secret cache namespace; it is not
+        # used for authentication, integrity, or any other security decision.
+        key_hash = hashlib.md5(key_data.encode(), usedforsecurity=False).hexdigest()[:12]
         return f"{self.key_prefix}{key_hash}"
 
     async def get(

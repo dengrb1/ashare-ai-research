@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 from importlib import import_module
 from unittest.mock import Mock
 
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import Column, Integer, MetaData, String, Table, create_engine, inspect, text
+from sqlalchemy import JSON, Column, Integer, MetaData, String, Table, create_engine, inspect, text
 
 from ashare_ai.cli import migrate_database
 from ashare_ai.core.config import get_settings, runtime_resource_path
@@ -46,7 +47,7 @@ def test_cli_migrate_bootstraps_empty_database_at_alembic_head(tmp_path, monkeyp
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar()
-                assert revision == "0033_model_provider_fallback"
+                assert revision == "0034_research_only_cleanup"
             assert {
                 "exit_advice",
                 "ai_response_cache",
@@ -117,6 +118,51 @@ def test_model_provider_fallback_migration_upgrades_and_downgrades_on_sqlite(
             column["name"]
             for column in inspect(engine).get_columns("model_configuration_versions")
         }
+    finally:
+        engine.dispose()
+        get_settings.cache_clear()
+
+
+def test_research_only_cleanup_removes_retired_system_setting_keys(tmp_path, monkeypatch) -> None:
+    database = tmp_path / "research-only-cleanup.db"
+    url = f"sqlite+pysqlite:///{database.as_posix()}"
+    monkeypatch.setenv("DATABASE_URL", url)
+    get_settings.cache_clear()
+    config = Config(str(runtime_resource_path("alembic.ini")))
+    config.set_main_option("script_location", str(runtime_resource_path("migrations")))
+    engine = create_engine(url)
+    try:
+        metadata = MetaData()
+        Table(
+            "system_configuration_versions",
+            metadata,
+            Column("configuration_id", String(36), primary_key=True),
+            Column("public_values", JSON, nullable=False),
+        )
+        metadata.create_all(engine)
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO system_configuration_versions "
+                    "(configuration_id, public_values) VALUES (:id, :values)"
+                ),
+                {
+                    "id": "legacy-system-config",
+                    "values": '{"research_execution_mode":"SERIAL",'
+                    '"edge_gateway_enabled":true,"market_cache_seconds":25}',
+                },
+            )
+        command.stamp(config, "0033_model_provider_fallback")
+        command.upgrade(config, "0034_research_only_cleanup")
+        with engine.connect() as connection:
+            values = connection.execute(
+                text(
+                    "SELECT public_values FROM system_configuration_versions "
+                    "WHERE configuration_id = :id"
+                ),
+                {"id": "legacy-system-config"},
+            ).scalar_one()
+        assert json.loads(values) == {"market_cache_seconds": 25}
     finally:
         engine.dispose()
         get_settings.cache_clear()

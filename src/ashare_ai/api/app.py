@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hmac
 import json
 import logging
 import os
@@ -71,11 +70,13 @@ from ashare_ai.api.auth import (
     revoke_session,
     rotate_refresh_token,
 )
+from ashare_ai.api.decision_endpoints import router as decision_router
 from ashare_ai.api.dependencies import get_auth_context, get_db, get_write_context
+from ashare_ai.api.model_management_endpoints import router as model_management_router
+from ashare_ai.api.search_endpoints import router as search_router
+from ashare_ai.api.strategy_endpoints import router as strategy_router
 from ashare_ai.api.run_cleanup import TERMINAL_RUN_STATUSES
 from ashare_ai.api.run_cleanup import delete_run as cascade_delete_run
-from ashare_ai.api.decision_endpoints import router as decision_router
-from ashare_ai.api.model_management_endpoints import router as model_management_router
 from ashare_ai.api.schemas import (
     MAX_RESEARCH_SYMBOLS,
     MAX_TRADE_PLAN_SYMBOLS,
@@ -101,17 +102,9 @@ from ashare_ai.api.schemas import (
     BuyEntryMonitorRequest,
     BuyEntryMonitorResponse,
     CandidateResponse,
-    EdgeGatewayAppliedRequest,
-    EdgeGatewayConfigurationRequest,
-    EdgeGatewayConfigurationResponse,
-    EdgeGatewayLogsResponse,
-    EdgeGatewayValidateRequest,
-    EdgeGatewayValidationResponse,
     EnergySavingResponse,
     ExitAdviceResponse,
     ExitMonitorSettingsRequest,
-    FinancialSearchResponse,
-    FinancialSearchStatus,
     HealthResponse,
     KlineResponse,
     LoginRequest,
@@ -127,6 +120,8 @@ from ashare_ai.api.schemas import (
     ModelProfileSettings,
     ModelSettingsRequest,
     ModelSettingsResponse,
+    MonitorSignalResponse,
+    MonitorSignalsResponse,
     NotificationListResponse,
     NotificationMarkReadRequest,
     NotificationResponse,
@@ -142,7 +137,6 @@ from ashare_ai.api.schemas import (
     PushDeviceResponse,
     QuoteResponse,
     RefreshTokenRequest,
-    ReportBodyResponse,
     ReportExecutionStatusResponse,
     ReportExecutionSymbolStatus,
     ReportResponse,
@@ -181,15 +175,9 @@ from ashare_ai.api.schemas import (
 )
 from ashare_ai.api.static_web import NativeSPAStaticFiles
 from ashare_ai.api.system_settings_unlock import issue_unlock, require_settings_unlock
+from ashare_ai.api.training_endpoints import router as training_router
 from ashare_ai.core import energy_saving
 from ashare_ai.core.config import get_settings
-from ashare_ai.core.edge_gateway import (
-    EdgeGatewayConfigurationService,
-    EdgeGatewayError,
-    render_nginx,
-    validate_frpc_toml,
-    validate_proxy_hosts,
-)
 from ashare_ai.core.hashing import sha256_bytes, stable_hash
 from ashare_ai.core.runtime_mode import is_after_close, runtime_mode_policy
 from ashare_ai.core.security import safe_error_message
@@ -201,6 +189,7 @@ from ashare_ai.core.system_settings import (
 )
 from ashare_ai.core.time import SHANGHAI, market_session
 from ashare_ai.core.user_errors import public_error_message
+from ashare_ai.features.signals import detect_monitor_signals
 from ashare_ai.market.service import (
     MAX_PREFETCH_SYMBOLS,
     get_market_data_service,
@@ -240,7 +229,6 @@ from ashare_ai.portfolio.user_assets import UNSET_TOTAL_ASSETS, UserAssetService
 from ashare_ai.reports.chinese_summary import component_summary, symbol_summary
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import (
-    ActiveEdgeGatewayConfiguration,
     ActiveModelConfiguration,
     ActiveSystemConfiguration,
     AIChatMessage,
@@ -250,7 +238,6 @@ from ashare_ai.storage.models import (
     BacktestRun,
     BuyEntryMonitorRow,
     CandidateRow,
-    EdgeGatewayConfigurationVersion,
     ExitAdviceRow,
     JobRun,
     ModelConfigurationVersion,
@@ -267,7 +254,6 @@ from ashare_ai.storage.models import (
     UserAccount,
     UserAssetState,
 )
-from ashare_ai.storage.objects import LocalObjectStore, ObjectStore, S3ObjectStore
 from ashare_ai.storage.personal_archive import (
     MAX_ARCHIVE_BYTES,
     PersonalArchiveError,
@@ -374,7 +360,6 @@ def _reconcile_market_runtime(now: datetime | None = None) -> None:
         release = getattr(market, "release_after_close", None)
         if callable(release):
             release()
-        _clear_financial_search_service()
         with _market_session_calendar_cache_lock:
             _market_session_calendar_cache.clear()
         report = reclaim_runtime_memory(settings, reason="api-after-close")
@@ -525,23 +510,6 @@ def _remember_idempotency(
             created_at=datetime.now(UTC),
         )
     )
-
-
-def _financial_search_service() -> Any:
-    from ashare_ai.search.service import get_financial_search_service
-
-    return get_financial_search_service()
-
-
-def _clear_financial_search_service() -> None:
-    if "ashare_ai.search.service" not in sys.modules:
-        return
-    from ashare_ai.search.service import get_financial_search_service
-
-    get_financial_search_service.cache_clear()
-
-
-SearchService = Annotated[Any, Depends(_financial_search_service)]
 
 
 @app.middleware("http")
@@ -910,7 +878,6 @@ def health(db: DbSession) -> HealthResponse:
         auto_trading_enabled=False,
         execution_mode="RESEARCH_ONLY",
         quote_bridge=infrastructure.get("quote_bridge"),
-        news_bridge=infrastructure.get("news_bridge"),
         gateway=infrastructure.get("gateway"),
     )
 
@@ -1077,7 +1044,6 @@ def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
                 "persistent_ai_chat": True,
                 "chat_images_seven_day_retention": True,
                 "personal_archive_export_import": True,
-                "searxng_web_research": bool(get_effective_settings().searxng_base_url),
                 "runtime_modes": True,
             },
             endpoints={
@@ -1760,15 +1726,10 @@ def clear_notifications(
 @app.get("/api/v1/ai/models", response_model=AIModelOptionsResponse)
 def ai_model_options(db: DbSession, _: Current) -> AIModelOptionsResponse:
     runtime = ModelConfigurationService().resolve(db)
-    models = (
-        []
-        if runtime is None
-        else list(dict.fromkeys((runtime.search_model, runtime.research_model)))
-    )
+    models = [] if runtime is None else [runtime.research_model]
     return AIModelOptionsResponse(
         models=models,
         reasoning_efforts=["low", "medium", "high", "xhigh"],
-        web_search_available=bool(get_effective_settings().searxng_base_url),
     )
 
 
@@ -2342,12 +2303,12 @@ def stream_ai_chat_message(
                 content=payload.content,
                 model=payload.model,
                 reasoning_effort=payload.reasoning_effort,
-                web_search=payload.web_search,
                 attachment_ids=payload.attachment_ids,
                 mention_refs=[item.model_dump() for item in payload.mention_refs],
                 decision_at=payload.decision_at,
                 idempotency_key=effective_key,
                 request_id=request_id,
+                web_search=payload.web_search,
             ):
                 yield f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
         except ChatStreamError as exc:
@@ -2562,8 +2523,6 @@ def _model_settings_response(db: Session) -> ModelSettingsResponse:
             provider="openai-compatible",
             base_url="",
             api_key_configured=False,
-            search_model="gpt-5.6-luna",
-            search_reasoning_effort="low",
             research_model="gpt-5.6-sol",
             research_reasoning_effort="high",
             model_profiles=[],
@@ -2585,8 +2544,6 @@ def _model_settings_response(db: Session) -> ModelSettingsResponse:
         provider=runtime.provider,
         base_url=runtime.base_url,
         api_key_configured=True,
-        search_model=runtime.search_model,
-        search_reasoning_effort=runtime.search_reasoning_effort,
         research_model=runtime.research_model,
         research_reasoning_effort=runtime.research_reasoning_effort,
         model_profiles=[
@@ -2610,6 +2567,12 @@ _SYSTEM_QUEUE_KEYS = {
     "research": ("ashare:research:pending", "ashare:research:processing"),
     "trade_plan": ("ashare:trade-plan:pending", "ashare:trade-plan:processing"),
     "backtest": ("ashare:backtest:pending", "ashare:backtest:processing"),
+    "exit_review": ("ashare:exit-advice:pending", "ashare:exit-advice:processing"),
+    "system2_diagnostic": (
+        "ashare:system2-diagnostic:pending",
+        "ashare:system2-diagnostic:processing",
+    ),
+    "jev_training": ("ashare:jev-training:pending", "ashare:jev-training:processing"),
 }
 
 
@@ -2672,16 +2635,13 @@ def _system_worker_snapshot(
         )
     job_workers = [item for item in heartbeats if item.get("role") == "job-worker"]
     modes = {str(item.get("loaded_mode")) for item in job_workers}
-    actual_mode = (
-        next(iter(modes)) if len(modes) == 1 and modes <= {"SERIAL", "DUAL"} else "UNKNOWN"
-    )
+    actual_mode = "SERIAL" if len(modes) == 1 and modes == {"SERIAL"} else "UNKNOWN"
     matching_job = any(item.get("topology_sha256") == topology_sha256 for item in job_workers)
     return actual_mode, not matching_job, heartbeats, queues
 
 
 def _system_settings_response(db: Session) -> SystemSettingsResponse:
     view = SystemConfigurationService().public_view(db)
-    saved_values = cast(dict[str, Any], view["values"])
     actual_mode, restart_required, workers, queues = _system_worker_snapshot(
         str(view["topology_sha256"])
     )
@@ -2692,10 +2652,7 @@ def _system_settings_response(db: Session) -> SystemSettingsResponse:
             "restart_required": restart_required,
             "workers": workers,
             "queues": queues,
-            "compose_restart_command": _system_settings_restart_command(
-                str(saved_values["research_execution_mode"]),
-                bool(saved_values["edge_gateway_enabled"]),
-            ),
+            "compose_restart_command": "docker compose -p ashare-ai -f compose.yaml up -d --force-recreate job-worker",
         }
     )
 
@@ -2703,223 +2660,6 @@ def _system_settings_response(db: Session) -> SystemSettingsResponse:
 def _reload_market_runtime() -> None:
     reset_market_data_service()
     _reconcile_market_runtime()
-
-
-def _system_settings_restart_command(
-    execution_mode: str, edge_gateway_enabled: bool = False
-) -> str:
-    """Return the operator command required to apply a persisted topology.
-
-    Compose profiles are evaluated before a container runs, whereas the
-    execution mode is stored in PostgreSQL.  The API deliberately has no
-    Docker socket, so it gives the operator the exact command instead.
-    """
-
-    prefix = "docker compose -p ashare-ai-src -f compose.yaml"
-    worker_command = (
-        f"{prefix} --profile dual-research up -d --force-recreate job-worker research-worker"
-        if execution_mode == "DUAL"
-        else (
-            f"{prefix} --profile dual-research stop research-worker; "
-            f"{prefix} up -d --force-recreate job-worker"
-        )
-    )
-    if edge_gateway_enabled:
-        return f"{worker_command}; {prefix} --profile edge up -d --force-recreate edge-gateway"
-    return worker_command
-
-
-@app.get("/api/internal/topology-desired")
-def topology_desired(request: Request, db: DbSession) -> dict[str, object]:
-    """Return only the desired Compose topology to the local task scheduler."""
-
-    expected = get_settings().topology_controller_token
-    received = request.headers.get("X-Topology-Controller-Token", "")
-    if not expected:
-        raise HTTPException(status_code=503, detail="topology controller is not configured")
-    if not hmac.compare_digest(received, expected):
-        raise HTTPException(status_code=403, detail="topology controller is not authorized")
-    runtime = SystemConfigurationService().resolve(db)
-    edge_config = EdgeGatewayConfigurationService().public_view(db)
-    _, restart_required, _, _ = _system_worker_snapshot(str(runtime.topology_sha256))
-    energy_saving_state = energy_saving.evaluate(
-        redis_client=_redis_client(), session=db, settings=runtime.settings
-    )
-    return {
-        "research_execution_mode": runtime.settings.research_execution_mode,
-        "edge_gateway_enabled": (
-            bool(edge_config["enabled"])
-            if edge_config.get("version", 0)
-            else runtime.settings.edge_gateway_enabled
-        ),
-        "edge_gateway_config_sha256": edge_config.get("config_sha256"),
-        "edge_domain": runtime.settings.edge_domain,
-        "edge_acme_email": runtime.settings.edge_acme_email,
-        "edge_acme_ca_server": runtime.settings.edge_acme_ca_server,
-        "edge_frpc_enabled": runtime.settings.edge_frpc_enabled,
-        "edge_frpc_config_file": runtime.settings.edge_frpc_config_file,
-        "edge_gateway_config_dir": str(get_settings().edge_gateway_config_dir),
-        "edge_gateway_source_dir": str(get_settings().edge_gateway_host_source_dir),
-        "auto_restart_enabled": runtime.settings.auto_restart_enabled,
-        "restart_required": restart_required,
-        "topology_sha256": runtime.topology_sha256,
-        "energy_saving_enabled": energy_saving_state.enabled,
-        "energy_saving_active": energy_saving_state.active,
-        "energy_saving_since": energy_saving_state.entered_at,
-        "energy_saving_reason": energy_saving_state.reason,
-    }
-
-
-def _edge_gateway_response(
-    db: Session, *, reveal: bool = False
-) -> EdgeGatewayConfigurationResponse:
-    return EdgeGatewayConfigurationResponse.model_validate(
-        EdgeGatewayConfigurationService().public_view(db, reveal=reveal)
-    )
-
-
-@app.get("/api/v1/admin/edge-gateway", response_model=EdgeGatewayConfigurationResponse)
-def get_edge_gateway(
-    db: DbSession,
-    context: Current,
-    unlock_token: SystemSettingsUnlockToken = None,
-) -> EdgeGatewayConfigurationResponse:
-    _admin(context)
-    reveal = bool(unlock_token)
-    if reveal:
-        require_settings_unlock(context, unlock_token)
-    try:
-        return _edge_gateway_response(db, reveal=reveal)
-    except EdgeGatewayError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-
-@app.post("/api/v1/admin/edge-gateway/validate", response_model=EdgeGatewayValidationResponse)
-def validate_edge_gateway(
-    payload: EdgeGatewayValidateRequest,
-    context: Writer,
-) -> EdgeGatewayValidationResponse:
-    _admin(context)
-    try:
-        hosts = validate_proxy_hosts([item.model_dump() for item in payload.proxy_hosts])
-        validate_frpc_toml(
-            payload.frpc_toml,
-            strict=payload.validation_mode == "STRICT",
-        )
-        rendered = render_nginx(hosts)
-        return EdgeGatewayValidationResponse(
-            nginx_sha256=sha256_bytes(rendered.encode()), proxy_count=len(hosts)
-        )
-    except EdgeGatewayError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
-@app.get("/api/v1/admin/edge-gateway/logs", response_model=EdgeGatewayLogsResponse)
-def edge_gateway_logs(
-    context: Current,
-    limit: Annotated[int, Query(ge=1, le=300)] = 200,
-) -> EdgeGatewayLogsResponse:
-    _admin(context)
-    return EdgeGatewayLogsResponse(**EdgeGatewayConfigurationService().read_frp_logs(limit=limit))
-
-
-@app.put("/api/v1/admin/edge-gateway", response_model=EdgeGatewayConfigurationResponse)
-def put_edge_gateway(
-    payload: EdgeGatewayConfigurationRequest,
-    db: DbSession,
-    context: Writer,
-    unlock_token: SystemSettingsUnlockToken = None,
-    idempotency_key: IdempotencyKey = None,
-) -> EdgeGatewayConfigurationResponse:
-    _admin(context)
-    require_settings_unlock(context, unlock_token)
-    body = payload.model_dump(mode="json")
-    route = "/api/v1/admin/edge-gateway"
-    fingerprint = _idempotency_fingerprint(context.user.user_id, route, idempotency_key, body)
-    replay = _find_idempotency(
-        db,
-        user_id=context.user.user_id,
-        route=route,
-        fingerprint=fingerprint,
-    )
-    if replay is not None:
-        return _edge_gateway_response(db, reveal=True)
-    try:
-        result = EdgeGatewayConfigurationService().save(
-            db,
-            enabled=payload.enabled,
-            validation_mode=payload.validation_mode,
-            proxy_hosts=[item.model_dump() for item in payload.proxy_hosts],
-            frpc_toml=payload.frpc_toml,
-            user_id=context.user.user_id,
-        )
-        _remember_idempotency(
-            db,
-            user_id=context.user.user_id,
-            route=route,
-            fingerprint=fingerprint,
-            resource_type="EDGE_GATEWAY_CONFIGURATION",
-            resource_id=result.get("configuration_id") or "environment",
-        )
-        db.commit()
-        return EdgeGatewayConfigurationResponse.model_validate(result)
-    except EdgeGatewayError as exc:
-        db.rollback()
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
-@app.post("/api/v1/admin/edge-gateway/rollback", response_model=EdgeGatewayConfigurationResponse)
-def rollback_edge_gateway(
-    db: DbSession,
-    context: Writer,
-    unlock_token: SystemSettingsUnlockToken = None,
-) -> EdgeGatewayConfigurationResponse:
-    _admin(context)
-    require_settings_unlock(context, unlock_token)
-    pointer = db.get(ActiveEdgeGatewayConfiguration, "default")
-    if pointer is None:
-        raise HTTPException(status_code=409, detail="no edge-gateway configuration to roll back")
-    current = db.get(EdgeGatewayConfigurationVersion, pointer.configuration_id)
-    previous = db.scalar(
-        select(EdgeGatewayConfigurationVersion)
-        .where(EdgeGatewayConfigurationVersion.version < (current.version if current else 1))
-        .order_by(EdgeGatewayConfigurationVersion.version.desc())
-    )
-    if previous is None:
-        raise HTTPException(status_code=409, detail="no previous edge-gateway configuration")
-    pointer.configuration_id = previous.configuration_id
-    pointer.activated_by = context.user.user_id
-    pointer.activated_at = datetime.now(UTC)
-    db.commit()
-    return _edge_gateway_response(db, reveal=True)
-
-
-@app.get("/api/internal/edge-gateway-config")
-def edge_gateway_internal_config(request: Request, db: DbSession) -> dict[str, object]:
-    expected = get_settings().topology_controller_token
-    received = request.headers.get("X-Topology-Controller-Token", "")
-    if not expected or not hmac.compare_digest(received, expected):
-        raise HTTPException(status_code=403, detail="topology controller is not authorized")
-    return EdgeGatewayConfigurationService().internal_payload(db)
-
-
-@app.post("/api/internal/edge-gateway-applied")
-def edge_gateway_applied(
-    request: Request, payload: EdgeGatewayAppliedRequest, db: DbSession
-) -> dict[str, bool]:
-    expected = get_settings().topology_controller_token
-    received = request.headers.get("X-Topology-Controller-Token", "")
-    if not expected or not hmac.compare_digest(received, expected):
-        raise HTTPException(status_code=403, detail="topology controller is not authorized")
-    EdgeGatewayConfigurationService().mark_applied(
-        db,
-        payload.configuration_id,
-        payload.sha256,
-        payload.status,
-        payload.message,
-    )
-    db.commit()
-    return {"ok": True}
 
 
 def _system_settings_payload(
@@ -3237,10 +2977,9 @@ def put_system_settings(
         )
         db.commit()
         # Cached adapters are recreated on the next request so non-topology
-        # values (search, market and storage tuning) hot-load without a Docker
+        # values (market and storage tuning) hot-load without a Docker
         # restart.  Worker topology itself is intentionally boot-time only.
         _reload_market_runtime()
-        _clear_financial_search_service()
         logger.info(
             "administrator saved system configuration version=%s hash=%s",
             runtime.version,
@@ -3265,7 +3004,6 @@ def restore_system_setting(
         SystemConfigurationService().restore_field(db, field=field, user_id=context.user.user_id)
         db.commit()
         _reload_market_runtime()
-        _clear_financial_search_service()
         return _system_settings_response(db)
     except SystemSettingsError as exc:
         db.rollback()
@@ -3284,7 +3022,6 @@ def restore_all_system_settings(
         SystemConfigurationService().restore_all(db, user_id=context.user.user_id)
         db.commit()
         _reload_market_runtime()
-        _clear_financial_search_service()
         return _system_settings_response(db)
     except SystemSettingsError as exc:
         db.rollback()
@@ -3477,35 +3214,13 @@ def report(
     return ReportResponse.model_validate(
         {
             **{column.name: getattr(row, column.name) for column in row.__table__.columns},
+            # Reports created before the structured-result migration have
+            # no result payload. Keep those history rows readable while
+            # exposing an object-shaped response to clients.
+            "result": row.result or {},
             "market_index_snapshot": market_snapshot,
         }
     )
-
-
-@app.get("/api/v1/reports/{report_id}/content", response_model=ReportBodyResponse)
-def report_content(report_id: str, db: DbSession, context: Current) -> ReportBodyResponse:
-    row = db.get(ReportRow, report_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="report not found")
-    run = db.get(JobRun, row.run_id)
-    if run is None or not _owns(run, context):
-        raise HTTPException(status_code=404, detail="report not found")
-    settings = get_effective_settings()
-    if row.object_uri.startswith("s3://"):
-        store: ObjectStore = S3ObjectStore(
-            bucket=settings.object_store_bucket,
-            endpoint_url=settings.object_store_endpoint,
-            access_key=settings.object_store_access_key,
-            secret_key=settings.object_store_secret_key,
-            secure=settings.object_store_secure,
-        )
-    else:
-        store = LocalObjectStore(settings.lake_root.parent / "objects")
-    try:
-        content = store.get(row.object_uri).decode("utf-8")
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail="report content unavailable") from exc
-    return ReportBodyResponse(report_id=row.report_id, content_type="text/html", content=content)
 
 
 @app.get("/api/v1/reports/{report_id}/symbols", response_model=list[ReportSymbolResponse])
@@ -4813,6 +4528,48 @@ def market_quote(symbol: str, _: Current, refresh: bool = False) -> QuoteRespons
     return QuoteResponse.model_validate(row)
 
 
+@app.get("/api/v1/monitor/signals", response_model=MonitorSignalsResponse)
+def monitor_signals(
+    symbols: str,
+    _: Current,
+    period: str = "5m",
+    limit: int = Query(default=120, ge=4, le=5000),
+    refresh: bool = False,
+    decision_at: datetime | None = None,
+) -> MonitorSignalsResponse:
+    """Return deterministic, live display signals with explicit PIT metadata."""
+    now = datetime.now(UTC)
+    selected_decision_at = decision_at.astimezone(UTC) if decision_at else now
+    if decision_at is not None and decision_at.tzinfo is None:
+        raise HTTPException(status_code=422, detail="decision_at must include a timezone")
+    if selected_decision_at > now + timedelta(seconds=30):
+        raise HTTPException(status_code=422, detail="decision_at must not be in the future")
+    requested = list(dict.fromkeys(item.strip().upper() for item in symbols.split(",") if item.strip()))
+    if not requested or len(requested) > MAX_QUOTE_SYMBOLS:
+        raise HTTPException(status_code=422, detail="symbols must contain 1 to 50 entries")
+    items: list[MonitorSignalResponse] = []
+    service = get_market_data_service()
+    for symbol in requested:
+        try:
+            payload = service.klines(symbol, period, limit=limit, force_refresh=refresh)
+            status_payload = payload.get("status", {}) if isinstance(payload, dict) else {}
+            collected_at = status_payload.get("collected_at") if isinstance(status_payload, dict) else None
+            if isinstance(collected_at, str):
+                collected_at = datetime.fromisoformat(collected_at.replace("Z", "+00:00"))
+            if not isinstance(collected_at, datetime) or collected_at.tzinfo is None:
+                collected_at = selected_decision_at
+            rows = detect_monitor_signals(
+                symbol=symbol,
+                bars=list(payload.get("bars", [])),
+                available_at=collected_at,
+                decision_at=selected_decision_at,
+            )
+            items.extend(MonitorSignalResponse.model_validate(row.model_dump(mode="json")) for row in rows)
+        except (ValueError, RuntimeError) as exc:
+            logger.info("monitor signal unavailable for %s: %s", symbol, exc)
+    return MonitorSignalsResponse(items=items, generated_at=now, decision_at=selected_decision_at)
+
+
 @app.get("/api/v1/market/quotes", response_model=list[QuoteResponse])
 def market_quotes(symbols: str, _: Current, refresh: bool = False) -> list[QuoteResponse]:
     requested = [item.strip() for item in symbols.split(",") if item.strip()]
@@ -4917,50 +4674,6 @@ def market_status(_: Current) -> dict[str, Any]:
     }
 
 
-@app.get("/api/v1/search/financial", response_model=FinancialSearchResponse)
-def financial_search(
-    service: SearchService,
-    db: DbSession,
-    context: Current,
-    q: str = Query(min_length=1, max_length=256),
-) -> FinancialSearchResponse:
-    from ashare_ai.search.service import FinancialSearchBusyError, FinancialSearchService
-
-    if not service.allow_user_request(context.user.user_id):
-        raise HTTPException(
-            status_code=429,
-            detail="financial search rate limit exceeded",
-            headers={"Retry-After": "60"},
-        )
-    try:
-        if isinstance(service, FinancialSearchService):
-            return service.search(q, db)
-        return FinancialSearchResponse.model_validate(service.search(q))
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except TimeoutError as exc:
-        raise HTTPException(status_code=504, detail="financial search timed out") from exc
-    except FinancialSearchBusyError as exc:
-        raise HTTPException(
-            status_code=429,
-            detail=str(exc),
-            headers={"Retry-After": "1"},
-        ) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail="financial search unavailable") from exc
-
-
-@app.get("/api/v1/search/status", response_model=FinancialSearchStatus)
-def financial_search_status(
-    service: SearchService, db: DbSession, _: Current
-) -> FinancialSearchStatus:
-    from ashare_ai.search.service import FinancialSearchService
-
-    if isinstance(service, FinancialSearchService):
-        return service.status(db)
-    return FinancialSearchStatus.model_validate(service.status())
-
-
 def _mount_native_web() -> None:
     root = get_settings().native_web_root
     if root is None:
@@ -4978,3 +4691,6 @@ _mount_native_web()
 # Include decision mode routers
 app.include_router(decision_router)
 app.include_router(model_management_router)
+app.include_router(training_router)
+app.include_router(search_router)
+app.include_router(strategy_router)

@@ -29,7 +29,6 @@ if (Test-Path $settingsPath) {
         $system = $settings.system
         if ($system.gateway_port) { $configuredPorts.gateway = [int]$system.gateway_port }
         if ($system.quote_bridge_port) { $configuredPorts.quote = [int]$system.quote_bridge_port }
-        if ($system.news_bridge_port) { $configuredPorts.news = [int]$system.news_bridge_port }
         if ($system.control_api_port) { $configuredPorts.api = [int]$system.control_api_port }
     } catch { Write-Warning "Ignoring invalid port settings: $settingsPath" }
 }
@@ -49,13 +48,6 @@ $serviceDefinitions = @{
         LogPrefix = "bridge"
         ProcessNames = @("python", "python3")
     }
-    NewsBridge = [pscustomobject]@{
-        StateKey = "newsbridge_pid"
-        Port = $(if ($configuredPorts.news) { $configuredPorts.news } else { 8082 })
-        HealthUrl = "http://127.0.0.1:$($(if ($configuredPorts.news) { $configuredPorts.news } else { 8082 }))/health"
-        LogPrefix = "newsbridge"
-        ProcessNames = @("python", "python3")
-    }
     Api = [pscustomobject]@{
         StateKey = "api_pid"
         Port = $(if ($configuredPorts.api) { $configuredPorts.api } else { 8000 })
@@ -64,7 +56,7 @@ $serviceDefinitions = @{
         ProcessNames = @("python", "python3")
     }
 }
-$stackServices = @("Gateway", "QuoteBridge", "NewsBridge", "Api")
+$stackServices = @("Gateway", "QuoteBridge", "Api")
 
 function Expand-Services {
     param([string[]]$Requested)
@@ -79,9 +71,8 @@ function Expand-Services {
                 "Api" { @($service) }
                 "Gateway" { @($service) }
                 "QuoteBridge" { @($service) }
-                "NewsBridge" { @($service) }
                 "LocalModel" { @($service) }
-                default { throw "Unknown service '$service'. Use Stack, Api, Gateway, QuoteBridge, NewsBridge, LocalModel, or All." }
+                default { throw "Unknown service '$service'. Use Stack, Api, Gateway, QuoteBridge, LocalModel, or All." }
             }
             foreach ($name in $names) {
                 if (-not $expanded.Contains($name)) {
@@ -210,10 +201,6 @@ function Test-ProjectOwnedProcess {
         "QuoteBridge" {
             return $combined.Contains("tools\\quote_bridge\\server.py") -or
                 $combined.Contains("tools/quote_bridge/server.py")
-        }
-        "NewsBridge" {
-            return $combined.Contains("tools\\news_bridge\\server.py") -or
-                $combined.Contains("tools/news_bridge/server.py")
         }
         "Gateway" {
             return ($combined.Contains("ashare-model-gateway") -and $combined.Contains($rootToken)) -or
@@ -356,9 +343,6 @@ function Start-ManagedService {
         }
         "QuoteBridge" {
             Start-Process -FilePath $pythonCommand -ArgumentList "tools\quote_bridge\server.py", "--port", "8081" @commonArgs
-        }
-        "NewsBridge" {
-            Start-Process -FilePath $pythonCommand -ArgumentList "tools\news_bridge\server.py", "--port", "8082" @commonArgs
         }
         "Api" {
             Start-Process -FilePath $pythonCommand -ArgumentList "-m", "a_share_ai_trader.control_api" @commonArgs

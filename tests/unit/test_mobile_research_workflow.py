@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import create_engine
@@ -10,60 +9,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from ashare_ai.core.hashing import stable_hash
 from ashare_ai.core.time import SHANGHAI
 from ashare_ai.orchestration.research_schedule import _submit_auto_for_user
-from ashare_ai.search.web import WebSearchService
 from ashare_ai.storage.models import Base, JobRun
 from ashare_ai.trading.sellability import position_sellability
-
-
-class _Redis:
-    def __init__(self) -> None:
-        self.values: dict[str, str] = {}
-        self.ttls: dict[str, int] = {}
-
-    def get(self, key: str) -> str | None:
-        return self.values.get(key)
-
-    def set(self, key: str, value: str, **_: Any) -> bool:
-        if key in self.values:
-            return False
-        self.values[key] = value
-        return True
-
-    def setex(self, key: str, ttl: int, value: str) -> None:
-        self.values[key] = value
-        self.ttls[key] = ttl
-
-    def delete(self, key: str) -> None:
-        self.values.pop(key, None)
-
-
-class _SearchClient:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def search(self, query: str, *, max_results: int) -> list[dict[str, Any]]:
-        self.calls += 1
-        assert max_results == 5
-        return [{"title": query, "url": "https://example.com", "snippet": "result"}]
-
-
-def test_public_web_search_uses_hashed_key_and_tiered_ttl() -> None:
-    cache = _Redis()
-    client = _SearchClient()
-    service = WebSearchService(client=client, redis_client=cache)  # type: ignore[arg-type]
-
-    first = service.search("今日 OpenAI 最新消息")
-    second = service.search("今日 OpenAI 最新消息")
-
-    assert not first.cache_hit and second.cache_hit
-    assert client.calls == 1
-    data_keys = [key for key in cache.ttls if key.startswith("ashare:web-search:v1:")]
-    assert len(data_keys) == 1
-    assert cache.ttls[data_keys[0]] == 300
-    assert "OpenAI" not in data_keys[0]
-
-    service.search("解释现金流量表")
-    assert 1800 in cache.ttls.values()
 
 
 def test_position_sellability_fails_closed_and_marks_t1() -> None:

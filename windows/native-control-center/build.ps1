@@ -80,11 +80,6 @@ $pythonInstaller = Join-Path $vendor "python-3.12.10-amd64.exe"
 Invoke-WebRequest -UseBasicParsing -Uri "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe" -OutFile $pythonInstaller
 if ((Get-FileHash -Algorithm SHA256 $pythonInstaller).Hash.ToLowerInvariant() -ne "67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb") { throw "bundled Python checksum mismatch" }
 $lock = Get-Content -Raw (Join-Path $sourceRoot "scripts\native\dependencies.lock.json") | ConvertFrom-Json
-$searxng = $lock.artifacts | Where-Object id -eq "searxng"
-$searxngArchive = Join-Path $vendor "searxng.zip"
-Invoke-WebRequest -UseBasicParsing -Uri $searxng.archive_url -OutFile $searxngArchive
-if ((Get-FileHash -Algorithm SHA256 $searxngArchive).Hash.ToLowerInvariant() -ne ([string]$searxng.sha256).ToLowerInvariant()) { throw "bundled SearXNG checksum mismatch" }
-
 if (Test-Path -LiteralPath $payload) { Remove-Item -Force -LiteralPath $payload }
 Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $payload -CompressionLevel Optimal
 $setup = Join-Path $dist "AshareAI-Setup.exe"

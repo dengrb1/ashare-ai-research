@@ -9,8 +9,8 @@
 - 代码 SHA（基线）：`27fb6b4`（提交前基线）；本分支：`feat/chinese-errors-resource-optimization`
 - 宿主：Windows 11 Pro（10.0.26100），Docker 29.6.1，Compose v5.3.0（Docker Desktop VM）
 - 拓扑：默认 `SERIAL + LIGHTWEIGHT`（`docker compose -p ashare-ai-src -f compose.yaml`）
-- 运行中的服务：`web`、`api`、`postgres`、`redis`、`job-worker`、`exit-advice-worker`、
-  `searxng`、`edge-gateway`（全部 healthy，容器 `Up 4 hours`）
+- 运行中的服务：`web`、`api`、`gateway`、`quote-bridge`、`postgres`、`redis`、`job-worker`
+  （全部 healthy，容器 `Up 4 hours`）
 - 系统配置哈希 / 模型配置哈希：本次未变更任何版本化配置，沿用既有 `configs/first_release.v1.json` 与
   持久化配置版本（未授权不读取生产配置哈希进行改写，仅记录“未变更”）
 - 运行模式：API 默认 `LIGHTWEIGHT`；Worker 在 SERIAL 拓扑下为轻量轮询器，重任务通过
@@ -29,7 +29,7 @@
 
 1. 确定性研究流程（模型关闭或模拟客户端）的固定 canonical bundle 任务。
 2. 固定已提交快照的回测任务。
-3. `exit-advice-worker` 固定输入任务。
+3. 退出建议队列固定输入任务。
 4. 真实 AKShare / 行情源与真实 LLM 场景（单独报告网络延迟与限流）。
 5. Worker 连续 5 个隔离任务后的回落测试。
 
@@ -41,11 +41,9 @@
 |---|---|---|---|---|---|---|---|---|
 | job-worker | 700 | 306–484（波动） | 434 | 60 | 254 | 124 | **311** | 3 |
 | api | 384 | 135–136 | 139 | 120 | 9 | 2 | **137** | 13 |
-| exit-advice-worker | 320 | 45–47 | 53 | 33 | 15 | 4 | **48** | 3 |
 | web | 32 | 24 | 28 | 16 | 6 | 1 | **27** | 23 |
 | postgres | 128 | 41 | 54 | 17 | 30 | 9 | **46** | 14 |
 | redis | 64 | 14 | 26 | 5 | 17 | 10 | **17** | 9 |
-| searxng | 256 | 114 | 150 | 104 | 35 | 33 | **117** | 11 |
 
 要点：
 
@@ -125,7 +123,7 @@ docker compose -p ashare-ai-src -f compose.yaml exec api python -X importtime -c
 1. 未触发真实研究、真实供应商、真实 LLM、新回测、删除数据或生产迁移。
 2. 未改动任何 `mem_limit`、CPU/PID/线程上限；未调整行情缓存或线程池。
 3. 未引入 orjson，未更换模型、推理档位或 prompt。
-4. `docs/API.md` 的 DUAL 拓扑 700 MiB 预算说明未改动（上限未变）。
+4. 单一 `job-worker` 的 700 MiB 预算说明未改动（上限未变）。
 5. 真实外部场景（网络延迟、限流、供应商流控）未验证，需授权后在单独报告区分。
 
 ## 0.6 复测建议（获得授权后）

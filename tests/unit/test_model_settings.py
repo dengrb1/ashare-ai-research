@@ -106,7 +106,7 @@ def test_model_configuration_rejects_invalid_comma_hostname() -> None:
         )
 
 
-def test_model_probe_checks_research_model_as_well_as_search_model(monkeypatch) -> None:
+def test_model_probe_checks_configured_research_model(monkeypatch) -> None:
     session, _ = _database()
     service = ModelConfigurationService(_settings(Fernet.generate_key().decode()))
     attempted: list[tuple[str, str]] = []
@@ -132,8 +132,6 @@ def test_model_probe_checks_research_model_as_well_as_search_model(monkeypatch) 
             ModelSettingsDraft(
                 base_url="https://gateway.example/v1",
                 api_key="database-secret",
-                search_model="search-model",
-                search_reasoning_effort="low",
                 research_model="research-model",
                 research_reasoning_effort="high",
             ),
@@ -141,7 +139,7 @@ def test_model_probe_checks_research_model_as_well_as_search_model(monkeypatch) 
         )
     )
 
-    assert attempted == [("search-model", "low"), ("research-model", "high")]
+    assert attempted == [("research-model", "high")]
     assert result.reachable is True
 
 
@@ -159,8 +157,6 @@ async def test_model_settings_probe_can_skip_stream_probe() -> None:
             base_url="https://gateway.example",
             api_key="probe-secret",
             enabled=True,
-            search_model="gpt-test",
-            search_reasoning_effort="high",
             research_model="gpt-test",
             research_reasoning_effort="high",
         ),
@@ -186,7 +182,6 @@ async def test_model_probe_persists_sanitized_diagnostics() -> None:
         ModelSettingsDraft(
             base_url="https://gateway.example",
             api_key="probe-secret",
-            search_model="gpt-test",
             research_model="gpt-test",
         ),
         session,
@@ -196,8 +191,8 @@ async def test_model_probe_persists_sanitized_diagnostics() -> None:
 
     rows = session.query(ModelProbeLog).all()
     row = rows[0]
-    assert route.call_count == 2
-    assert len(rows) == 2
+    assert route.call_count == 1
+    assert len(rows) == 1
     assert row.outcome == "SUCCEEDED"
     assert row.protocol == "RESPONSES"
     assert row.endpoint_path == "/responses"
@@ -232,7 +227,7 @@ def test_model_settings_logs_api_returns_only_sanitized_fields(monkeypatch) -> N
         session.add(
             ModelProbeLog(
                 model="grok-test",
-                purpose="search",
+                purpose="research",
                 protocol="CHAT_COMPLETIONS",
                 endpoint_path="/chat/completions",
                 request_mode="json_object",
@@ -362,8 +357,6 @@ def test_admin_model_settings_api_requires_csrf_and_never_returns_secret(
         payload = {
             "base_url": "https://gateway.example/v1",
             "api_key": "must-never-be-returned",
-            "search_model": "gpt-5.6-luna",
-            "search_reasoning_effort": "low",
             "research_model": "gpt-5.6-sol",
             "research_reasoning_effort": "high",
             "timeout_seconds": 90,

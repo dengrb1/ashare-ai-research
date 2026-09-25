@@ -21,7 +21,6 @@ from ashare_ai.core.hashing import stable_hash
 from ashare_ai.market.service import get_market_data_service
 from ashare_ai.portfolio.user_assets import UserAssetService
 from ashare_ai.reports.chinese_summary import symbol_summary
-from ashare_ai.search.news import NewsSearchService
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import (
     CandidateRow,
@@ -183,12 +182,10 @@ class ChatContextService:
         *,
         settings: Settings | None = None,
         market: Any | None = None,
-        news: NewsSearchService | None = None,
         session_factory: Callable[[], Any] = SessionLocal,
     ) -> None:
         self.settings = settings or get_settings()
         self.market = market or get_market_data_service()
-        self.news = news or NewsSearchService(settings=self.settings)
         self.session_factory = session_factory
         policy = _chat_policy(self.settings)
         self.cache_seconds = _positive_int(policy.get("context_cache_seconds"), 120, 15, 3600)
@@ -198,8 +195,6 @@ class ChatContextService:
             1,
             16,
         )
-        self.news_window_days = _positive_int(policy.get("news_window_days"), 30, 1, 365)
-        self.max_news_results = _positive_int(policy.get("max_news_results"), 5, 1, 5)
         self._cache: OrderedDict[str, tuple[float, ChatContextResult]] = OrderedDict()
         self._cache_lock = threading.Lock()
         self._inflight: dict[str, threading.Event] = {}
@@ -211,7 +206,6 @@ class ChatContextService:
         user_id: str,
         refs: list[dict[str, str]],
         requested_decision_at: datetime | None,
-        web_search: bool,
         model_configuration_sha256: str | None,
     ) -> ChatContextResult:
         historical = requested_decision_at is not None
@@ -229,7 +223,6 @@ class ChatContextService:
                     requested.isoformat() if requested else _live_bucket(self.cache_seconds)
                 ),
                 "historical": historical,
-                "web_search": web_search,
                 "model_configuration": model_configuration_sha256,
             }
         )
@@ -247,9 +240,7 @@ class ChatContextService:
             else:
                 owner = False
         if not owner:
-            timeout = (
-                self.settings.market_timeout_seconds + self.settings.searxng_timeout_seconds + 4
-            )
+            timeout = self.settings.market_timeout_seconds + 4
             gate.wait(timeout=timeout)
             waited = round((time.monotonic() - started) * 1000)
             with self._cache_lock:
@@ -269,7 +260,6 @@ class ChatContextService:
                 refs=refs,
                 requested_decision_at=requested,
                 historical=historical,
-                web_search=web_search,
             )
             with self._cache_lock:
                 self._cache[cache_key] = (time.monotonic() + self.cache_seconds, result)
@@ -311,11 +301,9 @@ class ChatContextService:
         refs: list[dict[str, str]],
         requested_decision_at: datetime | None,
         historical: bool,
-        web_search: bool,
     ) -> ChatContextResult:
         provisional = requested_decision_at or datetime.now(UTC)
         symbols = [item["symbol"] for item in refs]
-        names = {item["symbol"]: item["name"] for item in refs}
         scores, score_status, positions, position_status = self._database_context(
             user_id=user_id, symbols=symbols, decision_at=provisional, historical=historical
         )
@@ -339,8 +327,6 @@ class ChatContextService:
         market_cache_hit = False
         news_cache_hit = False
         future_count = (1 if symbols and not historical else 0) + len(symbols)
-        if web_search and not historical:
-            future_count += len(symbols)
         workers = max(1, min(self.max_workers, future_count or 1))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             quote_future = (
@@ -365,17 +351,6 @@ class ChatContextService:
                     )
                 ): symbol
                 for symbol in symbols
-            }
-            news_futures = {
-                pool.submit(
-                    self.news.search_for_security,
-                    symbol=symbol,
-                    name=names.get(symbol, symbol),
-                    max_results=self.max_news_results,
-                    window_days=self.news_window_days,
-                ): symbol
-                for symbol in symbols
-                if web_search and not historical
             }
             if quote_future is not None:
                 try:
@@ -498,40 +473,13 @@ class ChatContextService:
                         ),
                         "source": "committed_manifest" if historical else "market",
                     }
-            for future in as_completed(news_futures):
-                symbol = news_futures[future]
-                try:
-                    result = future.result()
-                except Exception:
-                    news_items[symbol] = []
-                    statuses["news"][symbol] = {
-                        "state": "UNAVAILABLE",
-                        "reason_code": "NEWS_UPSTREAM_UNAVAILABLE",
-                        "source": "searxng",
-                    }
-                    continue
-                news_items[symbol] = result.items
-                statuses["news"][symbol] = result.status
-                news_cache_hit = news_cache_hit or result.cache_hit
-                for item in result.items:
-                    sources.append(
-                        {
-                            "source": "searxng",
-                            "symbol": symbol,
-                            "title": item["title"],
-                            "uri": item["url"],
-                            "engine": item["engine"],
-                            "available_at": item.get("published_at"),
-                        }
-                    )
-        if historical or not web_search:
-            reason = "HISTORICAL_NEWS_EXCLUDED" if historical else "NEWS_DISABLED"
-            for symbol in symbols:
-                statuses["news"].setdefault(
-                    symbol,
-                    {"state": "UNAVAILABLE", "reason_code": reason, "source": "searxng"},
-                )
-                news_items.setdefault(symbol, [])
+        for symbol in symbols:
+            statuses["news"][symbol] = {
+                "state": "UNAVAILABLE",
+                "reason_code": "NEWS_DISABLED",
+                "source": "structured_research",
+            }
+            news_items[symbol] = []
         # A live request is frozen only after its parallel data retrieval finishes.
         decision_at = provisional if historical else datetime.now(UTC)
         context = {

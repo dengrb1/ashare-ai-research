@@ -1,4 +1,4 @@
-"""Integration tests for Quote Bridge, News Bridge, and Gateway clients."""
+"""Integration tests for Quote Bridge and Gateway clients."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ from unittest.mock import Mock, patch
 
 from ashare_ai.agents.gateway_client import GatewayClient
 from ashare_ai.core.config import Settings
-from ashare_ai.market.news_bridge_client import NewsBridgeClient
 from ashare_ai.market.quote_bridge_client import QuoteBridgeClient
 
 
@@ -17,8 +16,6 @@ def mock_settings() -> Settings:
     return Settings(
         quote_bridge_enabled=True,
         quote_bridge_url="http://localhost:8081",
-        news_bridge_enabled=True,
-        news_bridge_url="http://localhost:8082",
         gateway_enabled=True,
         gateway_url="http://localhost:8787",
     )
@@ -90,53 +87,6 @@ class TestQuoteBridgeClient:
         # The actual implementation catches HTTPStatusError with 404 and returns None
         client = QuoteBridgeClient(settings=mock_settings)
         assert client.base_url == "http://localhost:8081"
-
-
-class TestNewsBridgeClient:
-    """Test News Bridge client integration."""
-
-    def test_init_with_settings(self, mock_settings: Settings) -> None:
-        client = NewsBridgeClient(settings=mock_settings)
-        assert client.base_url == "http://localhost:8082"
-        assert client.timeout == 10.0
-
-    def test_health_check_success(self, mock_settings: Settings) -> None:
-        with patch.object(NewsBridgeClient, "client") as mock_client:
-            mock_response = Mock()
-            mock_response.status_code = 200
-            mock_client.get.return_value = mock_response
-
-            client = NewsBridgeClient(settings=mock_settings)
-            client._client = mock_client
-            result = client.health()
-
-            assert result is True
-
-    def test_get_news_success(self, mock_settings: Settings) -> None:
-        with patch.object(NewsBridgeClient, "client") as mock_client:
-            mock_response = Mock()
-            mock_response.status_code = 200
-            mock_response.json.return_value = [
-                {
-                    "title": "平安银行发布季度报告",
-                    "summary": "业绩稳健增长",
-                    "content": "详细内容...",
-                    "source": "Eastmoney",
-                    "published_at": "2026-08-26T10:30:00+08:00",
-                    "url": "https://finance.eastmoney.com/...",
-                    "symbols": ["000001.SZ"],
-                }
-            ]
-            mock_response.raise_for_status = Mock()
-            mock_client.get.return_value = mock_response
-
-            client = NewsBridgeClient(settings=mock_settings)
-            client._client = mock_client
-            result = client.get_news(symbol="000001.SZ", limit=20)
-
-            assert len(result) == 1
-            assert result[0]["title"] == "平安银行发布季度报告"
-            assert result[0]["symbols"] == ["000001.SZ"]
 
 
 class TestGatewayClient:

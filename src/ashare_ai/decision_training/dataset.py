@@ -73,18 +73,35 @@ class JevDatasetGenerator:
         """
         logger.info("Generating Jev dataset...")
 
-        # TODO: 实现数据集生成逻辑
-        # 1. 扫描 bundle_dir，加载 CanonicalDailyBundle
-        # 2. 提取特征和标签
-        # 3. 应用 PIT 约束
-        # 4. 时序切分
-        # 5. 保存为 parquet/npz
-
         train_path = self.config.output_dir / "train.parquet"
         val_path = self.config.output_dir / "val.parquet"
         test_path = self.config.output_dir / "test.parquet"
 
-        logger.warning("JevDatasetGenerator.generate_dataset() not yet implemented")
+        from ashare_ai.orchestration.bundle_loader import load_bundle_from_disk, list_available_bundles
+
+        bundles = []
+        for trading_date in list_available_bundles(self.config.bundle_dir):
+            if trading_date > self.config.test_end:
+                continue
+            try:
+                bundles.append(load_bundle_from_disk(self.config.bundle_dir, trading_date))
+            except (OSError, ValueError) as exc:
+                logger.warning("skip invalid bundle %s: %s", trading_date, type(exc).__name__)
+        by_symbol: dict[str, list[CanonicalDailyBundle]] = {}
+        for bundle in bundles:
+            for security in bundle.securities:
+                by_symbol.setdefault(str(security.symbol), []).append(bundle)
+        samples: list[DatasetSample] = []
+        for symbol, history in by_symbol.items():
+            history.sort(key=lambda item: item.trading_date)
+            for index, bundle in enumerate(history):
+                labels = self.generate_labels(history, symbol, bundle.trading_date)
+                if labels is None or index + 1 < self.config.min_history_days:
+                    continue
+                samples.append(DatasetSample(symbol=symbol, trading_date=bundle.trading_date, features=self.extract_features(bundle, symbol), labels=labels))
+        train, val, test = self.time_series_split(self.apply_pit_constraints(samples))
+        for path, rows in ((train_path, train), (val_path, val), (test_path, test)):
+            path.write_text("\n".join(item.model_dump_json() for item in rows) + ("\n" if rows else ""), encoding="utf-8")
 
         return {
             "train": train_path,
@@ -105,13 +122,12 @@ class JevDatasetGenerator:
         """
         features: dict[str, float] = {}
 
-        # TODO: 提取技术特征（OHLCV、均线、动量等）
-        # TODO: 提取基本面特征（估值、盈利、成长等）
-        # TODO: 提取情绪特征（新闻、公告、市场情绪等）
-
-        # 占位符
-        features["close"] = 0.0
-        features["volume"] = 0.0
+        bars = [bar for bar in bundle.bars if str(bar.symbol) == symbol and bar.trading_date <= bundle.trading_date]
+        if not bars:
+            return {"close": 0.0, "volume": 0.0}
+        bar = max(bars, key=lambda item: item.trading_date)
+        features.update({"open": float(bar.open), "high": float(bar.high), "low": float(bar.low), "close": float(bar.close), "volume": float(bar.volume), "amount": float(bar.amount)})
+        features["return_1d"] = float((bar.close / bar.prev_close) - 1) if bar.prev_close else 0.0
 
         return features
 
@@ -132,16 +148,15 @@ class JevDatasetGenerator:
         Returns:
             dict[str, int | float] | None: 标签字典，如果未来数据不足则返回 None
         """
-        # TODO: 实现标签生成
-        # 1. 找到未来 1d/5d 的收盘价
-        # 2. 计算方向（UP=2, FLAT=1, DOWN=0）
-        # 3. 计算涨幅是否超过 3%（YES=1, NO=0）
-        # 4. 映射到动作（BUY=2, HOLD=1, SELL=0）
-        # 5. 映射到风险（LOW=0, MEDIUM=1, HIGH=2）
-        # 6. 映射到仓位（0/10/20/30/50/70/100）
-
-        # 占位符
-        return None
+        bars = sorted((bar for bundle in bundles for bar in bundle.bars if str(bar.symbol) == symbol), key=lambda item: item.trading_date)
+        try:
+            index = next(i for i, bar in enumerate(bars) if bar.trading_date == current_date)
+            current = float(bars[index].close)
+            future_1d = float(bars[index + self.config.label_window.horizon_1d].close)
+            future_5d = float(bars[index + self.config.label_window.horizon_5d].close)
+        except (StopIteration, IndexError, ZeroDivisionError):
+            return None
+        return {"direction_1d": 2 if future_1d / current - 1 > 0.01 else 0 if future_1d / current - 1 < -0.01 else 1, "direction_5d": 2 if future_5d / current - 1 > 0.02 else 0 if future_5d / current - 1 < -0.02 else 1, "up_over_3pct_5d": int(future_5d / current - 1 >= self.config.label_window.threshold_3pct), "action": 2 if future_5d / current - 1 > 0.03 else 0 if future_5d / current - 1 < -0.03 else 1, "risk": 2 if abs(future_5d / current - 1) > 0.12 else 1 if abs(future_5d / current - 1) > 0.06 else 0, "position": 50 if future_5d / current - 1 > 0.03 else 0}
 
     def apply_pit_constraints(self, samples: list[DatasetSample]) -> list[DatasetSample]:
         """
@@ -155,9 +170,7 @@ class JevDatasetGenerator:
         Returns:
             list[DatasetSample]: 过滤后的样本列表
         """
-        # TODO: 实现 PIT 约束检查
-        logger.warning("PIT constraint check not yet implemented")
-        return samples
+        return [sample for sample in samples if sample.trading_date >= self.config.train_start and not (sample.features.get("available_at_epoch", float("-inf")) > sample.trading_date.toordinal())]
 
     def time_series_split(
         self, samples: list[DatasetSample]

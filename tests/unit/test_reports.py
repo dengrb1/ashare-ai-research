@@ -1,185 +1,68 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from ashare_ai.reports.daily import DailyReportService
-from ashare_ai.storage.models import Base
-from ashare_ai.storage.objects import LocalObjectStore
+from ashare_ai.api.schemas import ReportResponse
+from ashare_ai.storage.models import Base, JobRun, ReportRow
 
 
-def test_daily_report_is_content_addressed(tmp_path) -> None:
+def test_report_contract_keeps_structured_result_and_no_object_payload() -> None:
     engine = create_engine("sqlite+pysqlite://")
     Base.metadata.create_all(engine)
-    session = Session(engine)
-    store = LocalObjectStore(tmp_path / "objects")
-    report = DailyReportService(session, store).generate(
-        run_id="run-report",
-        trading_date=date(2026, 7, 14),
-        context={
-            "trading_date": "2026-07-14",
-            "decision_at": "2026-07-14T18:00:00+08:00",
-            "run_status": "SUCCEEDED",
-            "fused": False,
-            "buy_execution_date": "2026-07-15",
-            "t1_earliest_sell_date": "2026-07-16",
-            "trade_calendar_source": "builtin-demo",
-            "candidates": [],
-            "report_symbols": [],
-            "positions": [],
-            "risks": [],
-            "run_id": "run-report",
-            "input_hash": "a" * 64,
-            "formula_version": "v1",
-            "trade_rule_version": "v1",
-            "research_scope": "MARKET",
-            "target_symbols": [],
-            "research_budget": {},
-            "research_only_reason": None,
-            "portfolio_outcome": {},
-            "quality_summary": {
-                "symbol_count": 0,
-                "fundamental_placeholder_count": 0,
-                "sentiment_placeholder_count": 0,
-                "industry_placeholder_count": 0,
+    now = datetime(2026, 7, 14, 10, tzinfo=UTC)
+    with Session(engine) as session:
+        session.add(
+            JobRun(
+                run_id="run-report",
+                run_type="DAILY",
+                trading_date=date(2026, 7, 14),
+                decision_at=now,
+                status="SUCCEEDED",
+                idempotency_key="run-report-key",
+                manifest={},
+                input_hash="a" * 64,
+                started_at=now,
+                completed_at=now,
+            )
+        )
+        row = ReportRow(
+            report_id="report-structured",
+            run_id="run-report",
+            trading_date=date(2026, 7, 14),
+            report_type="DAILY_RESEARCH",
+            object_uri=None,
+            content_sha256=None,
+            result={
+                "trading_date": "2026-07-14",
+                "report_symbols": [{"symbol": "600000.SH", "total_score": 72}],
             },
-            "formal_eligible_symbols": [],
-            "excluded_symbols": {},
-            "risk_reason_code": None,
-            "risk_reason_message": None,
-        },
+            created_at=now,
+        )
+        session.add(row)
+        session.commit()
+        payload = {column.name: getattr(row, column.name) for column in row.__table__.columns}
+
+    response = ReportResponse.model_validate(payload)
+    assert response.result["report_symbols"][0]["symbol"] == "600000.SH"
+    assert response.object_uri is None
+    assert response.content_sha256 is None
+
+
+def test_report_response_accepts_legacy_empty_result_as_empty_structure() -> None:
+    now = datetime(2026, 7, 14, 10, tzinfo=UTC)
+    response = ReportResponse.model_validate(
+        {
+            "report_id": "legacy-report",
+            "run_id": "legacy-run",
+            "trading_date": date(2026, 7, 14),
+            "report_type": "DAILY_RESEARCH",
+            "result": {},
+            "object_uri": None,
+            "content_sha256": None,
+            "created_at": now,
+        }
     )
-    session.commit()
-    content = store.get(report.object_uri)
-    assert content.startswith(b"<!doctype html>")
-    assert "T+1 交易时序" in content.decode("utf-8")
-    assert report.object_uri.endswith(report.content_sha256)
-
-
-def test_daily_report_prefers_chinese_plain_language_summary(tmp_path) -> None:
-    engine = create_engine("sqlite+pysqlite://")
-    Base.metadata.create_all(engine)
-    session = Session(engine)
-    store = LocalObjectStore(tmp_path / "objects")
-    report = DailyReportService(session, store).generate(
-        run_id="run-summary",
-        trading_date=date(2026, 7, 14),
-        context={
-            "trading_date": "2026-07-14",
-            "decision_at": "2026-07-14T18:00:00+08:00",
-            "run_status": "SUCCEEDED",
-            "fused": False,
-            "buy_execution_date": "2026-07-15",
-            "t1_earliest_sell_date": "2026-07-16",
-            "trade_calendar_source": "builtin-demo",
-            "candidates": [],
-            "report_symbols": [
-                {
-                    "symbol": "600000.SH",
-                    "name": "浦发银行",
-                    "advice_eligible": True,
-                    "recommendation": None,
-                    "research_status": "FORMAL",
-                    "plain_language_summary": "基本面相对更有支撑，数据门禁已通过。",
-                    "exclusion_reasons": [],
-                    "score": {
-                        "total_score": 70,
-                        "base_total_score": 70,
-                        "fundamental_score": 70,
-                        "technical_score": 70,
-                        "sentiment_score": 70,
-                        "quality_confidence_score": 70,
-                        "event_risk_multiplier": 1,
-                        "market_score_adjustment": 0,
-                        "market_regime": "UNKNOWN",
-                        "market_risk_multiplier": 1,
-                        "decision_at": "2026-07-14T18:00:00+08:00",
-                    },
-                    "components": {
-                        "fundamental": {
-                            "score": 70,
-                            "confidence": 0.8,
-                            "summary": "基本面得分 70.00 分，整体表现相对较好。",
-                            "positive_factors": ["english factor should not be rendered"],
-                            "evidence": [],
-                        }
-                    },
-                }
-            ],
-            "positions": [],
-            "risks": [],
-            "run_id": "run-summary",
-            "input_hash": "a" * 64,
-            "formula_version": "v1",
-            "trade_rule_version": "v1",
-            "research_scope": "MARKET",
-            "target_symbols": [],
-            "research_budget": {},
-            "research_only_reason": None,
-            "portfolio_outcome": {},
-            "quality_summary": {
-                "symbol_count": 1,
-                "fundamental_placeholder_count": 0,
-                "sentiment_placeholder_count": 0,
-                "industry_placeholder_count": 0,
-            },
-            "formal_eligible_symbols": ["600000.SH"],
-            "excluded_symbols": {},
-            "risk_reason_code": None,
-            "risk_reason_message": None,
-        },
-    )
-    content = store.get(report.object_uri).decode("utf-8")
-    assert "省流版" in content
-    assert "给家人看的总结" not in content
-    assert "综合评分 70.00 分" not in content
-    assert "english factor should not be rendered" not in content
-
-
-def test_daily_report_renders_t1_fallback_without_calendar_dates(tmp_path) -> None:
-    engine = create_engine("sqlite+pysqlite://")
-    Base.metadata.create_all(engine)
-    session = Session(engine)
-    store = LocalObjectStore(tmp_path / "objects")
-    report = DailyReportService(session, store).generate(
-        run_id="run-t1-fallback",
-        trading_date=date(2026, 7, 14),
-        context={
-            "trading_date": "2026-07-14",
-            "decision_at": "2026-07-14T18:00:00+08:00",
-            "run_status": "SUCCEEDED",
-            "fused": False,
-            "buy_execution_date": None,
-            "t1_earliest_sell_date": None,
-            "trade_calendar_source": None,
-            "candidates": [],
-            "report_symbols": [],
-            "positions": [],
-            "risks": [],
-            "run_id": "run-t1-fallback",
-            "input_hash": "a" * 64,
-            "formula_version": "v1",
-            "trade_rule_version": "v1",
-            "research_scope": "MARKET",
-            "target_symbols": [],
-            "research_budget": {},
-            "research_only_reason": None,
-            "portfolio_outcome": {},
-            "quality_summary": {
-                "symbol_count": 0,
-                "fundamental_placeholder_count": 0,
-                "sentiment_placeholder_count": 0,
-                "industry_placeholder_count": 0,
-            },
-            "formal_eligible_symbols": [],
-            "excluded_symbols": {},
-            "risk_reason_code": None,
-            "risk_reason_message": None,
-        },
-    )
-    content = store.get(report.object_uri).decode("utf-8")
-    assert "T+1 交易时序" in content
-    assert "下一交易日（以交易所日历为准）" in content
-    assert "买入执行日的下一交易日" in content
+    assert response.result == {}

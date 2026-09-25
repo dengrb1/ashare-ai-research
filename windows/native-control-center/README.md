@@ -43,21 +43,19 @@ GUI 入口：
 
 ```powershell
 .\windows\native-control-center\AshareAI.NativeControlCenter.Cli.exe status --json
-.\windows\native-control-center\ashareai.cmd start --research-mode DUAL --research-workers 2
+.\windows\native-control-center\ashareai.cmd start
 .\windows\native-control-center\ashareai.cmd logs --tail 200
 ```
 
 CLI 支持 `install`、`start`、`stop`、`restart`、`repair`、`status`、
 `doctor`、`open` 和 `logs`。可选参数包括 `--root <运行目录>`、
-`--source-root <应用载荷目录>`、`--research-mode SERIAL|DUAL`、
-`--research-workers 0..2`、`--watchdog-interval <秒>`、`--json` 和
+`--source-root <应用载荷目录>`、`--watchdog-interval <秒>`、`--json` 和
 `--tail <行数>`。
 
 ## 安装包
 
-安装包会携带 Python 应用、预构建 Web UI、固定版本 Python 安装器和固定提交的
-SearXNG 压缩包。首次安装时，管理器会校验、下载或展开 PostgreSQL、
-Redis-compatible、Python、SearXNG 和 Python 包依赖。目标机器不需要 Node.js、
+安装包会携带 Python 应用、预构建 Web UI 和固定版本 Python 安装器。首次安装时，管理器会校验、
+下载或展开 PostgreSQL、Redis-compatible、Python 和 Python 包依赖。目标机器不需要 Node.js、
 Git、Docker Desktop 或 WSL。
 
 安装器支持无人值守部署：
@@ -82,4 +80,5 @@ Git、Docker Desktop 或 WSL。
 启动时提取到用户本地管理目录。因此安装后的管理器不依赖仓库中的松散脚本文件。
 长时间操作只显示在窗口底部状态栏和活动记录中，不会把鼠标全局设置为忙碌光标。
 
-Edge Gateway 与 Docker/Linux 原生版保持同一套管理能力和 API 契约。Windows 原生运行目录中的 `config\edge-gateway` 保存 `frpc.toml` 与 `managed.conf`；管理页面会读取文件外部修改，保存和控制器应用也会写回同一目录。
+原生版与 Docker 版共享 API、评分配置和迁移链。运行组只包含 API、Web、行情桥、模型网关和单一
+`job-worker`，只运行研究队列。

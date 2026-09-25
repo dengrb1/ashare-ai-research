@@ -201,8 +201,6 @@ class ModelConfigurationVersion(Base):
     base_url: Mapped[str] = mapped_column(Text, nullable=False)
     encrypted_api_key: Mapped[str] = mapped_column(Text, nullable=False)
     encryption_key_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    search_model: Mapped[str] = mapped_column(String(128), nullable=False)
-    search_reasoning_effort: Mapped[str] = mapped_column(String(16), nullable=False)
     research_model: Mapped[str] = mapped_column(String(128), nullable=False)
     research_reasoning_effort: Mapped[str] = mapped_column(String(16), nullable=False)
     model_profiles: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
@@ -299,41 +297,6 @@ class ActiveSystemConfiguration(Base):
     activated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     configuration: Mapped[SystemConfigurationVersion] = relationship()
-
-
-class EdgeGatewayConfigurationVersion(Base):
-    __tablename__ = "edge_gateway_configuration_versions"
-    __table_args__ = (
-        UniqueConstraint("version", name="uq_edge_gateway_configuration_version"),
-        UniqueConstraint("config_sha256", name="uq_edge_gateway_configuration_hash"),
-    )
-
-    configuration_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
-    version: Mapped[int] = mapped_column(Integer, nullable=False)
-    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    validation_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="STRICT")
-    proxy_hosts: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
-    encrypted_frpc_toml: Mapped[str] = mapped_column(Text, nullable=False)
-    encryption_key_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    config_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    created_by: Mapped[str | None] = mapped_column(ForeignKey("user_accounts.user_id"))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    applied_sha256: Mapped[str | None] = mapped_column(String(64))
-    apply_status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
-    apply_message: Mapped[str | None] = mapped_column(Text)
-
-
-class ActiveEdgeGatewayConfiguration(Base):
-    __tablename__ = "active_edge_gateway_configuration"
-
-    scope: Mapped[str] = mapped_column(String(32), primary_key=True, default="default")
-    configuration_id: Mapped[str] = mapped_column(
-        ForeignKey("edge_gateway_configuration_versions.configuration_id"), nullable=False
-    )
-    activated_by: Mapped[str | None] = mapped_column(ForeignKey("user_accounts.user_id"))
-    activated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    configuration: Mapped[EdgeGatewayConfigurationVersion] = relationship()
 
 
 class SecurityMaster(Base):
@@ -664,8 +627,9 @@ class ReportRow(Base):
     run_id: Mapped[str] = mapped_column(ForeignKey("job_runs.run_id"), nullable=False)
     trading_date: Mapped[date] = mapped_column(Date, nullable=False)
     report_type: Mapped[str] = mapped_column(String(32), nullable=False)
-    object_uri: Mapped[str] = mapped_column(Text, nullable=False)
-    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    object_uri: Mapped[str | None] = mapped_column(Text)
+    content_sha256: Mapped[str | None] = mapped_column(String(64))
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 

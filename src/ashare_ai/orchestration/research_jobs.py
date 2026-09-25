@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import logging
-import subprocess
-import sys
-import time
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -12,17 +9,12 @@ from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from ashare_ai.core.config import get_settings
-from ashare_ai.core.system_settings import (
-    SystemConfigurationService,
-    SystemRuntimeSettings,
-    get_effective_settings,
-)
+from ashare_ai.core.system_settings import get_effective_settings
 from ashare_ai.core.user_errors import public_error_message
 from ashare_ai.notifications.service import NotificationService
 from ashare_ai.observability.audit import AuditLogger
 from ashare_ai.orchestration.daily import Pipeline, load_pipeline
 from ashare_ai.orchestration.redis_queue import RedisLeasedQueue
-from ashare_ai.orchestration.worker_status import publish_heartbeat
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import JobRun
 
@@ -444,57 +436,3 @@ def run_research_job(run_id: str) -> dict[str, Any]:
             run = session.get(JobRun, run_id)
             return {"run_id": run_id, "status": run.status if run is not None else "FAILED"}
     return execute_research_job(run_id, pipeline=load_pipeline())
-
-
-def _load_worker_runtime() -> SystemRuntimeSettings | None:
-    try:
-        with SessionLocal() as session:
-            return SystemConfigurationService().resolve(session)
-    except Exception:
-        logger.exception("could not load persisted research-worker topology; using SERIAL standby")
-        return None
-
-
-def _execute_isolated_research(run_id: str) -> int:
-    """Keep dedicated workers isolated exactly like the serial worker."""
-    return subprocess.run(
-        [sys.executable, "-m", "ashare_ai.orchestration.run_job", "research", run_id],
-        check=False,
-    ).returncode
-
-
-def consume_research_queue(*, max_standby_iterations: int | None = None) -> None:
-    import redis
-
-    runtime = _load_worker_runtime()
-    settings = runtime.settings if runtime is not None else get_settings()
-    client = redis.Redis.from_url(settings.redis_url, decode_responses=True)
-    if runtime is None or runtime.execution_mode != "DUAL":
-        # Compose starts these replicas only through the dual-research profile.
-        # If a replica is left running during an incomplete topology restart,
-        # it still fails closed in SERIAL and never claims a research message.
-        iterations = 0
-        while max_standby_iterations is None or iterations < max_standby_iterations:
-            if runtime is not None:
-                publish_heartbeat(client, role="research-worker", runtime=runtime)
-            iterations += 1
-            if max_standby_iterations is None or iterations < max_standby_iterations:
-                time.sleep(5)
-        return
-    queue = RedisLeasedQueue(
-        client,
-        pending=QUEUE_NAME,
-        processing=PROCESSING_QUEUE_NAME,
-        delayed=DELAYED_QUEUE_NAME,
-        lease_seconds=runtime.settings.worker_lease_seconds,
-    )
-
-    def execute(run_id: str) -> None:
-        return_code = _execute_isolated_research(run_id)
-        if return_code:
-            logger.error("isolated research job %s exited with status %s", run_id, return_code)
-
-    def heartbeat() -> None:
-        publish_heartbeat(client, role="research-worker", runtime=runtime)
-
-    queue.consume_forever(execute, on_poll=heartbeat)

@@ -13,6 +13,22 @@ pub struct TechnicalMetrics {
     pub max_drawdown_60d: Option<f64>,
 }
 
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub struct SignalEvidence {
+    pub triggered: bool,
+    pub confidence: f64,
+    pub primary: f64,
+    pub secondary: f64,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct SignalDetections {
+    pub intraday_drop: SignalEvidence,
+    pub volume_breakout: SignalEvidence,
+    pub volume_price_divergence: SignalEvidence,
+    pub moving_average_death_cross: SignalEvidence,
+}
+
 pub fn technical_metrics(
     closes: &[f64],
     volumes: &[f64],
@@ -36,6 +52,117 @@ pub fn technical_metrics(
         volume_ratio_5_to_20: volume_ratio(volumes),
         max_drawdown_60d: max_drawdown(&tail(closes, 60)),
     })
+}
+
+/// Detect the four deterministic monitoring signals used by the research-only
+/// monitor.  Threshold versioning and PIT timestamps stay in Python; this
+/// kernel only evaluates finite, already ordered OHLCV values.
+pub fn detect_signals(
+    closes: &[f64],
+    volumes: &[f64],
+) -> Result<SignalDetections, &'static str> {
+    if closes.len() != volumes.len() {
+        return Err("closes and volumes must have equal lengths");
+    }
+    if closes.iter().chain(volumes).any(|value| !value.is_finite()) {
+        return Err("signal inputs must be finite");
+    }
+    if closes.iter().any(|value| *value <= 0.0) || volumes.iter().any(|value| *value < 0.0) {
+        return Err("signal prices must be positive and volumes non-negative");
+    }
+
+    let intraday_drop = if closes.len() >= 4 {
+        let start = closes[closes.len() - 4];
+        let change = closes[closes.len() - 1] / start - 1.0;
+        let confidence = ((-change) / 0.03).clamp(0.0, 1.0);
+        SignalEvidence {
+            triggered: change <= -0.03,
+            confidence,
+            primary: change,
+            secondary: 4.0,
+        }
+    } else {
+        empty_signal()
+    };
+
+    let volume_breakout = if closes.len() >= 21 {
+        let last = *closes.last().unwrap();
+        let prior = &closes[closes.len() - 21..closes.len() - 1];
+        let prior_high = prior.iter().copied().fold(f64::MIN, f64::max);
+        let average_volume = mean(&volumes[volumes.len() - 21..volumes.len() - 1]);
+        let volume_ratio = if average_volume > 0.0 {
+            volumes[volumes.len() - 1] / average_volume
+        } else {
+            0.0
+        };
+        let price_ratio = if prior_high > 0.0 { last / prior_high } else { 0.0 };
+        let confidence = (((price_ratio - 1.0) / 0.01).max(0.0)
+            + ((volume_ratio - 1.5) / 1.5).max(0.0))
+            .mul_add(0.5, 0.0)
+            .clamp(0.0, 1.0);
+        SignalEvidence {
+            triggered: price_ratio >= 1.01 && volume_ratio >= 1.5,
+            confidence,
+            primary: price_ratio - 1.0,
+            secondary: volume_ratio,
+        }
+    } else {
+        empty_signal()
+    };
+
+    let volume_price_divergence = if closes.len() >= 10 {
+        let split = closes.len() - 5;
+        let price_change = closes[closes.len() - 1] / closes[split] - 1.0;
+        let first_volume = mean(&volumes[volumes.len() - 10..split]);
+        let second_volume = mean(&volumes[split..]);
+        let volume_change = if first_volume > 0.0 {
+            second_volume / first_volume - 1.0
+        } else {
+            0.0
+        };
+        let divergence = price_change.abs().min(1.0) * (-(volume_change)).max(0.0);
+        SignalEvidence {
+            triggered: price_change >= 0.03 && volume_change <= -0.20,
+            confidence: (divergence / 0.03).clamp(0.0, 1.0),
+            primary: price_change,
+            secondary: volume_change,
+        }
+    } else {
+        empty_signal()
+    };
+
+    let moving_average_death_cross = if closes.len() >= 21 {
+        let previous_short = mean(&closes[closes.len() - 6..closes.len() - 1]);
+        let previous_long = mean(&closes[closes.len() - 21..closes.len() - 1]);
+        let current_short = mean(&closes[closes.len() - 5..]);
+        let current_long = mean(&closes[closes.len() - 20..]);
+        let gap = previous_short - previous_long;
+        let current_gap = current_short - current_long;
+        SignalEvidence {
+            triggered: gap >= 0.0 && current_gap < 0.0,
+            confidence: ((-current_gap) / current_long.max(f64::EPSILON) / 0.02).clamp(0.0, 1.0),
+            primary: current_short / current_long.max(f64::EPSILON) - 1.0,
+            secondary: previous_short / previous_long.max(f64::EPSILON) - 1.0,
+        }
+    } else {
+        empty_signal()
+    };
+
+    Ok(SignalDetections {
+        intraday_drop,
+        volume_breakout,
+        volume_price_divergence,
+        moving_average_death_cross,
+    })
+}
+
+fn empty_signal() -> SignalEvidence {
+    SignalEvidence {
+        triggered: false,
+        confidence: 0.0,
+        primary: 0.0,
+        secondary: 0.0,
+    }
 }
 
 fn tail(values: &[f64], window: usize) -> &[f64] {
@@ -139,16 +266,56 @@ mod python {
         ))
     }
 
+    #[pyfunction]
+    fn detect_monitor_signals(
+        closes: Vec<f64>,
+        volumes: Vec<f64>,
+    ) -> PyResult<Vec<(String, bool, f64, f64, f64)>> {
+        let detections = super::detect_signals(&closes, &volumes)
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        Ok(vec![
+            (
+                "INTRADAY_DROP".to_string(),
+                detections.intraday_drop.triggered,
+                detections.intraday_drop.confidence,
+                detections.intraday_drop.primary,
+                detections.intraday_drop.secondary,
+            ),
+            (
+                "VOLUME_BREAKOUT".to_string(),
+                detections.volume_breakout.triggered,
+                detections.volume_breakout.confidence,
+                detections.volume_breakout.primary,
+                detections.volume_breakout.secondary,
+            ),
+            (
+                "VOLUME_PRICE_DIVERGENCE".to_string(),
+                detections.volume_price_divergence.triggered,
+                detections.volume_price_divergence.confidence,
+                detections.volume_price_divergence.primary,
+                detections.volume_price_divergence.secondary,
+            ),
+            (
+                "MA_DEATH_CROSS".to_string(),
+                detections.moving_average_death_cross.triggered,
+                detections.moving_average_death_cross.confidence,
+                detections.moving_average_death_cross.primary,
+                detections.moving_average_death_cross.secondary,
+            ),
+        ])
+    }
+
     #[pymodule]
     fn ashare_ai_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(calculate_technical_metrics, m)?)?;
+        m.add_function(wrap_pyfunction!(detect_monitor_signals, m)?)?;
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::technical_metrics;
+    use super::{detect_signals, technical_metrics};
 
     #[test]
     fn calculates_expected_metrics() {
@@ -167,5 +334,18 @@ mod tests {
     fn rejects_mismatched_or_non_finite_inputs() {
         assert!(technical_metrics(&[1.0], &[]).is_err());
         assert!(technical_metrics(&[f64::NAN], &[1.0]).is_err());
+    }
+
+    #[test]
+    fn detects_breakout_and_death_cross() {
+        let mut closes = vec![10.0; 25];
+        for (index, value) in closes.iter_mut().enumerate() {
+            *value += index as f64 * 0.1;
+        }
+        closes[24] = 13.0;
+        let mut volumes = vec![100.0; 25];
+        volumes[24] = 200.0;
+        let result = detect_signals(&closes, &volumes).expect("valid signal input");
+        assert!(result.volume_breakout.triggered);
     }
 }
