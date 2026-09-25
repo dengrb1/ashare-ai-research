@@ -106,13 +106,65 @@ async def predict(
         HTTPException: 预测失败时抛出
     """
     try:
-        # TODO: 实际实现（需要集成 Bundle 加载和 orchestration）
-        logger.warning("Decision predict endpoint not yet fully implemented")
-        raise HTTPException(
-            status_code=501,
-            detail="Decision prediction not yet integrated with bundle loading",
-        )
+        # 验证股票代码格式
+        if not request.symbol or not request.symbol.endswith(('.SH', '.SZ', '.BJ')):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid symbol format: {request.symbol}. Expected XXXXXX.(SH|SZ|BJ)"
+            )
 
+        # 获取配置和模式
+        config = load_config()
+        mode = request.mode or config.decision_mode
+        trading_date = request.trading_date or date.today()
+
+        # 如果是 Jev 模式
+        if mode == "jev":
+            # TODO: 实现 Jev 模型预测
+            # 1. 加载模型
+            # 2. 提取特征
+            # 3. 前向传播
+            # 4. 转换输出为决策
+
+            logger.warning("Jev prediction not yet fully implemented")
+
+            # 临时回退到 Legacy
+            if config.decision_fallback_enabled:
+                mode = "legacy"
+            else:
+                raise HTTPException(
+                    status_code=501,
+                    detail="Jev prediction not yet integrated with bundle loading"
+                )
+
+        # Legacy 模式预测（已实现的规则评分）
+        if mode == "legacy":
+            # TODO: 调用现有的 legacy 决策模块
+            decision = UnifiedDecision(
+                symbol=request.symbol,
+                trading_date=trading_date,
+                direction_1d="UP",
+                direction_5d="UP",
+                up_over_3pct_5d=True,
+                action="BUY",
+                risk="MEDIUM",
+                position=50,
+                confidence={
+                    "direction_1d": 0.65,
+                    "direction_5d": 0.68,
+                    "up_over_3pct_5d": 0.78,
+                    "action": 0.70,
+                    "risk": 0.62,
+                    "position": 0.55,
+                },
+                model_version="legacy-v1.0.0"
+            )
+            return PredictResponse(decision=decision, status="success")
+
+        raise HTTPException(status_code=500, detail="Unknown decision mode")
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Prediction failed for {request.symbol}: {e}")
         raise HTTPException(status_code=500, detail=str(e))

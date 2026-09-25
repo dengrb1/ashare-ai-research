@@ -493,10 +493,112 @@ label { display: grid; gap: 7px; color: var(--muted); font-size: 11px; }
 .report-analysis-header h3 { margin: 5px 0 0; color: var(--text-strong); font-size: 18px; }
 .report-analysis-header h3 small { display: block; margin-top: 4px; color: var(--muted); font: 11px 'Cascadia Mono', Consolas, monospace; }
 
+/* Jev 模型页面样式 */
+.jev-hero, .jev-training-hero { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; gap: 16px; align-items: center; padding: 20px; background: var(--accent-soft); border: 1px solid var(--accent-line); border-radius: 12px; margin-bottom: 20px; }
+.jev-training-hero { grid-template-columns: 48px minmax(0, 1fr); }
+.jev-hero-icon { display: grid; place-items: center; width: 48px; height: 48px; color: var(--accent); background: var(--surface); border: 1px solid var(--accent-line); border-radius: 8px; }
+.jev-hero h2 { margin: 0 0 4px; color: var(--text-strong); font-size: 18px; }
+.jev-hero p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.jev-hero-status { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; background: var(--surface); border: 1px solid var(--accent-line); border-radius: 999px; font-size: 11px; font-weight: 600; }
+.jev-hero-status .status-active { color: var(--accent); }
+.jev-hero-status .status-inactive { color: var(--muted); }
+
+.jev-mode-switch { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 20px; }
+.jev-mode-switch button { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 12px; align-items: center; min-height: 88px; padding: 14px; background: var(--surface); border: 2px solid var(--line); border-radius: 10px; cursor: pointer; transition: all .2s ease; }
+.jev-mode-switch button:hover { border-color: var(--accent-line); background: var(--accent-soft); }
+.jev-mode-switch button.active { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+.jev-mode-switch svg { color: var(--accent); }
+.jev-mode-switch strong { display: block; color: var(--text-strong); font-size: 13px; }
+.jev-mode-switch small { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
+
+.jev-config-card { display: grid; gap: 12px; padding: 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; margin-bottom: 20px; }
+.jev-config-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.jev-config-row:last-child { border-bottom: 0; }
+.jev-config-row span { color: var(--muted); font-size: 12px; }
+.jev-config-row strong { color: var(--text-strong); font-size: 12px; font-family: 'Cascadia Mono', Consolas, monospace; }
+.jev-config-row .jev-version { color: var(--accent); }
+.text-success { color: var(--down) !important; }
+
+.jev-models-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+.jev-model-card { position: relative; display: grid; gap: 10px; padding: 14px; background: var(--surface-2); border: 2px solid var(--line); border-radius: 10px; cursor: pointer; transition: all .2s ease; }
+.jev-model-card:hover { border-color: var(--accent-line); background: var(--accent-soft); }
+.jev-model-card.active { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+.jev-model-card-header { display: flex; align-items: center; gap: 8px; }
+.jev-model-card-header svg { color: var(--accent); }
+.jev-model-card-header strong { color: var(--text-strong); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jev-model-card small { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jev-model-badge { position: absolute; top: 8px; right: 8px; display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; background: var(--accent); color: var(--on-accent); border-radius: 4px; font-size: 10px; font-weight: 600; }
+
+.jev-features { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.jev-feature { display: grid; grid-template-columns: 32px minmax(0, 1fr); gap: 12px; padding: 12px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; }
+.jev-feature-icon { display: grid; place-items: center; width: 32px; height: 32px; font-size: 18px; }
+.jev-feature strong { display: block; color: var(--text-strong); font-size: 12px; }
+.jev-feature p { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+
+.jev-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+.jev-metric { display: grid; gap: 4px; padding: 12px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; text-align: center; }
+.jev-metric span { color: var(--muted); font-size: 11px; }
+.jev-metric strong { color: var(--text-strong); font-size: 16px; font-weight: 700; }
+
+.empty-state { display: grid; gap: 12px; padding: 30px; text-align: center; }
+.empty-state p { margin: 0; color: var(--muted); font-size: 12px; }
+.empty-state .btn-primary { justify-self: center; }
+
+.btn-secondary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; padding: 0 12px; color: var(--accent); background: var(--accent-soft); border: 1px solid var(--accent-line); border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all .2s ease; }
+.btn-secondary:hover:not(:disabled) { background: var(--accent); color: var(--on-accent); }
+.btn-secondary:disabled { cursor: not-allowed; opacity: .5; }
+
+/* Jev 训练页面样式 */
+.jev-training-active { border: 2px solid var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.jev-training-progress { display: grid; gap: 16px; }
+.jev-progress-header { display: grid; grid-template-columns: 1fr auto; gap: 16px; }
+.jev-progress-header > div { display: grid; gap: 4px; }
+.jev-progress-header span { color: var(--muted); font-size: 11px; }
+.jev-progress-header strong { color: var(--text-strong); font-size: 12px; }
+.jev-progress-status { text-align: right; }
+.jev-status-running { color: var(--accent); }
+.jev-mono { font-family: 'Cascadia Mono', Consolas, monospace; font-size: 11px; color: var(--muted); }
+.jev-progress-bar { height: 8px; background: var(--line); border-radius: 999px; overflow: hidden; }
+.jev-progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-hover)); border-radius: inherit; transition: width .3s ease; box-shadow: 0 0 0 3px rgba(15, 118, 110, .1); }
+.jev-progress-text { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; }
+.jev-metrics-inline { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); margin: 12px 0; }
+.jev-metric-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; }
+.jev-metric-row span { color: var(--muted); font-size: 11px; }
+.jev-metric-row strong { color: var(--text-strong); font-size: 12px; }
+.jev-progress-timing { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; padding: 12px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; }
+.jev-progress-timing > div { display: grid; gap: 4px; }
+.jev-training-description { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.jev-feature-item { display: grid; grid-template-columns: 32px minmax(0, 1fr); gap: 12px; padding: 12px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; }
+.jev-feature-item span { font-size: 18px; }
+.jev-feature-item strong { display: block; color: var(--text-strong); font-size: 12px; }
+.jev-feature-item p { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.jev-training-warning { display: flex; gap: 12px; padding: 12px; background: rgba(218, 165, 32, .08); border: 1px solid rgba(218, 165, 32, .2); border-radius: 8px; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.jev-training-warning svg { flex: 0 0 16px; color: var(--gold); margin-top: 2px; }
+.jev-training-warning ul { margin: 8px 0 0; padding-left: 18px; }
+.jev-training-warning li { margin: 4px 0; }
+.btn-danger { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; padding: 0 12px; color: var(--on-accent); background: var(--danger); border: 1px solid var(--danger); border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all .2s ease; }
+.btn-danger:hover:not(:disabled) { background: #a0301f; }
+.btn-danger:disabled { cursor: not-allowed; opacity: .5; }
+.jev-history-panel { }
+.jev-history-table { display: grid; gap: 1px; background: var(--line); border-radius: 8px; overflow: hidden; }
+.jev-history-header, .jev-history-row { display: grid; grid-template-columns: 140px 120px 100px 80px 100px 100px; gap: 0; padding: 10px 12px; background: var(--surface); }
+.jev-history-header { background: var(--surface-2); font-size: 11px; font-weight: 600; color: var(--muted); border-bottom: 1px solid var(--line); }
+.jev-history-row { font-size: 11px; align-items: center; }
+.jev-history-row > div { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jev-history-row .jev-status-completed { color: var(--down); display: flex; align-items: center; gap: 4px; }
+.jev-history-row .jev-status-failed { color: var(--danger); display: flex; align-items: center; gap: 4px; }
+.jev-history-row .jev-status-cancelled { color: var(--muted); display: flex; align-items: center; gap: 4px; }
+.jev-workflow { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+.jev-workflow-step { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 12px; padding: 12px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; }
+.jev-workflow-badge { display: grid; place-items: center; width: 40px; height: 40px; background: var(--accent); color: var(--on-accent); border-radius: 50%; font-size: 14px; font-weight: 700; }
+.jev-workflow-step strong { display: block; color: var(--text-strong); font-size: 12px; }
+.jev-workflow-step p { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+
 @keyframes supreme-dialog-enter { from { opacity: 0; transform: translateY(10px) scale(.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
 @keyframes supreme-outline { 0%, 100% { opacity: .32; } 50% { opacity: .85; } }
 @keyframes supreme-charge { 0%, 100% { box-shadow: 0 0 0 5px rgba(8, 127, 112, .06); } 50% { box-shadow: 0 0 0 9px rgba(8, 127, 112, .13); } }
 @keyframes supreme-button-signal { 0%, 100% { box-shadow: 0 0 0 0 rgba(8, 127, 112, .2); } 50% { box-shadow: 0 0 0 5px rgba(8, 127, 112, 0); } }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
 @keyframes supreme-badge-signal { 0%, 100% { box-shadow: 0 0 0 0 rgba(8, 127, 112, .18); } 50% { box-shadow: 0 0 0 4px rgba(8, 127, 112, 0); } }
 @media (prefers-reduced-motion: reduce) { .supreme-mode-dialog, .supreme-mode-dialog::before, .supreme-mode-icon, .supreme-launch-button, .supreme-mode-badge { animation: none; } }
 

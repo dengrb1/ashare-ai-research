@@ -19,6 +19,8 @@ import { SystemSettingsPage } from './pages/SystemSettingsPage'
 import { EdgeGatewayPage } from './pages/EdgeGatewayPage'
 import { ExitAdvicePage } from './pages/ExitAdvicePage'
 import { AIChatPage } from './pages/AIChatPage'
+import { JevModelPage } from './pages/JevModelPage'
+import { JevTrainingPage } from './pages/JevTrainingPage'
 import { ThemeProvider } from './context/ThemeContext'
 import { RefreshProvider } from './context/RefreshContext'
 import { PersonalDataPage } from './pages/PersonalDataPage'
@@ -53,6 +55,8 @@ function AppRoutes() {
         <Route path="admin/edge-gateway" element={<EdgeGatewayPage />} />
         <Route path="admin" element={<AdminPage />} />
         <Route path="admin/models" element={<ModelSettingsPage />} />
+        <Route path="admin/jev-model" element={<JevModelPage />} />
+        <Route path="admin/jev-training" element={<JevTrainingPage />} />
         <Route path="admin/system-settings" element={<SystemSettingsPage />} />
       </Route>
     </Route>
