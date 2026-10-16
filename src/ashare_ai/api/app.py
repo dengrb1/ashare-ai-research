@@ -17,6 +17,7 @@ from typing import Annotated, Any, Literal, NoReturn, cast
 from uuid import uuid4
 
 from fastapi import (
+    BackgroundTasks,
     Depends,
     FastAPI,
     File,
@@ -174,6 +175,10 @@ from ashare_ai.api.schemas import (
     TradeAdviceMonitorResponse,
     TradePlanRequest,
     TradePlanResponse,
+    UpdateApplyRequest,
+    UpdateCheckRequest,
+    UpdateCheckResponse,
+    UpdateJobResponse,
     UserCreateRequest,
     UserResponse,
     UserUpdateRequest,
@@ -233,6 +238,7 @@ from ashare_ai.orchestration.trade_plan_queue import (
     enqueue_trade_plan,
 )
 from ashare_ai.orchestration.worker_status import read_heartbeats
+from ashare_ai.orchestration.update_service import UpdateCoordinator
 from ashare_ai.portfolio.user_assets import UNSET_TOTAL_ASSETS, UserAssetService
 from ashare_ai.portfolio.user_assets import DEFAULT_MONITORING_POLICY
 from ashare_ai.portfolio.asset_contracts import parse_watchlist_text
@@ -263,6 +269,7 @@ from ashare_ai.storage.models import (
     TradePlanRow,
     UserAccount,
     UserAssetState,
+    UpdateJob,
 )
 from ashare_ai.storage.personal_archive import (
     MAX_ARCHIVE_BYTES,
@@ -5319,6 +5326,87 @@ def market_status(_: Current) -> dict[str, Any]:
         **get_market_data_service().status(),
         "market_session": _market_session_status().model_dump(mode="json"),
     }
+
+
+def _execute_update_job(update_id: str) -> None:
+    """Run outside the request session so progress remains queryable."""
+
+    try:
+        with SessionLocal() as session:
+            UpdateCoordinator().run(session, update_id)
+    except Exception:
+        logger.exception("update job failed before coordinator could persist its state")
+
+
+@app.post("/api/v1/updates/check", response_model=UpdateCheckResponse)
+def check_updates(
+    _: UpdateCheckRequest,
+    db: DbSession,
+    context: Current,
+) -> UpdateCheckResponse:
+    """Check a signed online manifest and persist a pollable update tag."""
+
+    row = UpdateCoordinator().create_check_job(db, user_id=context.user.user_id)
+    return UpdateCheckResponse(
+        job=UpdateJobResponse.model_validate(row),
+        available=row.status == "AVAILABLE",
+        message=row.phase,
+    )
+
+
+@app.get("/api/v1/updates", response_model=list[UpdateJobResponse])
+def list_updates(
+    db: DbSession,
+    context: Current,
+    limit: int = Query(default=20, ge=1, le=100),
+) -> list[UpdateJobResponse]:
+    statement = select(UpdateJob).order_by(UpdateJob.created_at.desc()).limit(limit)
+    if context.user.role != "ADMIN":
+        statement = statement.where(UpdateJob.user_id == context.user.user_id)
+    return [UpdateJobResponse.model_validate(row) for row in db.scalars(statement).all()]
+
+
+@app.get("/api/v1/updates/{update_id}", response_model=UpdateJobResponse)
+def get_update(update_id: str, db: DbSession, context: Current) -> UpdateJobResponse:
+    row = db.get(UpdateJob, update_id)
+    if row is None or (context.user.role != "ADMIN" and row.user_id != context.user.user_id):
+        raise HTTPException(status_code=404, detail="update job not found")
+    return UpdateJobResponse.model_validate(row)
+
+
+@app.post("/api/v1/updates/apply", response_model=UpdateJobResponse, status_code=status.HTTP_202_ACCEPTED)
+def apply_update(
+    payload: UpdateApplyRequest,
+    background_tasks: BackgroundTasks,
+    db: DbSession,
+    context: Writer,
+) -> UpdateJobResponse:
+    _admin(context)
+    row = db.get(UpdateJob, payload.update_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="update job not found")
+    if row.status != "AVAILABLE":
+        raise HTTPException(status_code=409, detail=f"update cannot start from status {row.status}")
+    row.status = "QUEUED"
+    row.phase = "等待更新 Worker"
+    row.progress = 1
+    row.updated_at = datetime.now(UTC)
+    db.commit()
+    db.refresh(row)
+    background_tasks.add_task(_execute_update_job, row.update_id)
+    return UpdateJobResponse.model_validate(row)
+
+
+@app.post("/api/v1/updates/{update_id}/sync", response_model=UpdateJobResponse)
+def sync_update_fallback(update_id: str, db: DbSession, context: Writer) -> UpdateJobResponse:
+    row = db.get(UpdateJob, update_id)
+    if row is None or (context.user.role != "ADMIN" and row.user_id != context.user.user_id):
+        raise HTTPException(status_code=404, detail="update job not found")
+    try:
+        row = UpdateCoordinator().sync_fallback(db, update_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="update job not found") from exc
+    return UpdateJobResponse.model_validate(row)
 
 
 def _mount_native_web() -> None:

@@ -7,7 +7,7 @@ from sqlalchemy import create_engine, inspect
 
 from ashare_ai.core.config import get_settings, runtime_resource_path
 from ashare_ai.doctor import format_doctor, run_doctor
-from ashare_ai.storage.models import Base
+from ashare_ai.storage.models import Base, UpdateJob
 
 
 def migrate_database() -> str:
@@ -26,6 +26,11 @@ def migrate_database() -> str:
             command.stamp(config, "head")
             return "bootstrapped"
         command.upgrade(config, "head")
+        # 0038 predates the durable update coordinator in installations that
+        # already ran that migration. Keep those databases forward compatible
+        # without rewriting the immutable Alembic revision history.
+        if "update_jobs" not in inspect(engine).get_table_names():
+            UpdateJob.__table__.create(engine, checkfirst=True)
         return "upgraded"
     finally:
         engine.dispose()

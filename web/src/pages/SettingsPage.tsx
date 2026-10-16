@@ -3,10 +3,10 @@ import { ArrowDown, ArrowUp, Ban, CheckCircle2, Copy, Download, KeyRound, Plus, 
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { api, downloadPersonalArchive } from '../api'
 import { useAuth } from '../context/AuthContext'
-import type { FactorEvolutionSchedule, FactorGenomeVersion, ModelSettings, PersonalArchiveJob, SystemSettings, User } from '../types'
+import type { FactorEvolutionSchedule, FactorGenomeVersion, ModelSettings, PersonalArchiveJob, SystemSettings, UpdateJob, User } from '../types'
 import { Empty, ErrorNotice, Loading, Panel, StatusPill, formatTime } from '../components/Ui'
 
-type SettingsTab = 'system' | 'model' | 'evolution' | 'account' | 'data'
+type SettingsTab = 'updates' | 'system' | 'model' | 'evolution' | 'account' | 'data'
 
 const activeJob = (job: PersonalArchiveJob | null) => Boolean(job && ['PENDING', 'PROCESSING'].includes(job.status))
 
@@ -43,6 +43,8 @@ export function SettingsPage() {
   const [exportJob, setExportJob] = useState<PersonalArchiveJob | null>(null)
   const [importJob, setImportJob] = useState<PersonalArchiveJob | null>(null)
   const [applyJob, setApplyJob] = useState<PersonalArchiveJob | null>(null)
+  const [updateJob, setUpdateJob] = useState<UpdateJob | null>(null)
+  const [updates, setUpdates] = useState<UpdateJob[]>([])
   const [mergeOptions, setMergeOptions] = useState<Record<string, unknown>>({})
   const [newUser, setNewUser] = useState({ username: '', password: '', role: 'USER' })
   const [draft, setDraft] = useState({ research_model: 'gpt-5.6-sol', research_reasoning_effort: 'high', base_url: '', api_key: '', timeout_seconds: 90, enabled: true, model_profiles: [] as ModelSettings['model_profiles'], providers: [] as Array<Record<string, unknown>>, primary_provider_id: null as string | null, fallback_provider_ids: [] as string[], routing: {} as Record<string, string> })
@@ -81,9 +83,15 @@ export function SettingsPage() {
     setDraft((current) => ({ ...current, research_model: modelSettings.research_model, research_reasoning_effort: modelSettings.research_reasoning_effort, base_url: modelSettings.base_url, timeout_seconds: modelSettings.timeout_seconds, enabled: modelSettings.enabled, model_profiles: modelSettings.model_profiles, providers: modelSettings.providers || [], primary_provider_id: modelSettings.primary_provider_id || null, fallback_provider_ids: modelSettings.fallback_provider_ids || [], routing: modelSettings.routing || {} }))
   }
 
+  const loadUpdates = async () => {
+    const rows = await api.updates(20)
+    setUpdates(rows)
+    setUpdateJob((current) => current ? (rows.find((row) => row.update_id === current.update_id) || current) : rows[0] || null)
+  }
+
   const load = async () => {
     setLoading(true); setError('')
-    try { await loadAdmin() } catch (reason) { setError(reason instanceof Error ? reason.message : '设置加载失败') } finally { setLoading(false) }
+    try { await Promise.all([loadAdmin(), loadUpdates()]) } catch (reason) { setError(reason instanceof Error ? reason.message : '设置加载失败') } finally { setLoading(false) }
   }
   useEffect(() => { void load() }, [admin])
 
@@ -103,6 +111,12 @@ export function SettingsPage() {
     const timer = window.setInterval(loadStatus, 1_500)
     return () => window.clearInterval(timer)
   }, [applyJob?.archive_id, applyJob?.status, importJob?.archive_id, importJob?.status])
+
+  useEffect(() => {
+    if (!updateJob || !['QUEUED', 'CHECKING', 'PROCESSING'].includes(updateJob.status)) return
+    const timer = window.setInterval(() => void api.update(updateJob.update_id).then(setUpdateJob).catch(() => undefined), 1_500)
+    return () => window.clearInterval(timer)
+  }, [updateJob?.update_id, updateJob?.status])
 
   async function saveModel(event: FormEvent) {
     event.preventDefault(); setBusy(true); setMessage(null)
@@ -200,16 +214,37 @@ export function SettingsPage() {
     try { setSchedule(await api.setFactorEvolutionEnabled(enabled)); setMessage(enabled ? '周度进化任务已启用' : '周度进化任务已停用') } catch (reason) { setError(reason instanceof Error ? reason.message : '进化任务开关失败') } finally { setBusy(false) }
   }
 
+  async function checkForUpdates() {
+    setBusy(true); setError(''); setMessage(null)
+    try {
+      const result = await api.checkUpdates(true)
+      setUpdateJob(result.job); setUpdates((current) => [result.job, ...current.filter((item) => item.update_id !== result.job.update_id)])
+      setMessage(result.message)
+    } catch (reason) { setError(reason instanceof Error ? reason.message : '更新检查失败') } finally { setBusy(false) }
+  }
+
+  async function applyAvailableUpdate() {
+    if (!updateJob || updateJob.status !== 'AVAILABLE') return
+    setBusy(true); setError('')
+    try { setUpdateJob(await api.applyUpdate(updateJob.update_id)); setMessage('更新任务已启动，备用监控与通知会先接管') } catch (reason) { setError(reason instanceof Error ? reason.message : '更新启动失败') } finally { setBusy(false) }
+  }
+
+  async function syncFallback() {
+    if (!updateJob) return
+    try { setUpdateJob(await api.syncUpdateFallback(updateJob.update_id)); setMessage('备用监控与通知已同步') } catch (reason) { setError(reason instanceof Error ? reason.message : '备用模块同步失败') }
+  }
+
   const preview = useMemo(() => archivePreview(importJob), [importJob])
   const conflicts = preview.positions?.conflicts || []
-  const tabs: Array<[SettingsTab, string, typeof Wrench]> = [['system', '系统与运行时', Wrench], ['model', '模型与密钥', KeyRound], ['evolution', '因子进化', SlidersHorizontal], ['account', '用户与权限', UserCog], ['data', '个人数据', ShieldCheck]]
+  const tabs: Array<[SettingsTab, string, typeof Wrench]> = [['updates', '在线更新', RefreshCw], ['system', '系统与运行时', Wrench], ['model', '模型与密钥', KeyRound], ['evolution', '因子进化', SlidersHorizontal], ['account', '用户与权限', UserCog], ['data', '个人数据', ShieldCheck]]
 
   return <div className="page-stack settings-page">
     <section className="settings-head"><div><div className="eyebrow">CONTROL PLANE</div><h2>设置</h2><p>运行时、模型、因子进化和个人数据统一从这里管理。</p></div><button className="secondary icon-button" title="重新加载" onClick={() => void load()}><RefreshCw size={16} /></button></section>
     <ErrorNotice message={error} />
     <div className="settings-layout">
-      <nav className="settings-tabs" aria-label="设置分组">{tabs.filter(([key]) => admin || key === 'data').map(([key, label, Icon]) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}><Icon size={16} />{label}</button>)}</nav>
+      <nav className="settings-tabs" aria-label="设置分组">{tabs.filter(([key]) => admin || key === 'data' || key === 'updates').map(([key, label, Icon]) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}><Icon size={16} />{label}</button>)}</nav>
       {loading ? <Loading label="加载设置" /> : <motion.div key={tab} initial={reduceMotion ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="settings-content">
+        {tab === 'updates' && <Panel title="在线更新" eyebrow="DATA PRESERVING UPDATE"><div className="setting-state"><span><strong>当前版本</strong><small>{updateJob?.current_version || '尚未检查'} · 每次任务都会生成唯一调度标签</small></span><StatusPill status={updateJob?.status || 'PENDING'} /></div>{updateJob && <><div className="update-progress"><div className="update-progress-head"><strong>{updateJob.phase}</strong><span>{updateJob.progress}%</span></div><progress max={100} value={updateJob.progress} /><small>标签 {updateJob.update_tag} · 架构 {updateJob.architecture_label}</small></div><div className="form-grid"><div><small>目标版本</small><strong>{updateJob.target_version || '—'}</strong></div><div><small>备用模块</small><strong>{updateJob.fallback_active ? '监控与通知运行中' : '未接管'}</strong></div><div><small>数据备份</small><strong>{updateJob.backup_path ? '已创建并校验' : '等待创建'}</strong></div><div><small>自动修复</small><strong>{updateJob.repair_attempts} 次</strong></div></div>{updateJob.error_message && <p className="form-hint">{updateJob.error_message}</p>}</>}<div className="row-actions"><button className="secondary icon-text" disabled={busy} onClick={() => void checkForUpdates()}><RefreshCw size={15} />检查更新</button>{admin && <button className="primary" disabled={busy || updateJob?.status !== 'AVAILABLE'} onClick={() => void applyAvailableUpdate()}>开始安装</button>}{updateJob?.fallback_active && <button className="secondary" onClick={() => void syncFallback()}>同步备用模块</button>}</div>{updates.length > 0 && <div className="run-list">{updates.slice(0, 8).map((item) => <div className="run-row" key={item.update_id}><div><strong>{item.target_version || item.current_version}</strong><small>{item.update_tag} · {item.phase}</small></div><StatusPill status={item.status} /><span>{item.progress}%</span></div>)}</div>}</Panel>}
         {tab === 'system' && system && <Panel title="单一 job-worker" eyebrow="RUNTIME"><form className="settings-form" onSubmit={saveSystem}><div className="setting-state"><span><strong>执行拓扑</strong><small>研究、回测、交易方案、个人档案、退出诊断共用一个隔离队列 Worker。</small></span><StatusPill status={system.actual_loaded_mode || 'UNKNOWN'} /></div><label>LLM Agent 并发<input value={String(system.values.llm_agent_max_concurrency ?? 4)} readOnly /></label><label>低内存模式<input value={String(system.values.api_runtime_mode ?? 'LIGHTWEIGHT')} readOnly /></label><label>因子进化周度任务<input type="checkbox" checked={Boolean(system.values.strategy_evolution_enabled ?? true)} onChange={(e) => toggleEvolution(e.target.checked)} /></label><label>进化周度<input value={String(system.values.strategy_evolution_weekday ?? 5)} readOnly /></label><label>进化小时<input value={String(system.values.strategy_evolution_hour ?? 20)} readOnly /></label><label>进化最小样本<input value={String(system.values.strategy_evolution_min_samples ?? 60)} readOnly /></label><label>进化最大回撤<input value={String(system.values.strategy_evolution_max_drawdown ?? 0.2)} readOnly /></label><label>进化最大换手<input value={String(system.values.strategy_evolution_max_turnover ?? 20)} readOnly /></label><label>进化最小改善<input value={String(system.values.strategy_evolution_min_improvement ?? 0)} readOnly /></label><label>进化候选数量<input value={String(system.values.strategy_evolution_max_candidates ?? 8)} readOnly /></label><label>因子置信度阈值<input type="number" min="0" max="1" step="0.01" value={Number(system.values.factor_confidence_threshold ?? 0.6)} onChange={(event) => setSystem({ ...system, values: { ...system.values, factor_confidence_threshold: Number(event.target.value) } })} /></label><label className="checkbox-row"><input type="checkbox" checked={Boolean(system.values.decision_system2_enabled ?? true)} onChange={(event) => setSystem({ ...system, values: { ...system.values, decision_system2_enabled: event.target.checked } })} />启用低置信度 System-2 诊断</label><label>管理员密码<input type="password" value={unlockPassword} onChange={(event) => setUnlockPassword(event.target.value)} autoComplete="current-password" /></label><button className="primary" disabled={busy}>保存运行配置</button></form></Panel>}
         {tab === 'model' && <Panel title="AI 供应商" eyebrow="ENCRYPTED PROVIDERS"><form className="settings-form" onSubmit={saveModel}><label>兼容默认 Base URL<input type="url" value={draft.base_url} onChange={(event) => setDraft({ ...draft, base_url: event.target.value })} required /></label><label>默认 API Key<input type="password" value={draft.api_key} placeholder={model?.api_key_configured ? '已配置，留空保持不变' : '输入 API Key'} onChange={(event) => setDraft({ ...draft, api_key: event.target.value })} /></label><div className="form-grid"><label>默认模型<input value={draft.research_model} onChange={(event) => setDraft({ ...draft, research_model: event.target.value })} required /></label><label>推理强度<select value={draft.research_reasoning_effort} onChange={(event) => setDraft({ ...draft, research_reasoning_effort: event.target.value })}><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></label></div><label>超时秒数<input type="number" min="1" max="600" value={draft.timeout_seconds} onChange={(event) => setDraft({ ...draft, timeout_seconds: Number(event.target.value) })} /></label><div className="provider-editor"><div className="provider-editor-head"><strong>供应商与路由</strong><button type="button" className="secondary icon-text" onClick={addProvider}><Plus size={15} />新增</button></div>{draft.providers.length === 0 && <p className="form-hint">未添加供应商时使用兼容默认端点。</p>}{draft.providers.map((provider, index) => <div className="provider-row" key={`${String(provider.provider_id || 'provider')}-${index}`}><div className="form-grid"><label>ID<input value={String(provider.provider_id || '')} onChange={(event) => updateProvider(index, { provider_id: event.target.value })} /></label><label>名称<input value={String(provider.name || '')} onChange={(event) => updateProvider(index, { name: event.target.value })} /></label><label>Base URL<input type="url" value={String(provider.base_url || '')} onChange={(event) => updateProvider(index, { base_url: event.target.value })} required /></label><label>模型<input value={String(provider.model || '')} onChange={(event) => updateProvider(index, { model: event.target.value })} required /></label><label>API Key<input type="password" placeholder={provider.api_key_configured ? '已配置，留空保持不变' : '输入 API Key'} onChange={(event) => updateProvider(index, { api_key: event.target.value })} /></label><label>优先级<input type="number" min="0" value={Number(provider.priority || 0)} onChange={(event) => updateProvider(index, { priority: Number(event.target.value) })} /></label></div><div className="row-actions"><label className="checkbox-row"><input type="checkbox" checked={provider.enabled !== false} onChange={(event) => updateProvider(index, { enabled: event.target.checked })} />启用</label><button type="button" className="icon-button" title="上移" onClick={() => moveProvider(index, -1)}><ArrowUp size={15} /></button><button type="button" className="icon-button" title="下移" onClick={() => moveProvider(index, 1)}><ArrowDown size={15} /></button><button type="button" className="icon-button" title="复制" onClick={() => duplicateProvider(index)}><Copy size={15} /></button><button type="button" className="icon-button" title="测试此供应商" disabled={busy} onClick={() => void probeProvider(index)}><RefreshCw size={15} /></button><button type="button" className="icon-button danger" title="删除" onClick={() => removeProvider(index)}><Trash2 size={15} /></button></div></div>)}</div><div className="form-grid provider-routing"><label>主供应商<select value={draft.primary_provider_id || ''} onChange={(event) => setDraft({ ...draft, primary_provider_id: event.target.value || null })}><option value="">按优先级自动选择</option>{draft.providers.map((provider) => <option key={String(provider.provider_id)} value={String(provider.provider_id)}>{String(provider.name || provider.provider_id)}</option>)}</select></label><label>备用供应商（可多选）<select multiple value={draft.fallback_provider_ids} onChange={(event) => setDraft({ ...draft, fallback_provider_ids: Array.from(event.target.selectedOptions, (option) => option.value) })}>{draft.providers.map((provider) => <option key={String(provider.provider_id)} value={String(provider.provider_id)}>{String(provider.name || provider.provider_id)}</option>)}</select></label></div><div className="form-grid provider-routing">{['research', 'form_assist', 'chat', 'strategy', 'monitoring'].map((purpose) => <label key={purpose}>{purpose} 模型<input value={draft.routing[purpose] || ''} placeholder="沿用默认模型" onChange={(event) => setDraft({ ...draft, routing: { ...draft.routing, [purpose]: event.target.value } })} /></label>)}</div><button className="primary" disabled={busy}>保存并探测</button></form><div className="model-status"><StatusPill status={model?.reachable ? 'ACTIVE' : model?.configured ? 'WARNING' : 'PENDING'} /><span>{model?.status_message || '尚未配置'}</span><small>{(model?.providers || []).length ? `已配置 ${(model?.providers || []).length} 个供应商` : '兼容默认供应商'}</small></div>{probeLogs.length > 0 && <div className="probe-log-list"><strong>最近探测</strong>{probeLogs.slice(0, 8).map((log) => <div className="probe-log-row" key={log.log_id}><span>{log.purpose}</span><StatusPill status={log.outcome === 'SUCCEEDED' ? 'ACTIVE' : 'WARNING'} /><small>{log.model} · {log.message} · {formatTime(log.created_at)}</small></div>)}</div>}</Panel>}
         {tab === 'evolution' && activeGenome && <><Panel title="当前因子版本" eyebrow="ACTIVE"><div className="factor-status"><div><strong>版本</strong><span>{activeGenome.formula_version}</span></div><div><strong>参数哈希</strong><span>{activeGenome.parameter_sha256}</span></div><div><strong>状态</strong><StatusPill status={activeGenome.status} /></div><div><strong>批准时间</strong><span>{activeGenome.reviewed_at || '—'}</span></div></div><button className="primary icon-text" onClick={() => rollbackGenome()}><RotateCcw size={15} />回滚到上一个版本</button></Panel><Panel title="候选版本" eyebrow="CANDIDATES"><div className="run-list">{candidates.map((item) => <div key={item.candidate_id} className="run-row"><div><strong>{item.candidate_id}</strong><small>{item.formula_version}</small></div><StatusPill status={item.status} /><button className="secondary icon-text" onClick={() => reviewCandidate(item.candidate_id, 'approve')}><CheckCircle2 size={15} /></button><button className="secondary icon-text" onClick={() => reviewCandidate(item.candidate_id, 'reject')}><X size={15} /></button></div>)}</div></Panel><Panel title="进化日历" eyebrow="SCHEDULE"><label>启用周度进化任务<input type="checkbox" checked={Boolean(schedule?.enabled)} onChange={(e) => toggleEvolution(e.target.checked)} /></label><label>周几<input value={String(schedule?.weekday ?? 5)} readOnly /></label><label>小时<input value={String(schedule?.hour ?? 20)} readOnly /></label><label>最小样本<input value={String(schedule?.minimum_samples ?? 60)} readOnly /></label><label>最大回撤<input value={String(schedule?.maximum_drawdown ?? 0.2)} readOnly /></label><label>最大换手<input value={String(schedule?.maximum_turnover ?? 20)} readOnly /></label><label>最小改善<input value={String(schedule?.minimum_improvement ?? 0)} readOnly /></label><label>最大候选数量<input value={String(schedule?.maximum_candidates ?? 8)} readOnly /></label></Panel></>}

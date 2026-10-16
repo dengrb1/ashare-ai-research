@@ -479,6 +479,43 @@ class JobRun(Base):
     )
 
 
+class UpdateJob(Base):
+    """Durable, resumable application update state.
+
+    Update jobs intentionally live beside research jobs so an API restart can
+    resume polling without losing the backup/fallback handover state. No
+    credentials or package contents are stored in this row.
+    """
+
+    __tablename__ = "update_jobs"
+    __table_args__ = (
+        Index("ix_update_jobs_status_created", "status", "created_at"),
+        Index("ix_update_jobs_tag", "update_tag"),
+    )
+
+    update_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("user_accounts.user_id"), index=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="CHECKING")
+    phase: Mapped[str] = mapped_column(String(64), nullable=False, default="检查更新")
+    progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    current_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_version: Mapped[str | None] = mapped_column(String(64))
+    update_tag: Mapped[str] = mapped_column(String(96), nullable=False, unique=True)
+    architecture_label: Mapped[str] = mapped_column(String(64), nullable=False)
+    manifest_url: Mapped[str | None] = mapped_column(Text)
+    release_notes: Mapped[str | None] = mapped_column(Text)
+    backup_path: Mapped[str | None] = mapped_column(Text)
+    backup_sha256: Mapped[str | None] = mapped_column(String(64))
+    fallback_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    sync_state: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    repair_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class AgentCall(Base):
     __tablename__ = "agent_calls"
     __table_args__ = (Index("ix_agent_run_component", "run_id", "component"),)

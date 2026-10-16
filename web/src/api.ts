@@ -227,6 +227,11 @@ export const api = {
   saveSystemSettings: (payload: SystemSettingsDraft, unlockToken: string, idempotencyKey: string = crypto.randomUUID()) => request<SystemSettings>('/admin/system-settings', { method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey, 'X-System-Settings-Unlock': unlockToken }, body: JSON.stringify(payload) }),
   restoreSystemSetting: (field: string, unlockToken: string) => request<SystemSettings>(`/admin/system-settings/${encodeURIComponent(field)}`, { method: 'DELETE', headers: { 'X-System-Settings-Unlock': unlockToken } }),
   restoreAllSystemSettings: (unlockToken: string) => request<SystemSettings>('/admin/system-settings', { method: 'DELETE', headers: { 'X-System-Settings-Unlock': unlockToken } }),
+  checkUpdates: (force = false) => request<{ job: import('./types').UpdateJob; available: boolean; message: string }>('/updates/check', { method: 'POST', body: JSON.stringify({ force }) }),
+  updates: (limit = 20) => request<import('./types').UpdateJob[]>(`/updates?limit=${limit}`),
+  update: (updateId: string) => request<import('./types').UpdateJob>(`/updates/${encodeURIComponent(updateId)}`),
+  applyUpdate: (updateId: string) => request<import('./types').UpdateJob>('/updates/apply', { method: 'POST', body: JSON.stringify({ update_id: updateId }) }),
+  syncUpdateFallback: (updateId: string) => request<import('./types').UpdateJob>(`/updates/${encodeURIComponent(updateId)}/sync`, { method: 'POST' }),
 }
 
 export function openLiveMonitorStream(

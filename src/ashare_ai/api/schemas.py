@@ -47,6 +47,43 @@ class HealthResponse(BaseModel):
     resources: dict[str, Any] | None = None
 
 
+class UpdateCheckRequest(BaseModel):
+    force: bool = False
+
+
+class UpdateApplyRequest(BaseModel):
+    update_id: str = Field(min_length=1, max_length=36)
+
+
+class UpdateJobResponse(_SanitizedErrorResponse):
+    update_id: str
+    user_id: str | None = None
+    status: str
+    phase: str
+    progress: int = Field(ge=0, le=100)
+    current_version: str
+    target_version: str | None = None
+    update_tag: str
+    architecture_label: str
+    manifest_url: str | None = None
+    release_notes: str | None = None
+    backup_path: str | None = None
+    backup_sha256: str | None = None
+    fallback_active: bool
+    sync_state: dict[str, Any] = Field(default_factory=dict)
+    repair_attempts: int = Field(ge=0)
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    updated_at: datetime
+
+
+class UpdateCheckResponse(BaseModel):
+    job: UpdateJobResponse
+    available: bool
+    message: str
+
+
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=256)

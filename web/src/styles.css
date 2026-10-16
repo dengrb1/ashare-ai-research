@@ -342,6 +342,10 @@ a { color: inherit; text-decoration: none; }
 .archive-job { display: grid; gap: 8px; margin: 16px 18px 18px; padding: 12px; border: 1px solid var(--line); background: var(--panel-raised); color: var(--muted); font-size: 11px; }
 .archive-job strong { color: var(--ivory); }
 .archive-job progress, .training-progress progress { width: 100%; accent-color: var(--emerald); }
+.update-progress { display: grid; gap: 8px; margin: 16px 0; padding: 14px; border: 1px solid var(--line); background: var(--panel-raised); color: var(--muted); }
+.update-progress progress { width: 100%; height: 8px; accent-color: var(--emerald); }
+.update-progress-head { display: flex; justify-content: space-between; color: var(--ivory); }
+.update-progress small { overflow-wrap: anywhere; }
 .archive-preview-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; margin: 14px; background: var(--line); }
 .archive-preview-grid section { padding: 12px; background: var(--panel-raised); }
 .archive-preview-grid strong { font-size: 11px; }

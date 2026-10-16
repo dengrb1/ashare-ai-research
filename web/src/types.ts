@@ -353,6 +353,30 @@ export interface PersonalArchiveJob {
   deleted_at?: string | null
 }
 
+export interface UpdateJob {
+  update_id: string
+  user_id?: string | null
+  status: string
+  phase: string
+  progress: number
+  current_version: string
+  target_version?: string | null
+  update_tag: string
+  architecture_label: string
+  manifest_url?: string | null
+  release_notes?: string | null
+  backup_path?: string | null
+  backup_sha256?: string | null
+  fallback_active: boolean
+  sync_state: Record<string, unknown>
+  repair_attempts: number
+  error_message?: string | null
+  created_at: string
+  started_at?: string | null
+  completed_at?: string | null
+  updated_at: string
+}
+
 export interface MarketDataStatus {
   source: string
   collected_at: string

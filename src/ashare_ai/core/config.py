@@ -151,6 +151,14 @@ class Settings(BaseSettings):
     mipush_api_url: str = "https://api.xmpush.xiaomi.com/v3/message/regid"
     model_allowed_hosts: str | None = None
     enable_prefect_flows: bool = False
+    # Online application update control. Updates are staged and data-preserving;
+    # the installer is driven by the update coordinator rather than the API.
+    update_check_enabled: bool = True
+    update_manifest_url: str | None = None
+    update_check_interval_minutes: int = Field(default=60, ge=5, le=24 * 60)
+    update_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    update_backup_root: Path = Path("data/update-backups")
+    update_auto_apply: bool = False
 
     @field_validator("research_only_mode", mode="before")
     @classmethod
@@ -265,6 +273,8 @@ class Settings(BaseSettings):
             problems.append("MIPUSH_API_URL must use HTTPS")
         if self.allow_demo_data or self.canonical_bundle_mode == "demo":
             problems.append("demo market data is forbidden in production")
+        if self.update_manifest_url and not self.update_manifest_url.startswith("https://"):
+            problems.append("UPDATE_MANIFEST_URL must use HTTPS")
         if problems:
             raise ValueError("unsafe production configuration: " + "; ".join(problems))
 
