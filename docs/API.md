@@ -122,6 +122,7 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 买入监控 | GET/PUT | `/api/v1/buy-entry-monitors` | 登录/写入、幂等 |
 | 通知 | GET | `/api/v1/notifications` | 登录、cursor 分页 |
 | 通知 | GET | `/api/v1/notifications/summary` | 登录 |
+| 通知 | GET | `/api/v1/notifications/stream` | 登录、SSE、用户隔离 |
 | 通知 | GET | `/api/v1/notifications/{notification_id}` | 登录、资源归属 |
 | 通知 | POST | `/api/v1/notifications/read` | 写入、幂等 |
 | 通知 | POST | `/api/v1/notifications/read-all` | 写入、幂等 |
@@ -198,7 +199,7 @@ curl -sS -b cookies.txt -c cookies.txt "$BASE_URL/api/v1/assets" \
 | 财报检索 | GET | `/api/v1/search/financial` | 登录 |
 | 财报检索 | GET | `/api/v1/search/status` | 登录 |
 
-`GET /api/v1/health` 返回 `{status, version, database, git_sha}`：`version` 为系统版本号（如 `2.2.0`），`git_sha` 为构建源码提交（未提供时 `UNVERSIONED`）。该接口公开，不要求登录，不返回任何凭据或运行配置。
+`GET /api/v1/health` 返回 `{status, version, database, git_sha, redis, workers, resources}`：新增字段只包含安全的依赖状态、Worker 心跳摘要和 CPU/内存/磁盘资源级别。该接口公开，不要求登录，不返回任何凭据、URL 或运行路径。
 
 ## 4. 认证接口
 
@@ -308,8 +309,8 @@ Web 登录。请求体为 `LoginRequest`：
     "max_research_symbols":100,
     "max_trade_plan_symbols":15,
     "portfolio_target_count":15,
-     "features": {"watchlist_research_selection":true,"formal_watchlist_reports":true,"report_symbol_eligibility":true,"trade_plan_generation":true,"research_cancellation":true,"idempotency_key":true,"paper_portfolio_only":true,"profit_exit_monitor":true,"stop_loss_monitor":true,"buy_entry_monitor":true,"market_refresh_interval_setting":true,"notifications":true,"chat_context_metrics":true,"ai_cost_summary":true,"persistent_ai_chat":true,"chat_images_seven_day_retention":true,"personal_archive_export_import":true},
-    "endpoints": {"assets":"/api/v1/assets","exit_monitor_settings":"/api/v1/assets/exit-monitor","market_refresh_settings":"/api/v1/assets/market-refresh","research_runs":"/api/v1/research/runs","research_run":"/api/v1/research/runs/{run_id}","research_settings":"/api/v1/research/settings","exit_advice":"/api/v1/exit-advice","manual_exit_advice":"/api/v1/exit-advice/manual","buy_entry_monitors":"/api/v1/buy-entry-monitors","notifications":"/api/v1/notifications","notification_summary":"/api/v1/notifications/summary","security_resolve":"/api/v1/securities/resolve","chat_metrics":"/api/v1/ai/chat/metrics","ai_costs":"/api/v1/ai/costs","ai_chat_threads":"/api/v1/ai/chat/threads","ai_chat_thread_index":"/api/v1/ai/chat/thread-index","personal_data_exports":"/api/v1/me/data-exports","personal_data_imports":"/api/v1/me/data-imports"}
+     "features": {"watchlist_research_selection":true,"formal_watchlist_reports":true,"report_symbol_eligibility":true,"trade_plan_generation":true,"research_cancellation":true,"idempotency_key":true,"paper_portfolio_only":true,"profit_exit_monitor":true,"stop_loss_monitor":true,"buy_entry_monitor":true,"live_position_monitor":true,"mobile_monitor_stream":true,"notification_stream":true,"market_refresh_interval_setting":true,"notifications":true,"chat_context_metrics":true,"ai_cost_summary":true,"persistent_ai_chat":true,"chat_images_seven_day_retention":true,"personal_archive_export_import":true},
+    "endpoints": {"assets":"/api/v1/assets","exit_monitor_settings":"/api/v1/assets/exit-monitor","market_refresh_settings":"/api/v1/assets/market-refresh","live_monitor":"/api/v1/monitor/live","live_monitor_stream":"/api/v1/monitor/stream","mobile_live_monitor":"/api/v1/mobile/monitor/live","mobile_live_monitor_stream":"/api/v1/mobile/monitor/stream","research_runs":"/api/v1/research/runs","research_run":"/api/v1/research/runs/{run_id}","research_settings":"/api/v1/research/settings","exit_advice":"/api/v1/exit-advice","manual_exit_advice":"/api/v1/exit-advice/manual","buy_entry_monitors":"/api/v1/buy-entry-monitors","notifications":"/api/v1/notifications","notification_summary":"/api/v1/notifications/summary","notification_stream":"/api/v1/notifications/stream","mobile_notification_stream":"/api/v1/mobile/notifications/stream","security_resolve":"/api/v1/securities/resolve","chat_metrics":"/api/v1/ai/chat/metrics","ai_costs":"/api/v1/ai/costs","ai_chat_threads":"/api/v1/ai/chat/threads","ai_chat_thread_index":"/api/v1/ai/chat/thread-index","personal_data_exports":"/api/v1/me/data-exports","personal_data_imports":"/api/v1/me/data-imports"}
   }
 }
 ```
@@ -326,7 +327,7 @@ Web 登录。请求体为 `LoginRequest`：
 
 `GET /api/v1/buy-entry-monitors` 按 `updated_at desc, monitor_id desc` 返回当前用户的监控资源；`PUT /api/v1/buy-entry-monitors` 请求 `{"symbol":"600519.SH","enabled":true}` 且要求 `Idempotency-Key`。启用时标的必须在用户自选中。系统仅把已完成正式研究、评分合格且 Trade Plan 结果为 `BUY` 的次交易日入场区间转为监控；首次进入区间时通知用户并关联模拟方案，不会买入。资产页会显示有效日、入场区间和触发/到期状态。
 
-通知接口全部按用户隔离。`GET /notifications` 使用稳定的 URL-safe `cursor`，`limit` 范围 1-200，支持 `unread_only=true`；响应为 `{items,next_cursor}`。`GET /notifications/summary` 只返回未读计数、高风险未读计数和最多 5 条未读摘要，适合可见页面轮询。已读/未读接口（`POST /notifications/read`、`POST /notifications/read-all`）均要求 `Idempotency-Key`。`DELETE /notifications/{notification_id}` 删除当前用户的一条通知并返回 `204`（不存在返回 `404`，天然幂等）；`POST /notifications/clear` 要求 `Idempotency-Key`，永久清空当前用户全部通知并返回最新 `NotificationSummaryResponse`，以便前端刷新角标。已读通知保留 90 天，未读保留 180 天，由后台分批清理。
+通知接口全部按用户隔离。`GET /notifications` 使用稳定的 URL-safe `cursor`，`limit` 范围 1-200，支持 `unread_only=true`；响应为 `{items,next_cursor}`。`GET /notifications/summary` 只返回未读计数、高风险未读计数和最多 5 条未读摘要，适合可见页面轮询。`GET /notifications/stream`（移动端别名 `/mobile/notifications/stream`）以 1--30 秒有界心跳推送 `NOTIFICATION` 和 `STATUS`，支持 `Last-Event-ID` 断线续传和有限连接数；客户端断线时回退到列表/摘要接口。已读/未读接口（`POST /notifications/read`、`POST /notifications/read-all`）均要求 `Idempotency-Key`。`DELETE /notifications/{notification_id}` 删除当前用户的一条通知并返回 `204`（不存在返回 `404`，天然幂等）；`POST /notifications/clear` 要求 `Idempotency-Key`，永久清空当前用户全部通知并返回最新 `NotificationSummaryResponse`，以便前端刷新角标。已读通知保留 90 天，未读保留 180 天，由后台分批清理。
 
 原生客户端使用 `POST /devices` 绑定小米推送 `regId`。请求包含稳定的 `installation_id`、`registration_id`、`provider=MIPUSH` 及可选设备版本信息；响应不回传 `registration_id`。服务端使用 `PERSONAL_DATA_ENCRYPTION_KEYS` 加密保存注册 ID，并由维护任务消费事务投递表。注销使用 `DELETE /devices/{device_id}`。客户端收到或打开通知后，可向 `/devices/{device_id}/deliveries` 提交 `{notification_id,status}`，其中 `status` 为 `DELIVERED` 或 `OPENED`。所有设备与回执操作均校验当前用户归属。
 
@@ -558,7 +559,7 @@ curl -sS -X POST "$BASE_URL/api/v1/admin/energy-saving/disable" \
 
 所有系统设置写操作必须先调用 `POST /api/v1/admin/system-settings/unlock`，请求体为 `{"password":"<CURRENT_ADMIN_PASSWORD>"}`。服务端只验证当前登录管理员自己的密码；成功返回只可用于当前 `user_id + session_id` 的 `unlock_token` 和 `expires_at`，有效期 10 分钟。客户端把令牌放入 `X-System-Settings-Unlock`，不得持久化或记录。缺失、过期、跨用户或跨会话令牌返回 `403` 与 `SYSTEM_SETTINGS_LOCKED`；解锁存储不可用返回 `503`。该安全强化要求旧管理客户端在 PUT/DELETE 前增加解锁步骤，Web Cookie 仍需 CSRF，App Bearer 会话不模拟 Cookie。
 
-系统统一使用单一 `job-worker` 领取研究、回测、Trade Plan、个人档案、退出建议、Jev 训练和 System-2 诊断队列。
+系统统一使用单一 `job-worker` 领取研究、回测、Trade Plan、个人档案、退出建议、因子进化和 System-2 诊断队列。
 执行模式固定为研究专用 `SERIAL`；低内存、隔离子进程、队列租约和回收策略由 Worker 自身维护。
 
 ## 7. 研究结果、报告和 Trade Plan
@@ -890,3 +891,19 @@ curl -sS "$BASE_URL/api/v1/search/financial?q=%E8%B4%B5%E5%B7%9E%E8%8C%85%E5%8F%
 - `PUT /api/v1/trade-advice-monitors`：创建或更新一只自选股的监控；需要 `Idempotency-Key`。请求为 `symbol`、`enabled`、可选 `manual_buy_price` 与 `manual_sell_price`。启用不属于自选股的代码返回 `422 SYMBOL_NOT_IN_WATCHLIST`。
 
 监控在交易日 09:30 后为每只自选股生成 AI 买入/卖出目标与止损价，命中目标时每 5 分钟重复提醒；客户端“卖出建议”页按自选股展示这些目标、提醒状态与自定义价格，股票名称由 `/market/quotes` 提供，行情不可用时仅显示代码。
+
+## 14. 实时持仓监控与手机端
+
+手机端登录后使用 `/api/v1/auth/token` 获取 Bearer access token，并在以下请求中发送
+`Authorization: Bearer <ACCESS_TOKEN>`。实时接口只返回当前用户的模拟持仓和行情，不会回写冻结研究评分。
+
+- `GET /api/v1/monitor/live`：返回一次实时持仓快照。`refresh=true` 强制刷新行情，
+  `include_watchlist=true` 额外返回自选股行情；最多处理 15 个标的。
+- `GET /api/v1/monitor/stream`：SSE 长连接，`interval` 支持 5--120 秒。事件类型为
+  `STATUS`、`QUOTE`、`RISK`、`SIGNAL` 和注释心跳；`RISK`/`SIGNAL` 只在状态变化时发送，
+  `QUOTE` 每个周期发送当前值。断线时客户端应回退到 `monitor/live`。
+- `/api/v1/mobile/monitor/live` 和 `/api/v1/mobile/monitor/stream` 是相同契约的移动端别名。
+
+每个持仓结果包含 `available_at`、`decision_at`、`quote_status`、`risk_state`、`risk_level`、
+`stop_loss_price`、`trailing_stop_price` 和 `strategy_version`。行情超过 30 秒或供应商标记延迟时
+进入 `DATA_STALE`，止损接近、止损触发、移动止损、回撤升级和止盈命中分别对应确定性状态。

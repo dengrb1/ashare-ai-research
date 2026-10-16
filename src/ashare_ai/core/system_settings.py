@@ -34,14 +34,16 @@ PUBLIC_SETTING_FIELDS = frozenset(
     {
         "auto_restart_enabled",
         "llm_agent_max_concurrency",
-        "jev_confidence_threshold",
+        "factor_confidence_threshold",
         "decision_system2_enabled",
-        "jev_model_version",
-        "jev_backend",
-        "jev_live_base_url",
-        "jev_live_model",
-        "jev_live_endpoint",
-        "jev_live_timeout_seconds",
+        "strategy_evolution_enabled",
+        "strategy_evolution_weekday",
+        "strategy_evolution_hour",
+        "strategy_evolution_min_samples",
+        "strategy_evolution_max_drawdown",
+        "strategy_evolution_max_turnover",
+        "strategy_evolution_min_improvement",
+        "strategy_evolution_max_candidates",
         "object_store_endpoint",
         "object_store_bucket",
         "object_store_secure",
@@ -75,7 +77,6 @@ PUBLIC_SETTING_FIELDS = frozenset(
 SECRET_SETTING_FIELDS = frozenset(
     {
         "tushare_token",
-        "jev_live_api_key",
         "object_store_access_key",
         "object_store_secret_key",
     }
@@ -134,7 +135,7 @@ class SystemConfigurationService:
             raise SystemSettingsError("active system configuration is missing")
         public_values = dict(row.public_values or {})
         self._ensure_allowed(public_values, PUBLIC_SETTING_FIELDS)
-        secret_values = self._decrypt_values(row) if row.encrypted_secret_values else {}
+        secret_values = self._active_secret_values(row)
         values = self._validated_settings({**public_values, **secret_values})
         return SystemRuntimeSettings(
             settings=values,
@@ -170,14 +171,12 @@ class SystemConfigurationService:
         encrypted_secrets = current_row.encrypted_secret_values if current_row else None
         encryption_key_id = current_row.encryption_key_id if current_row else None
         if secret_updates:
-            secret_values = self._decrypt_values(current_row) if current_row else {}
+            secret_values = self._active_secret_values(current_row)
             secret_values.update(secret_updates)
             encrypted_secrets, encryption_key_id = self._encrypt_values(secret_values)
         else:
             secret_values = (
-                self._decrypt_values(current_row)
-                if current_row and current_row.encrypted_secret_values
-                else {}
+                self._active_secret_values(current_row)
             )
 
         effective = self._validated_settings({**public_values, **secret_values})
@@ -213,11 +212,7 @@ class SystemConfigurationService:
         public_values = dict(current_row.public_values or {}) if current_row else {}
         encrypted_secrets = current_row.encrypted_secret_values if current_row else None
         encryption_key_id = current_row.encryption_key_id if current_row else None
-        secret_values = (
-            self._decrypt_values(current_row)
-            if current_row and current_row.encrypted_secret_values
-            else {}
-        )
+        secret_values = self._active_secret_values(current_row)
         public_values.pop(field, None)
         if field in secret_values:
             secret_values.pop(field)
@@ -429,8 +424,12 @@ class SystemConfigurationService:
             isinstance(key, str) and isinstance(value, str) for key, value in values.items()
         ):
             raise SystemSettingsError("encrypted system settings have an invalid shape")
-        self._ensure_allowed(values, SECRET_SETTING_FIELDS, public=False)
-        return values
+        # Older revisions may contain retired encrypted keys.  Keep them
+        # unreadable to the runtime and carry forward only active fields.
+        return {key: value for key, value in values.items() if key in SECRET_SETTING_FIELDS}
+
+    def _active_secret_values(self, row: SystemConfigurationVersion | None) -> dict[str, str]:
+        return self._decrypt_values(row) if row and row.encrypted_secret_values else {}
 
 
 def get_effective_settings() -> Settings:

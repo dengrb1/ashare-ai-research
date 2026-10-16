@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['F:/code/qmt/tools/console/console_app.py'],
+    ['F:/code/ashare-ai-src/tools/console/console_app.py'],
     pathex=[],
     binaries=[],
     datas=[],

@@ -49,6 +49,7 @@ PAGE_MAPPINGS: dict[str, dict[str, Any]] = {
     "strategy": {"title": "策略与数据", "modules": ("strategy", "market")},
     "admin": {"title": "管理面板", "modules": ("system", "prompt_cache")},
     "cockpit": {"title": "驾驶舱", "modules": ()},
+    "dev": {"title": "开发工作台", "modules": ()},
 }
 
 

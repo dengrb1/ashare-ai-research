@@ -7,8 +7,28 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from ashare_ai.storage.models import UserAssetState
+from ashare_ai.portfolio.asset_contracts import (
+    MonitoringPolicy, default_group, flat_watchlist, normalize_groups,
+    normalize_symbols, reconcile_legacy_watchlist,
+)
 
 DEFAULT_WATCHLIST = ["600519.SH", "000858.SZ", "300750.SZ", "601318.SH"]
+DEFAULT_WATCHLIST_GROUPS = [{
+    "group_id": "default",
+    "name": "默认分组",
+    "sort_order": 0,
+    "enabled": True,
+    "symbols": list(DEFAULT_WATCHLIST),
+    "monitoring_policy": {},
+}]
+DEFAULT_MONITORING_POLICY = {
+    "enabled": True,
+    "interval_seconds": 60,
+    "cooldown_seconds": 300,
+    "price_change_pct": 2.0,
+    "volume_multiplier": 3.0,
+    "high_severity_price_change_pct": 5.0,
+}
 DEFAULT_POSITIONS: list[dict[str, Any]] = [
     {
         "symbol": "600519.SH",
@@ -46,6 +66,8 @@ class UserAssetService:
         if row is None:
             return {
                 "watchlist": list(DEFAULT_WATCHLIST),
+                "watchlist_groups": [dict(DEFAULT_WATCHLIST_GROUPS[0])],
+                "monitoring_policy": dict(DEFAULT_MONITORING_POLICY),
                 "positions": [dict(position) for position in DEFAULT_POSITIONS],
                 "total_assets": None,
                 "exit_monitor_enabled": False,
@@ -57,6 +79,8 @@ class UserAssetService:
             }
         return {
             "watchlist": list(row.watchlist),
+            "watchlist_groups": normalize_groups(row.watchlist_groups or [default_group(row.watchlist)]),
+            "monitoring_policy": dict(row.monitoring_policy or DEFAULT_MONITORING_POLICY),
             "positions": [dict(position) for position in row.positions],
             "total_assets": float(row.total_assets) if row.total_assets is not None else None,
             "exit_monitor_enabled": row.exit_monitor_enabled,
@@ -82,6 +106,8 @@ class UserAssetService:
         stop_loss_monitor_enabled: bool | None = None,
         buy_monitor_enabled: bool | None = None,
         market_refresh_interval_seconds: int | None = None,
+        watchlist_groups: list[dict[str, Any]] | None = None,
+        monitoring_policy: dict[str, Any] | None = None,
         *,
         commit: bool = True,
     ) -> dict[str, Any]:
@@ -90,7 +116,17 @@ class UserAssetService:
         if row is None:
             row = UserAssetState(user_id=user_id, updated_at=now)
             self.session.add(row)
-        row.watchlist = list(watchlist)
+        desired = normalize_symbols(watchlist)
+        groups = normalize_groups(watchlist_groups) if watchlist_groups is not None else reconcile_legacy_watchlist(
+            normalize_groups(row.watchlist_groups or [default_group(row.watchlist or [])]), desired
+        )
+        if watchlist_groups is not None and set(flat_watchlist(groups)) != set(desired):
+            raise ValueError("分组代码必须与自选列表一致")
+        row.watchlist = desired
+        row.watchlist_groups = groups or [default_group([])]
+        row.monitoring_policy = MonitoringPolicy.model_validate(
+            monitoring_policy if monitoring_policy is not None else row.monitoring_policy or DEFAULT_MONITORING_POLICY
+        ).model_dump()
         row.positions = [dict(position) for position in positions]
         if not isinstance(total_assets, _UnsetTotalAssets):
             row.total_assets = (

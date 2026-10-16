@@ -99,6 +99,15 @@ from ashare_ai.storage.objects import LocalObjectStore
 from ashare_ai.storage.repositories import SnapshotRepository
 from ashare_ai.trading.default_rules import RULESET_VERSION
 from ashare_ai.universe.builder import UniverseConfig, UniverseResult, build_dynamic_universe
+from ashare_ai.quant.factor_registry import load_active_factor_genome
+from ashare_ai.scoring.factor import (
+    DEFAULT_FACTOR_GENOME,
+    FactorGenome,
+    calculate_factor_score,
+    factor_action,
+    factor_position,
+    factor_risk,
+)
 
 M = TypeVar("M", bound=BaseModel)
 T = TypeVar("T")
@@ -391,6 +400,9 @@ class BuiltinDailyBackend:
             raise RuntimeError("demo canonical data requires ALLOW_DEMO_DATA=true")
         if mode == "file" and not os.environ.get("ASHARE_CANONICAL_BUNDLE"):
             raise RuntimeError("canonical_bundle_mode=file requires ASHARE_CANONICAL_BUNDLE")
+        # Freeze the active deterministic strategy at submission time.  Later
+        # approvals or rollbacks must never alter an in-flight or historic run.
+        genome = load_active_factor_genome()
         manifest: dict[str, Any] = {
             "backend": self.version,
             "canonical_source_mode": mode,
@@ -409,6 +421,10 @@ class BuiltinDailyBackend:
             "supreme_mode_policy_version": self.supreme_mode_policy.version,
             "supreme_mode_policy_sha256": self.supreme_mode_policy_sha256,
             "formula_version": self.policy.scoring.formula_version,
+            "strategy_version": genome.formula_version,
+            "strategy_formula_version": genome.formula_version,
+            "strategy_parameter_sha256": genome.parameter_sha256,
+            "strategy_genome": genome.model_dump(mode="json"),
             "random_seed": 42,
             "tushare_fallback_configured": bool(self._settings.tushare_token),
         }
@@ -1583,6 +1599,37 @@ class BuiltinDailyBackend:
                     bool(item.get("industry_placeholder")) for item in quality_rows
                 ),
             }
+            try:
+                strategy_genome = FactorGenome.model_validate(manifest.get("strategy_genome", {}))
+            except Exception:
+                strategy_genome = DEFAULT_FACTOR_GENOME
+            strategy_decisions = []
+            for score in scores.scores:
+                decision_score = calculate_factor_score(
+                    fundamental_score=score.fundamental_score,
+                    technical_score=score.technical_score,
+                    sentiment_score=score.sentiment_score,
+                    quality_confidence_score=score.quality_confidence_score,
+                    genome=strategy_genome,
+                    dividend_bonus=score.dividend_bonus,
+                    event_risk_multiplier=score.event_risk_multiplier,
+                    market_score_adjustment=score.market_score_adjustment,
+                    market_risk_multiplier=score.market_risk_multiplier,
+                )
+                strategy_decisions.append(
+                    {
+                        "symbol": score.symbol,
+                        "trading_date": score.trading_date.isoformat(),
+                        "decision_at": score.decision_at.isoformat(),
+                        "strategy_version": strategy_genome.formula_version,
+                        "formula_version": strategy_genome.formula_version,
+                        "parameter_sha256": strategy_genome.parameter_sha256,
+                        "score": decision_score,
+                        "action": factor_action(decision_score, strategy_genome),
+                        "risk": factor_risk(decision_score, strategy_genome),
+                        "position": factor_position(decision_score, strategy_genome),
+                    }
+                )
             if risk_state != "OBSERVE_ONLY" and portfolio_id is None:
                 try:
                     create_backtest_snapshot(
@@ -1682,6 +1729,11 @@ class BuiltinDailyBackend:
                     "run_id": run_id,
                     "input_hash": run.input_hash,
                     "formula_version": self.policy.scoring.formula_version,
+                    "strategy_version": manifest.get("strategy_version"),
+                    "strategy_formula_version": manifest.get("strategy_formula_version"),
+                    "strategy_parameter_sha256": manifest.get("strategy_parameter_sha256"),
+                    "strategy_genome": manifest.get("strategy_genome"),
+                    "strategy_decisions": strategy_decisions,
                     "trade_rule_version": RULESET_VERSION,
             }
             report = ReportRow(
@@ -2065,7 +2117,6 @@ class BuiltinDailyBackend:
         if self._injected_llm_client is not None:
             return self._injected_llm_client
         from ashare_ai.agents.model_settings import ModelConfigurationService
-        from ashare_ai.agents.openai_compatible import OpenAICompatibleStructuredLLMClient
 
         with self.session_factory() as session:
             run = session.get(JobRun, run_id)
@@ -2077,16 +2128,12 @@ class BuiltinDailyBackend:
             runtime = ModelConfigurationService(self._settings).resolve_pinned(session, reference)
         if runtime is None:
             return None
-        return OpenAICompatibleStructuredLLMClient(
-            base_url=runtime.base_url,
-            api_key=runtime.api_key,
-            model=runtime.research_model,
-            reasoning_effort=runtime.research_reasoning_effort,
-            timeout_seconds=runtime.timeout_seconds,
-            cache_policy=runtime.profile_for(runtime.research_model).cache_policy,
-            # Reuse one connection pool across the many component calls in a
-            # single research run instead of opening a fresh TLS connection per
-            # request.  The worker process exits when the run completes.
+        # Reuse one connection pool across the many component calls in a
+        # single research run instead of opening a fresh TLS connection per
+        # request. The provider factory also applies configured fallback order.
+        return ModelConfigurationService(self._settings).client_for(
+            runtime,
+            purpose="research",
             reuse_client=True,
         )
 

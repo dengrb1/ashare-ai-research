@@ -17,6 +17,16 @@ $managerSources = @(
     (Join-Path $PSScriptRoot "StartupIntegration.cs"),
     (Join-Path $PSScriptRoot "SingleInstance.cs")
 )
+# Keep root binaries from older test/debug builds from being mistaken for the
+# current installation output. Runtime/configuration directories are untouched.
+foreach ($path in @(
+    (Join-Path $PSScriptRoot "AshareAI.NativeControlCenter.test.exe"),
+    (Join-Path $PSScriptRoot "AshareAI.NativeControlCenter.Cli.test.exe"),
+    (Join-Path $PSScriptRoot "AshareAI.NativeControlCenter.test.pdb"),
+    (Join-Path $PSScriptRoot "AshareAI.NativeControlCenter.Cli.test.pdb")
+)) {
+    if (Test-Path -LiteralPath $path) { Remove-Item -Force -LiteralPath $path }
+}
 & $compiler /nologo /target:winexe /optimize+ /platform:anycpu /utf8output `
     /main:AshareAI.NativeControlCenter.Program `
     "/win32manifest:$manifest" `
@@ -51,7 +61,10 @@ if ($SkipPackage) { return }
 $dist = Join-Path $PSScriptRoot "dist"
 $stage = Join-Path $dist "stage"
 $payload = Join-Path $dist "payload.zip"
+$setup = Join-Path $dist "AshareAI-Setup.exe"
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
+if (Test-Path -LiteralPath $payload) { Remove-Item -Force -LiteralPath $payload }
+if (Test-Path -LiteralPath $setup) { Remove-Item -Force -LiteralPath $setup }
 if (Test-Path -LiteralPath $stage) { Remove-Item -Recurse -Force -LiteralPath $stage }
 New-Item -ItemType Directory -Force -Path (Join-Path $stage "app") | Out-Null
 Copy-Item -Force $output (Join-Path $stage "AshareAI.NativeControlCenter.exe")
@@ -80,9 +93,7 @@ $pythonInstaller = Join-Path $vendor "python-3.12.10-amd64.exe"
 Invoke-WebRequest -UseBasicParsing -Uri "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe" -OutFile $pythonInstaller
 if ((Get-FileHash -Algorithm SHA256 $pythonInstaller).Hash.ToLowerInvariant() -ne "67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb") { throw "bundled Python checksum mismatch" }
 $lock = Get-Content -Raw (Join-Path $sourceRoot "scripts\native\dependencies.lock.json") | ConvertFrom-Json
-if (Test-Path -LiteralPath $payload) { Remove-Item -Force -LiteralPath $payload }
 Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $payload -CompressionLevel Optimal
-$setup = Join-Path $dist "AshareAI-Setup.exe"
 & $compiler /nologo /target:winexe /optimize+ /platform:anycpu /utf8output `
     "/win32manifest:$(Join-Path $PSScriptRoot 'setup.manifest')" `
     /reference:System.dll /reference:System.Core.dll /reference:System.IO.Compression.dll `

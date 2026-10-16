@@ -9,8 +9,8 @@ from sqlalchemy.orm import Session
 
 from ashare_ai.storage.models import AutomaticResearchReportConfig, UserResearchPreference
 
-DEFAULT_TOTAL_BUDGET = Decimal("1000000")
-DEFAULT_PER_SYMBOL_BUDGET = Decimal("80000")
+DEFAULT_TOTAL_BUDGET = Decimal("100000")
+DEFAULT_PER_SYMBOL_BUDGET = Decimal("10000")
 SLOTS = ("A", "B")
 
 

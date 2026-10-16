@@ -71,8 +71,8 @@ async def test_legacy_provider_with_composite_score(
 
     assert decision.symbol == "600000.SH"
     assert decision.trading_date == date(2026, 7, 17)
-    assert decision.mode == "legacy"
-    assert decision.model_version == "legacy-v1.0.0"
+    assert decision.mode == "factor"
+    assert decision.model_version == "factor-v1.0.0"
     # 基于 total_score=74.5 应该得到 BUY
     assert decision.action == "BUY"
     assert decision.position >= 50
@@ -86,9 +86,10 @@ async def test_legacy_provider_without_composite_score(sample_market_state: Mark
     decision = await provider.predict(sample_market_state)
 
     assert decision.symbol == "600000.SH"
-    assert decision.mode == "legacy"
-    # Fallback 使用 score=50，应该是 HOLD
-    assert decision.action == "HOLD"
+    assert decision.mode == "factor"
+    # Missing evidence lowers the quality component and therefore stays
+    # conservatively below the BUY/HOLD boundary.
+    assert decision.action == "SELL"
 
 
 def test_convert_composite_score_to_decision(
@@ -105,7 +106,7 @@ def test_convert_composite_score_to_decision(
     assert decision.symbol == sample_composite_score.symbol
     assert decision.trading_date == sample_composite_score.trading_date
     assert decision.decision_at == sample_composite_score.decision_at
-    assert decision.mode == "legacy"
+    assert decision.mode == "factor"
     assert decision.input_manifest_hash == sample_composite_score.agent_bundle_sha256
 
 
@@ -162,7 +163,7 @@ def test_composite_score_with_market_index() -> None:
     # 市场指数信息不影响 Legacy Provider 的动作映射
     # 但应该正确传递 total_score
     assert decision.symbol == "600000.SH"
-    assert decision.action == "BUY"  # score=72 -> BUY
+    assert decision.action == "HOLD"  # event-risk adjusted factor score is below BUY
 
 
 def test_legacy_provider_score_boundaries() -> None:
@@ -187,7 +188,7 @@ def test_legacy_provider_score_boundaries() -> None:
     # 测试仓位映射
     assert provider._score_to_position(85.0) == 70
     assert provider._score_to_position(75.0) == 50
-    assert provider._score_to_position(65.0) == 30
+    assert provider._score_to_position(65.0) == 20
     assert provider._score_to_position(55.0) == 20
     assert provider._score_to_position(45.0) == 10
     assert provider._score_to_position(35.0) == 0

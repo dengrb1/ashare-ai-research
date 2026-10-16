@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from ashare_ai.core.contracts import MarketIndexSnapshot
 from ashare_ai.core.security import safe_error_text
+from ashare_ai.portfolio.asset_contracts import MonitoringPolicy, WatchlistGroup, normalize_symbols
 
 MAX_WATCHLIST_SYMBOLS = 100
 MAX_RESEARCH_SYMBOLS = 100
@@ -41,6 +42,9 @@ class HealthResponse(BaseModel):
     execution_mode: str = "RESEARCH_ONLY"
     quote_bridge: dict[str, Any] | None = None
     gateway: dict[str, Any] | None = None
+    redis: dict[str, Any] | None = None
+    workers: dict[str, Any] | None = None
+    resources: dict[str, Any] | None = None
 
 
 class LoginRequest(BaseModel):
@@ -127,6 +131,10 @@ class ModelSettingsRequest(BaseModel):
     model_profiles: list[ModelProfileSettings] = Field(default_factory=list, max_length=32)
     timeout_seconds: float = Field(default=90, ge=1, le=600)
     enabled: bool = True
+    providers: list[dict[str, Any]] | None = Field(default=None, max_length=16)
+    primary_provider_id: str | None = Field(default=None, max_length=64)
+    fallback_provider_ids: list[str] = Field(default_factory=list, max_length=16)
+    routing: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("api_key", mode="before")
     @classmethod
@@ -150,6 +158,10 @@ class ModelSettingsResponse(BaseModel):
     configured: bool
     reachable: bool
     degraded: bool
+    providers: list[dict[str, Any]] = Field(default_factory=list)
+    primary_provider_id: str | None = None
+    fallback_provider_ids: list[str] = Field(default_factory=list)
+    routing: dict[str, str] = Field(default_factory=dict)
     status_message: str
     checked_at: datetime | None = None
     structured_output_supported: bool = False
@@ -190,15 +202,16 @@ class SystemSettingsRequest(BaseModel):
 
     auto_restart_enabled: bool | None = None
     llm_agent_max_concurrency: int | None = Field(default=None, ge=1, le=4)
-    jev_confidence_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    factor_confidence_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
     decision_system2_enabled: bool | None = None
-    jev_model_version: str | None = Field(default=None, min_length=1, max_length=128)
-    jev_backend: Literal["local", "live"] | None = None
-    jev_live_base_url: str | None = Field(default=None, max_length=2048)
-    jev_live_model: str | None = Field(default=None, min_length=1, max_length=128)
-    jev_live_endpoint: str | None = Field(default=None, pattern=r"^/[^\s]+$", max_length=256)
-    jev_live_timeout_seconds: float | None = Field(default=None, gt=0, le=120)
-    jev_live_api_key: str | None = Field(default=None, min_length=1, max_length=4096)
+    strategy_evolution_enabled: bool | None = None
+    strategy_evolution_weekday: int | None = Field(default=None, ge=0, le=6)
+    strategy_evolution_hour: int | None = Field(default=None, ge=0, le=23)
+    strategy_evolution_min_samples: int | None = Field(default=None, ge=1, le=100_000)
+    strategy_evolution_max_drawdown: float | None = Field(default=None, gt=0, le=1)
+    strategy_evolution_max_turnover: float | None = Field(default=None, gt=0, le=1000)
+    strategy_evolution_min_improvement: float | None = Field(default=None, ge=-1, le=1)
+    strategy_evolution_max_candidates: int | None = Field(default=None, ge=1, le=64)
     object_store_endpoint: str | None = Field(default=None, max_length=2048)
     object_store_bucket: str | None = Field(default=None, min_length=1, max_length=255)
     object_store_secure: bool | None = None
@@ -429,6 +442,8 @@ class AssetStateRequest(BaseModel):
     stop_loss_monitor_enabled: bool | None = None
     buy_monitor_enabled: bool | None = None
     market_refresh_interval_seconds: Literal[5, 10, 15, 30, 60, 120] | None = None
+    watchlist_groups: list[WatchlistGroup] | None = Field(default=None, max_length=32)
+    monitoring_policy: MonitoringPolicy | None = None
 
     @field_validator("watchlist", mode="before")
     @classmethod
@@ -468,6 +483,76 @@ class AssetStateResponse(BaseModel):
     buy_monitor_enabled: bool = True
     market_refresh_interval_seconds: Literal[5, 10, 15, 30, 60, 120] = 5
     updated_at: datetime | None = None
+    watchlist_groups: list[dict[str, Any]] = Field(default_factory=list)
+    monitoring_policy: dict[str, Any] = Field(default_factory=dict)
+
+
+class WatchlistParseRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=20000)
+
+
+class WatchlistBulkRequest(BaseModel):
+    symbols: list[str] = Field(default_factory=list, max_length=MAX_WATCHLIST_SYMBOLS)
+    operation: Literal["ADD", "REMOVE", "REPLACE"] = "ADD"
+    group_id: str = Field(default="default", min_length=1, max_length=64)
+    destination_group_id: str | None = None
+
+    @field_validator("symbols")
+    @classmethod
+    def normalize(cls, value: list[str]) -> list[str]:
+        return normalize_symbols(value)
+
+
+class WatchlistGroupRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=64)
+    symbols: list[str] = Field(default_factory=list, max_length=MAX_WATCHLIST_SYMBOLS)
+    sort_order: int = Field(default=0, ge=0, le=10000)
+    enabled: bool = True
+    monitoring_policy: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("symbols")
+    @classmethod
+    def normalize(cls, value: list[str]) -> list[str]:
+        return normalize_symbols(value)
+
+    @field_validator("monitoring_policy")
+    @classmethod
+    def policy(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return MonitoringPolicy(**value).model_dump(exclude_unset=True)
+
+
+class FormAssistRequest(BaseModel):
+    form_type: Literal["POSITION", "WATCHLIST", "TOTAL_ASSETS", "RESEARCH", "MONITOR", "STRATEGY"]
+    text: str = Field(default="", max_length=30000)
+    draft: dict[str, Any] = Field(default_factory=dict)
+    attachment_ids: list[str] = Field(default_factory=list, max_length=8)
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def requires_source(self) -> FormAssistRequest:
+        if not self.text.strip() and not self.attachment_ids:
+            raise ValueError("请输入文字或上传图片")
+        return self
+
+
+class FormAssistResponse(BaseModel):
+    form_type: str
+    draft: dict[str, Any]
+    fields: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    missing_fields: list[str] = Field(default_factory=list)
+    confidence: float = Field(ge=0, le=1)
+    requires_confirmation: bool = True
+    source: str = "AI_ASSISTED"
+
+
+class FormAssistGeneration(BaseModel):
+    draft: dict[str, Any] = Field(default_factory=dict)
+    fields: list[dict[str, Any]] = Field(default_factory=list, max_length=64)
+    warnings: list[str] = Field(default_factory=list, max_length=32)
+    missing_fields: list[str] = Field(default_factory=list, max_length=32)
+    confidence: float = Field(default=0.5, ge=0, le=1)
 
 
 class ExitMonitorSettingsRequest(BaseModel):
@@ -483,6 +568,10 @@ class MarketRefreshSettingsRequest(BaseModel):
     """Per-account live-market refresh cadence for the interactive Web/App clients."""
 
     market_refresh_interval_seconds: Literal[5, 10, 15, 30, 60, 120]
+
+
+class MonitoringPolicyRequest(MonitoringPolicy):
+    """User-level deterministic minute anomaly thresholds."""
 
 
 class ExitAdviceResponse(_SanitizedErrorResponse):
@@ -882,6 +971,69 @@ class MonitorSignalsResponse(BaseModel):
     decision_at: datetime
 
 
+class LiveQuoteStatusResponse(BaseModel):
+    source: str
+    collected_at: datetime
+    cached_at: datetime
+    delayed: bool = False
+    stale: bool = False
+    age_seconds: float = Field(default=0, ge=0)
+    message: str | None = None
+
+
+class LivePositionMonitorResponse(BaseModel):
+    symbol: str
+    name: str
+    quantity: int = Field(ge=0)
+    cost: float = Field(ge=0)
+    price: float | None = None
+    change: float | None = None
+    change_percent: float | None = None
+    market_value: float | None = None
+    unrealized_pnl: float | None = None
+    unrealized_pnl_pct: float | None = None
+    stop_loss_price: float | None = None
+    stop_loss_mode: str | None = None
+    trailing_stop_price: float | None = None
+    stop_distance_pct: float | None = None
+    risk_state: str
+    risk_level: Literal["NORMAL", "WARNING", "CRITICAL"]
+    strategy_version: str
+    quote_status: LiveQuoteStatusResponse
+    available_at: datetime
+    decision_at: datetime
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class LiveMonitorSignalResponse(BaseModel):
+    symbol: str
+    signal_type: str
+    severity: str
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    available_at: datetime
+    decision_at: datetime
+
+
+class LiveMonitorSessionResponse(BaseModel):
+    state: Literal["OPEN", "PRE_OPEN", "BREAK", "CLOSED", "UNKNOWN"]
+    is_trading_day: bool | None = None
+    reason: str
+
+
+class LiveMonitorResponse(BaseModel):
+    monitor_version: str
+    generated_at: datetime
+    decision_at: datetime
+    session: LiveMonitorSessionResponse
+    next_poll_seconds: int = Field(ge=5, le=120)
+    positions: list[LivePositionMonitorResponse] = Field(default_factory=list)
+    watchlist_quotes: list[dict[str, Any]] = Field(default_factory=list)
+    signals: list[LiveMonitorSignalResponse] = Field(default_factory=list)
+    market_error: str | None = None
+    stale: bool = False
+    research_snapshot_isolated: bool = True
+
+
 class AppCapabilitiesResponse(BaseModel):
     api_version: Literal["v1"] = "v1"
     authentication: Literal["BEARER_REFRESH"] = "BEARER_REFRESH"
@@ -1142,8 +1294,8 @@ class ResearchSettingsResponse(BaseModel):
     auto_enabled: bool = False
     updated_at: datetime | None = None
     automatic_scope: Literal["MARKET", "WATCHLIST", "CUSTOM"] = "MARKET"
-    automatic_total_budget: Decimal = Decimal("1000000")
-    automatic_per_symbol_budget: Decimal = Decimal("80000")
+    automatic_total_budget: Decimal = Decimal("100000")
+    automatic_per_symbol_budget: Decimal = Decimal("10000")
     automatic_max_stock_price: Decimal | None = None
     automatic_reports: list[AutomaticResearchReportSettings] = Field(default_factory=list)
     schedule_timezone: Literal["Asia/Shanghai"] = "Asia/Shanghai"
@@ -1272,14 +1424,69 @@ class BacktestRequest(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     start_date: date
     end_date: date
-    snapshot_ids: list[str] = Field(min_length=1)
+    mode: Literal["SNAPSHOT", "WATCHLIST_HISTORICAL"] = "SNAPSHOT"
+    snapshot_ids: list[str] = Field(default_factory=list, max_length=8)
     config: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_training_request(self) -> "BacktestRequest":
+        def reject_secrets(value: Any) -> None:
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    normalized = str(key).casefold().replace("-", "_")
+                    if normalized in {"api_key", "password", "token", "secret", "credential"} or normalized.endswith(("_token", "_secret", "_password", "_credential")):
+                        raise ValueError("backtest config cannot contain credentials")
+                    reject_secrets(child)
+            elif isinstance(value, list):
+                for child in value:
+                    reject_secrets(child)
+
+        reject_secrets(self.config)
+        if self.start_date > self.end_date:
+            raise ValueError("start_date must be <= end_date")
+        if self.mode == "SNAPSHOT":
+            if len(self.snapshot_ids) != 1:
+                raise ValueError("snapshot mode requires exactly one cumulative snapshot")
+            # Existing snapshot clients may carry executor metadata (for
+            # example a deterministic seed); the executor only consumes its
+            # typed fields.  Training mode below remains strict.
+            allowed: set[str] | None = None
+        else:
+            if self.snapshot_ids:
+                raise ValueError("watchlist historical mode collects snapshots asynchronously")
+            allowed = {
+                "scope", "symbols", "training_sessions", "history_sessions",
+                "entry_discounts", "use_real_watchlist_quotes", "monitor_buy_entry_alerts",
+                "initial_capital", "benchmark",
+            }
+        unknown = sorted(set(self.config) - allowed) if allowed is not None else []
+        if unknown:
+            raise ValueError("unsupported backtest config fields")
+        if self.mode == "WATCHLIST_HISTORICAL":
+            if self.config.get("scope") != "WATCHLIST":
+                raise ValueError("watchlist historical mode requires scope WATCHLIST")
+            symbols = self.config.get("symbols")
+            if not isinstance(symbols, list) or not 1 <= len(symbols) <= MAX_WATCHLIST_SYMBOLS:
+                raise ValueError("watchlist historical mode requires 1-100 symbols")
+            if len({str(item).strip().upper() for item in symbols}) != len(symbols):
+                raise ValueError("training symbols must be unique")
+            training_sessions = int(self.config.get("training_sessions", 160))
+            history_sessions = int(self.config.get("history_sessions", 240))
+            if not 30 <= training_sessions <= 10000 or not 30 <= history_sessions <= 2000:
+                raise ValueError("training session bounds are invalid")
+            discounts = self.config.get("entry_discounts", [0.0, 0.01, 0.02])
+            if not isinstance(discounts, list) or len(discounts) > 8 or any(
+                not isinstance(item, (int, float)) or not 0 <= float(item) <= 0.3 for item in discounts
+            ):
+                raise ValueError("entry_discounts are invalid")
+        return self
 
 
 class BacktestResponse(_SanitizedErrorResponse):
     backtest_id: str
     run_id: str | None
     status: str
+    mode: Literal["SNAPSHOT", "WATCHLIST_HISTORICAL"] = "SNAPSHOT"
     name: str
     start_date: date
     end_date: date

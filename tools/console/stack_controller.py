@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -39,7 +40,7 @@ STOP_SCRIPT = LIFECYCLE_SCRIPT
 LLM_SCRIPT = "scripts/llm_stack.ps1"
 
 SERVICE_DEFINITIONS: tuple[tuple[str, str, str], ...] = (
-    ("api", "Control API", "http://127.0.0.1:8000/api/health"),
+    ("api", "Control API", "http://127.0.0.1:8000/api/v1/health"),
     ("gateway", "Model Gateway", "http://127.0.0.1:8787/health/ready"),
     ("local_model", "Local Model", "http://127.0.0.1:8080/health"),
     ("quote_bridge", "Quote Bridge", "http://127.0.0.1:8081/health"),
@@ -83,7 +84,7 @@ def service_definitions(repo_root: Path | None = None) -> tuple[tuple[str, str, 
 
     settings = _read_runtime_settings(repo_root)
     return (
-        ("api", "Control API", f"http://127.0.0.1:{_configured_port(settings, 'control_api')}/api/health"),
+        ("api", "Control API", f"http://127.0.0.1:{_configured_port(settings, 'control_api')}/api/v1/health"),
         ("gateway", "Model Gateway", f"http://127.0.0.1:{_configured_port(settings, 'gateway')}/health/ready"),
         ("local_model", "Local Model", f"http://127.0.0.1:{_configured_port(settings, 'local_model')}/health"),
         ("quote_bridge", "Quote Bridge", f"http://127.0.0.1:{_configured_port(settings, 'quote_bridge')}/health"),
@@ -118,14 +119,17 @@ def decode_log_bytes(data: bytes) -> str:
 
     if not data:
         return ""
+    def clean(text: str) -> str:
+        return re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+
     if data.startswith((b"\xff\xfe", b"\xfe\xff")):
-        return data.decode("utf-16", errors="replace")
+        return clean(data.decode("utf-16", errors="replace"))
     for encoding in ("utf-8", "gbk"):
         try:
-            return data.decode(encoding)
+            return clean(data.decode(encoding))
         except UnicodeDecodeError:
             continue
-    return data.decode("utf-8", errors="replace")
+    return clean(data.decode("utf-8", errors="replace"))
 
 
 @dataclass(frozen=True)
@@ -240,6 +244,160 @@ class StackController:
     def local_model_status(self) -> bool:
         return self._schedule("检查本地模型", LLM_SCRIPT, ["-Status"])
 
+    def native_install(self, source_root: Path, runtime_root: Path) -> bool:
+        source_root = Path(source_root).resolve()
+        runtime_root = Path(runtime_root).resolve()
+        return self._schedule_external_script(
+            "初始化开发运行环境",
+            source_root,
+            ["-Command", "install", "-SourceRoot", str(source_root), "-Root", str(runtime_root)],
+        )
+
+    def native_start(self, source_root: Path, runtime_root: Path) -> bool:
+        source_root = Path(source_root).resolve()
+        runtime_root = Path(runtime_root).resolve()
+        return self._schedule_external_script(
+            "启动源码开发服务",
+            source_root,
+            ["-Command", "start", "-SourceRoot", str(source_root), "-Root", str(runtime_root), "-DevMode"],
+        )
+
+    def native_stop(self, source_root: Path, runtime_root: Path) -> bool:
+        source_root = Path(source_root).resolve()
+        runtime_root = Path(runtime_root).resolve()
+        return self._schedule_external_script(
+            "停止源码开发服务",
+            source_root,
+            ["-Command", "stop", "-SourceRoot", str(source_root), "-Root", str(runtime_root), "-DevMode"],
+        )
+
+    def native_restart(self, source_root: Path, runtime_root: Path) -> bool:
+        source_root = Path(source_root).resolve()
+        runtime_root = Path(runtime_root).resolve()
+        return self._schedule_external_script(
+            "重启源码开发服务",
+            source_root,
+            ["-Command", "restart", "-SourceRoot", str(source_root), "-Root", str(runtime_root), "-DevMode"],
+        )
+
+    def native_doctor(self, source_root: Path, runtime_root: Path) -> bool:
+        source_root = Path(source_root).resolve()
+        runtime_root = Path(runtime_root).resolve()
+        return self._schedule_external_script(
+            "诊断开发运行环境",
+            source_root,
+            ["-Command", "doctor", "-SourceRoot", str(source_root), "-Root", str(runtime_root), "-DevMode"],
+        )
+
+    def build_web(self, source_root: Path) -> bool:
+        source_root = Path(source_root).resolve()
+        return self._schedule_process(
+            "构建 Web",
+            self._npm_command("run", "build"),
+            source_root / "web",
+        )
+
+    def run_python_tests(self, source_root: Path) -> bool:
+        source_root = Path(source_root).resolve()
+        python = source_root / ".venv" / "Scripts" / "python.exe"
+        if not python.is_file():
+            python = Path(sys.executable)
+        env = {"PYTHONPATH": str(source_root / "src")}
+        return self._schedule_process(
+            "运行 Python 测试",
+            [str(python), "-m", "pytest"],
+            source_root,
+            env,
+        )
+
+    def run_web_tests(self, source_root: Path) -> bool:
+        source_root = Path(source_root).resolve()
+        return self._schedule_process(
+            "运行 Web 测试",
+            self._npm_command("test", "--", "--run"),
+            source_root / "web",
+        )
+
+    def build_native_manager(self, source_root: Path) -> bool:
+        return self._schedule_dev_task(source_root, "native", "编译托盘管理器")
+
+    def build_installer(self, source_root: Path) -> bool:
+        return self._schedule_dev_task(source_root, "installer", "构建 Windows 安装包")
+
+    def build_console(self, source_root: Path) -> bool:
+        return self._schedule_dev_task(source_root, "console", "编译开发控制台")
+
+    def build_all(self, source_root: Path) -> bool:
+        return self._schedule_dev_task(source_root, "all", "一键全量构建")
+
+    def _schedule_dev_task(self, source_root: Path, task: str, label: str) -> bool:
+        source_root = Path(source_root).resolve()
+        script = source_root / "scripts" / "dev.ps1"
+        if not script.is_file():
+            self._emit("error", f"未找到开发构建脚本: {script}")
+            return False
+        return self._schedule_process(
+            label,
+            [*shell_command(), "-File", str(script), "-Task", task],
+            source_root,
+        )
+
+    @staticmethod
+    def _npm_command(*arguments: str) -> list[str]:
+        if os.name == "nt":
+            return ["cmd.exe", "/d", "/s", "/c", subprocess.list2cmdline(["npm.cmd", *arguments])]
+        return ["npm", *arguments]
+
+    def _schedule_external_script(self, label: str, source_root: Path, args: list[str]) -> bool:
+        script = source_root / "scripts" / "native" / "ashare-native.ps1"
+        if not script.is_file():
+            self._emit("error", f"未找到原生控制器: {script}")
+            return False
+        return self._schedule_script(label, script, args, source_root)
+
+    def _schedule_script(self, label: str, script: Path, args: list[str], cwd: Path) -> bool:
+        with self._busy_lock:
+            if self._busy_action is not None:
+                self._emit("warn", f"系统正在{self._busy_action}，请等待完成后再操作…")
+                return False
+            self._busy_action = label
+        self._emit("busy", label)
+        self._emit("log", f">>> {label}: {script} {' '.join(args)}")
+        self._log(logging.INFO, f"{label}: {script} {' '.join(args)}")
+        threading.Thread(
+            target=self._run_script_worker,
+            args=(script, args, label, cwd),
+            daemon=True,
+            name=f"stack-{label}",
+        ).start()
+        return True
+
+    def _schedule_process(
+        self,
+        label: str,
+        command: list[str],
+        cwd: Path,
+        env: Mapping[str, str] | None = None,
+    ) -> bool:
+        if not cwd.is_dir():
+            self._emit("error", f"工作目录不存在: {cwd}")
+            return False
+        with self._busy_lock:
+            if self._busy_action is not None:
+                self._emit("warn", f"系统正在{self._busy_action}，请等待完成后再操作…")
+                return False
+            self._busy_action = label
+        self._emit("busy", label)
+        self._emit("log", f">>> {label}: {' '.join(command)}")
+        self._log(logging.INFO, f"{label}: {' '.join(command)} (cwd={cwd})")
+        threading.Thread(
+            target=self._run_process_worker,
+            args=(command, cwd, env or {}, label),
+            daemon=True,
+            name=f"stack-{label}",
+        ).start()
+        return True
+
     def _schedule(self, label: str, script_rel: str, args: list[str]) -> bool:
         if self.repo_root is None:
             self._emit("error", "尚未选择仓库目录")
@@ -260,13 +418,19 @@ class StackController:
         self._log(logging.INFO, f"{label}系统: {script} {' '.join(args)}")
         threading.Thread(
             target=self._run_script_worker,
-            args=(script, args, label),
+            args=(script, args, label, self.repo_root),
             daemon=True,
             name=f"stack-{label}",
         ).start()
         return True
 
-    def _run_script_worker(self, script: Path, args: list[str], label: str) -> None:
+    def _run_script_worker(
+        self,
+        script: Path,
+        args: list[str],
+        label: str,
+        cwd: Path | None = None,
+    ) -> None:
         reader: threading.Thread | None = None
         stop = threading.Event()
         log_path: str | None = None
@@ -282,7 +446,7 @@ class StackController:
                 creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
                 proc = subprocess.Popen(
                     [*shell, "-File", str(script), *args],
-                    cwd=str(self.repo_root),
+                    cwd=str(cwd or self.repo_root),
                     stdout=output,
                     stderr=subprocess.STDOUT,
                     creationflags=creationflags,
@@ -319,6 +483,59 @@ class StackController:
             result = OperationResult(label, code, time.monotonic() - started, error)
             self._emit("done", result)
             self._log(logging.INFO, f"{label}流程结束")
+
+    def _run_process_worker(
+        self,
+        command: list[str],
+        cwd: Path,
+        env: Mapping[str, str],
+        label: str,
+    ) -> None:
+        reader: threading.Thread | None = None
+        stop = threading.Event()
+        log_path: str | None = None
+        started = time.monotonic()
+        code: int | None = None
+        error: str | None = None
+        try:
+            fd, log_path = tempfile.mkstemp(prefix="console_process_", suffix=".log")
+            os.close(fd)
+            process_env = os.environ.copy()
+            process_env.update({key: value for key, value in env.items() if value is not None})
+            with open(log_path, "wb") as output:
+                proc = subprocess.Popen(
+                    command,
+                    cwd=str(cwd),
+                    env=process_env,
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            reader = threading.Thread(
+                target=tail_file,
+                args=(log_path, stop, self._event_sink),
+                daemon=True,
+                name=f"stack-log-{label}",
+            )
+            reader.start()
+            code = proc.wait()
+            event = "log" if code == 0 else "error"
+            self._emit(event, f">>> {label}完成 (exit {code})")
+        except Exception as exc:  # noqa: BLE001
+            error = str(exc)
+            self._emit("error", f">>> {label}执行异常: {error}")
+        finally:
+            stop.set()
+            if reader is not None:
+                reader.join(timeout=2.0)
+            if log_path is not None:
+                try:
+                    os.remove(log_path)
+                except OSError:
+                    pass
+            with self._busy_lock:
+                self._busy_action = None
+            self._emit("done", OperationResult(label, code, time.monotonic() - started, error))
 
     def refresh_health(self) -> bool:
         with self._health_lock:

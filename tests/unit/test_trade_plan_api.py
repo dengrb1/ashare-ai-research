@@ -106,7 +106,7 @@ def test_research_settings_are_per_user_and_default_off() -> None:
         updated = client.put("/api/v1/research/settings", json={"auto_enabled": True})
         assert updated.status_code == 200
         assert updated.json()["auto_enabled"] is True
-        assert updated.json()["automatic_total_budget"] == "1000000"
+        assert updated.json()["automatic_total_budget"] == "100000"
         reports = updated.json()["automatic_reports"]
         assert [item["slot"] for item in reports] == ["A", "B"]
         assert [item["enabled"] for item in reports] == [True, False]

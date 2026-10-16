@@ -7,7 +7,11 @@ from pydantic import AwareDatetime, Field, field_validator, model_validator
 
 from ashare_ai.core.contracts import CanonicalSymbol, FrozenModel
 
-DecisionMode = Literal["legacy", "jev"]
+# ``factor`` is the only mode that creates new decisions.  ``legacy`` and
+# ``jev`` remain in the type so historical records, cached payloads and old
+# backtest reports still deserialize and render; they are never produced by
+# the current runtime.
+DecisionMode = Literal["factor", "legacy", "jev"]
 DecisionAction = Literal["BUY", "HOLD", "SELL"]
 DecisionRisk = Literal["LOW", "MEDIUM", "HIGH"]
 PositionLevel = Literal[0, 10, 20, 30, 50, 70, 100]
@@ -96,6 +100,16 @@ class UnifiedDecision(FrozenModel):
     mode: DecisionMode
     model_version: str
     input_manifest_hash: str = Field(min_length=64, max_length=64)
+    # These fields were added after the original protocol.  They are optional
+    # so historical cached decisions and reports remain readable.
+    formula_version: str | None = None
+    parameter_sha256: str | None = Field(default=None, min_length=64, max_length=64)
+    dataset_sha256: str | None = Field(default=None, min_length=64, max_length=64)
+    # Optional parallel score.  It is deliberately additive so historical
+    # decision payloads and active v1 hashes remain valid.
+    shadow_formula_version: str | None = None
+    shadow_score: float | None = Field(default=None, ge=0, le=100)
+    shadow_factor_evidence: dict[str, float | int | str | bool] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_time_consistency(self) -> UnifiedDecision:
@@ -110,6 +124,13 @@ class UnifiedDecision(FrozenModel):
     def validate_hash_format(cls, value: str) -> str:
         if len(value) != 64 or not all(c in "0123456789abcdef" for c in value):
             raise ValueError("input_manifest_hash must be 64-character hex SHA-256")
+        return value
+
+    @field_validator("parameter_sha256", "dataset_sha256")
+    @classmethod
+    def validate_optional_hash_format(cls, value: str | None) -> str | None:
+        if value is not None and not all(c in "0123456789abcdef" for c in value):
+            raise ValueError("optional hashes must be 64-character hex SHA-256")
         return value
 
 
@@ -128,6 +149,15 @@ class MarketState(FrozenModel):
     volume: float = Field(ge=0)
     amount: float = Field(ge=0)
     turnover_rate: float | None = Field(default=None, ge=0, le=1)
+
+    # Versioned PIT technical evidence used by the factor-v2 shadow formula.
+    # These remain optional so old bundles and cached decisions stay readable.
+    return_5d: float | None = None
+    return_20d: float | None = None
+    close_to_ma20: float | None = None
+    annualized_volatility_20d: float | None = Field(default=None, ge=0)
+    volume_ratio_5_to_20: float | None = Field(default=None, ge=0)
+    max_drawdown_60d: float | None = Field(default=None, ge=0, le=1)
 
     # 技术指标
     ma5: float | None = None

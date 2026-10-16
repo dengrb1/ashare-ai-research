@@ -54,12 +54,12 @@ def _decision(*, confidence: float, mode: str = "legacy") -> UnifiedDecision:
 
 
 @pytest.mark.asyncio
-async def test_low_confidence_jev_decision_is_queued_for_system2() -> None:
+async def test_low_confidence_factor_decision_is_queued_for_system2() -> None:
     enqueue = Mock(return_value="system2-job-1")
     provider = AsyncMock()
-    provider.predict.return_value = _decision(confidence=0.34, mode="jev")
+    provider.predict.return_value = _decision(confidence=0.34, mode="factor")
     router = DecisionRouter(
-        mode="jev",
+        mode="factor",
         fallback_enabled=False,
         confidence_threshold=0.60,
         system2_enqueue=enqueue,
@@ -68,21 +68,21 @@ async def test_low_confidence_jev_decision_is_queued_for_system2() -> None:
 
     decision = await router.predict(_market_state())
 
-    assert decision.mode == "jev"
+    assert decision.mode == "factor"
     assert router.system2_state == "QUEUED"
     assert router.system2_job_id == "system2-job-1"
     assert enqueue.call_args.args[1] == "LOW_CONFIDENCE"
 
 
 @pytest.mark.asyncio
-async def test_jev_unavailable_queues_system2_before_legacy_fallback() -> None:
+async def test_factor_unavailable_queues_system2_before_fallback() -> None:
     enqueue = Mock(return_value="system2-job-2")
     primary = AsyncMock()
     primary.predict.side_effect = RuntimeError("missing checkpoint")
     fallback = AsyncMock()
-    fallback.predict.return_value = _decision(confidence=0.9)
+    fallback.predict.return_value = _decision(confidence=0.9, mode="factor")
     router = DecisionRouter(
-        mode="jev",
+        mode="factor",
         fallback_enabled=True,
         system2_enqueue=enqueue,
     )
@@ -91,9 +91,9 @@ async def test_jev_unavailable_queues_system2_before_legacy_fallback() -> None:
 
     decision = await router.predict(_market_state())
 
-    assert decision.mode == "legacy"
+    assert decision.mode == "factor"
     assert router.system2_state == "QUEUED"
-    assert enqueue.call_args.args[1] == "JEV_UNAVAILABLE"
+    assert enqueue.call_args.args[1] == "FACTOR_UNAVAILABLE"
 
 
 @pytest.mark.asyncio

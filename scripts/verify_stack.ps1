@@ -16,6 +16,7 @@ $env:CONTROL_API_PORT = "$ApiPort"
 $env:GATEWAY_LISTEN = "127.0.0.1:$GatewayPort"
 $env:MODEL_GATEWAY_URL = $gatewayUrl
 $env:ASHARE_CONSOLE_URL = $apiUrl
+$env:PYTHONPATH = Join-Path $repoRoot "src"
 
 & (Join-Path $PSScriptRoot "stop_stack.ps1")
 if (-not (Test-Path $stdinPath)) {
@@ -40,7 +41,7 @@ try {
         -RedirectStandardError (Join-Path $runDir "gateway.verify.err.log") `
         -WindowStyle Hidden -PassThru
     $api = Start-Process -FilePath "python.exe" `
-        -ArgumentList "-m", "a_share_ai_trader.control_api" `
+        -ArgumentList "-m", "ashare_ai.cli", "api", "--host", "127.0.0.1", "--port", "$ApiPort" `
         -WorkingDirectory $repoRoot `
         -RedirectStandardInput $stdinPath `
         -RedirectStandardOutput (Join-Path $runDir "api.verify.out.log") `
@@ -55,7 +56,7 @@ try {
             if ($gateway.HasExited -or $api.HasExited) {
                 throw "verification child process exited"
             }
-            $apiReady = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 "$apiUrl/api/health").StatusCode -eq 200
+            $apiReady = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 "$apiUrl/api/v1/health").StatusCode -eq 200
             $gatewayReady = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 "$gatewayUrl/health/ready").StatusCode -eq 200
             $ready = $apiReady -and $gatewayReady
         } catch {
@@ -79,7 +80,7 @@ try {
     }
 
     Write-Host "--- health ---"
-    (Invoke-WebRequest -UseBasicParsing "$apiUrl/api/health").Content
+    (Invoke-WebRequest -UseBasicParsing "$apiUrl/api/v1/health").Content
 
     Write-Host "--- gateway fallback ---"
     $chat = Invoke-WebRequest -UseBasicParsing -Method POST -ContentType "application/json" `

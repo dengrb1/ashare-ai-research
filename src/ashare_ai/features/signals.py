@@ -72,12 +72,29 @@ def detect_monitor_signals(
         return []
     closes = [item[1] for item in visible]
     volumes = [item[2] for item in visible]
-    native = native_monitor_signals(closes, volumes)
+    configured = {
+        "intraday_drop": -0.03,
+        "breakout_price_pct": 0.01,
+        "breakout_volume_ratio": 1.5,
+        "divergence_price_pct": 0.03,
+        "divergence_volume_ratio": -0.20,
+    }
+    configured.update({key: float(value) for key, value in (thresholds or {}).items() if key in configured})
+    # The native ABI has no threshold argument.  Use it only for the default
+    # policy; custom policies must be evaluated by the Python implementation.
+    use_default_policy = configured == {
+        "intraday_drop": -0.03,
+        "breakout_price_pct": 0.01,
+        "breakout_volume_ratio": 1.5,
+        "divergence_price_pct": 0.03,
+        "divergence_volume_ratio": -0.20,
+    }
+    native = native_monitor_signals(closes, volumes) if use_default_policy else None
     if native is None:
-        native = _python_signals(closes, volumes)
+        native = _python_signals(closes, volumes, thresholds=configured)
     latest = visible[-1][0]
     trading_date = latest.date()
-    thresholds = thresholds or {}
+    thresholds = configured
     emitted: list[MonitorSignal] = []
     for signal_type, triggered, confidence, primary, secondary in native:
         if not triggered:
@@ -110,8 +127,18 @@ def detect_monitor_signals(
 
 
 def _python_signals(
-    closes: list[float], volumes: list[float]
+    closes: list[float],
+    volumes: list[float],
+    *,
+    thresholds: dict[str, float] | None = None,
 ) -> list[tuple[str, bool, float, float, float]]:
+    thresholds = thresholds or {
+        "intraday_drop": -0.03,
+        "breakout_price_pct": 0.01,
+        "breakout_volume_ratio": 1.5,
+        "divergence_price_pct": 0.03,
+        "divergence_volume_ratio": -0.20,
+    }
     def item(
         name: str, triggered: bool, confidence: float, primary: float, secondary: float
     ):
@@ -126,7 +153,10 @@ def _python_signals(
         price_ratio = closes[-1] / max(prior) - 1
         average_volume = statistics.fmean(volumes[-21:-1])
         volume_ratio = volumes[-1] / average_volume if average_volume else 0.0
-        breakout = price_ratio >= 0.01 and volume_ratio >= 1.5
+        breakout = (
+            price_ratio >= thresholds["breakout_price_pct"]
+            and volume_ratio >= thresholds["breakout_volume_ratio"]
+        )
     price_change = closes[-1] / closes[-6] - 1 if len(closes) >= 10 else 0.0
     first_volume = statistics.fmean(volumes[-10:-5]) if len(volumes) >= 10 else 0.0
     second_volume = statistics.fmean(volumes[-5:]) if len(volumes) >= 10 else 0.0
@@ -138,17 +168,35 @@ def _python_signals(
         current_gap = statistics.fmean(closes[-5:]) - statistics.fmean(closes[-20:])
         death = previous_gap >= 0 and current_gap < 0
     return [
-        item("INTRADAY_DROP", drop <= -0.03, min(1.0, max(0.0, -drop / 0.03)), drop, 4),
+        item(
+            "INTRADAY_DROP",
+            drop <= thresholds["intraday_drop"],
+            min(1.0, max(0.0, abs(drop) / max(abs(thresholds["intraday_drop"]), 1e-9))),
+            drop,
+            4,
+        ),
         item(
             "VOLUME_BREAKOUT",
             breakout,
-            min(1.0, max(0.0, (price_ratio / 0.01 + (volume_ratio - 1.5) / 1.5) / 2)),
+            min(
+                1.0,
+                max(
+                    0.0,
+                    (
+                        price_ratio / max(thresholds["breakout_price_pct"], 1e-9)
+                        + (volume_ratio - thresholds["breakout_volume_ratio"])
+                        / max(thresholds["breakout_volume_ratio"], 1e-9)
+                    )
+                    / 2,
+                ),
+            ),
             price_ratio,
             volume_ratio,
         ),
         item(
             "VOLUME_PRICE_DIVERGENCE",
-            price_change >= 0.03 and volume_change <= -0.20,
+            price_change >= thresholds["divergence_price_pct"]
+            and volume_change <= thresholds["divergence_volume_ratio"],
             min(
                 1.0,
                 max(0.0, abs(price_change) * max(0.0, -volume_change) / 0.03),

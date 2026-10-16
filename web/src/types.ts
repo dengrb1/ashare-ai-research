@@ -156,6 +156,8 @@ export interface PaperPosition {
 
 export interface AssetState {
   watchlist: string[]
+  watchlist_groups?: WatchlistGroup[]
+  monitoring_policy?: MonitoringPolicy
   positions: PaperPosition[]
   total_assets?: number | null
   exit_monitor_enabled?: boolean
@@ -164,6 +166,34 @@ export interface AssetState {
   buy_monitor_enabled?: boolean
   market_refresh_interval_seconds?: 5 | 10 | 15 | 30 | 60 | 120
   updated_at?: string | null
+}
+
+export interface WatchlistGroup {
+  group_id: string
+  name: string
+  sort_order: number
+  enabled: boolean
+  symbols: string[]
+  monitoring_policy?: Record<string, unknown>
+}
+
+export interface MonitoringPolicy {
+  enabled: boolean
+  interval_seconds: number
+  cooldown_seconds: number
+  price_change_pct: number
+  volume_multiplier: number
+  high_severity_price_change_pct: number
+}
+
+export interface FormAssistResponse {
+  form_type: string
+  draft: Record<string, unknown>
+  fields: Array<Record<string, unknown>>
+  warnings: string[]
+  missing_fields: string[]
+  confidence: number
+  requires_confirmation: boolean
 }
 
 export interface ExitAdvice {
@@ -375,6 +405,10 @@ export interface ModelSettings {
   degraded: boolean
   status_message: string
   checked_at?: string | null
+  providers?: Array<Record<string, unknown>>
+  primary_provider_id?: string | null
+  fallback_provider_ids?: string[]
+  routing?: Record<string, string>
 }
 
 export interface ModelSettingsDraft {
@@ -385,6 +419,10 @@ export interface ModelSettingsDraft {
   model_profiles: ModelProfile[]
   timeout_seconds: number
   enabled: boolean
+  providers?: Array<Record<string, unknown>>
+  primary_provider_id?: string | null
+  fallback_provider_ids?: string[]
+  routing?: Record<string, string>
 }
 
 export interface ModelProbeLog {
@@ -477,22 +515,62 @@ export interface MarketPrefetchResponse {
   errors: Record<string, string>
 }
 
-export interface TrainingStatus {
-  training_id: string
-  status: 'idle' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | string
-  progress: number
-  current_epoch: number
-  total_epochs: number
-  metrics?: Record<string, unknown> | null
-  started_at?: string | null
-  completed_at?: string | null
-  estimated_completion?: string | null
-  error?: string | null
+export interface FactorGenome {
+  schema_version: string
+  formula_version: string
+  fundamental_weight: number
+  technical_weight: number
+  sentiment_weight: number
+  quality_weight: number
+  buy_threshold: number
+  sell_threshold: number
+  risk_low_threshold: number
+  risk_high_threshold: number
+  max_position: number
+  risk_budget: number
+  mutation_seed: number
 }
 
-export interface TrainingHistory {
-  trainings: TrainingStatus[]
-  total: number
+export interface EvolutionMetrics {
+  sample_count: number
+  net_return: number
+  sharpe: number
+  maximum_drawdown: number
+  turnover: number
+}
+
+export interface FactorGenomeVersion {
+  candidate_id: string
+  status: 'CANDIDATE' | 'ACTIVE' | 'REJECTED' | 'ROLLED_BACK' | string
+  source: 'LLM' | 'DETERMINISTIC' | string
+  formula_version: string
+  genome: FactorGenome
+  parameter_sha256: string
+  metrics?: EvolutionMetrics | null
+  dataset_sha256?: string
+  proposal_sha256?: string | null
+  hypothesis?: string | null
+  risk_notes?: string | null
+  explanation?: string | null
+  decision_at?: string
+  created_at?: string
+  reviewed_by?: string | null
+  reviewed_at?: string | null
+  review_note?: string | null
+  activated_at?: string | null
+  activated_by?: string | null
+  is_default?: boolean
+}
+
+export interface FactorEvolutionSchedule {
+  enabled: boolean
+  weekday: number
+  hour: number
+  minimum_samples: number
+  maximum_drawdown: number
+  maximum_turnover: number
+  minimum_improvement: number
+  maximum_candidates: number
 }
 
 export type MonitorSignalType = 'INTRADAY_DROP' | 'VOLUME_BREAKOUT' | 'VOLUME_PRICE_DIVERGENCE' | 'MA_DEATH_CROSS'
@@ -513,6 +591,63 @@ export interface MonitorSignalsResponse {
   items: MonitorSignal[]
   generated_at: string
   decision_at: string
+}
+
+export interface LiveQuoteStatus {
+  source: string
+  collected_at: string
+  cached_at: string
+  delayed: boolean
+  stale: boolean
+  age_seconds: number
+  message?: string | null
+}
+
+export interface LivePositionMonitor {
+  symbol: string
+  name: string
+  quantity: number
+  cost: number
+  price?: number | null
+  change?: number | null
+  change_percent?: number | null
+  market_value?: number | null
+  unrealized_pnl?: number | null
+  unrealized_pnl_pct?: number | null
+  stop_loss_price?: number | null
+  stop_loss_mode?: string | null
+  trailing_stop_price?: number | null
+  stop_distance_pct?: number | null
+  risk_state: string
+  risk_level: 'NORMAL' | 'WARNING' | 'CRITICAL'
+  strategy_version: string
+  quote_status: LiveQuoteStatus
+  available_at: string
+  decision_at: string
+  evidence: Record<string, unknown>
+}
+
+export interface LiveMonitorSignal {
+  symbol: string
+  signal_type: string
+  severity: string
+  evidence: Record<string, unknown>
+  available_at: string
+  decision_at: string
+}
+
+export interface LiveMonitorSnapshot {
+  monitor_version: string
+  generated_at: string
+  decision_at: string
+  session: { state: 'OPEN' | 'PRE_OPEN' | 'BREAK' | 'CLOSED' | 'UNKNOWN'; is_trading_day?: boolean | null; reason: string }
+  next_poll_seconds: number
+  positions: LivePositionMonitor[]
+  watchlist_quotes: Quote[]
+  signals: LiveMonitorSignal[]
+  market_error?: string | null
+  stale: boolean
+  research_snapshot_isolated: boolean
 }
 
 export interface DataEnvelope<T> {
@@ -758,6 +893,23 @@ export interface Report {
   created_at?: string
   market_index_snapshot?: MarketIndexSnapshot | null
   result?: Record<string, unknown>
+}
+
+export interface Backtest {
+  backtest_id: string
+  run_id?: string | null
+  name: string
+  status: string
+  start_date: string
+  end_date: string
+  snapshot_ids: string[]
+  metrics?: Record<string, unknown> | null
+  artifacts?: Record<string, unknown> | null
+  input_hash: string
+  output_hash?: string | null
+  error_message?: string | null
+  created_at: string
+  completed_at?: string | null
 }
 
 export interface TradePlan {

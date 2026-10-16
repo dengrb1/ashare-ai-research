@@ -58,7 +58,9 @@ class BacktestConfig(BaseModel):
     capacity_max_participation: Decimal = Field(gt=0, le=1)
     capacity_max_slippage_bps: Decimal = Field(ge=0)
     capacity_min_fill_rate: Decimal = Field(gt=0, le=1)
-    decision_mode: Literal["legacy", "jev"] | None = None
+    # New backtests record ``factor``.  ``legacy`` and ``jev`` stay in the type
+    # so historical reports and cached manifests still deserialize unchanged.
+    decision_mode: Literal["factor", "legacy", "jev"] | None = None
 
     @model_validator(mode="after")
     def validate_config(self) -> BacktestConfig:

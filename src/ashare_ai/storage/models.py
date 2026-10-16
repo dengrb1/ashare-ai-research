@@ -128,6 +128,8 @@ class UserAssetState(Base):
         ForeignKey("user_accounts.user_id", ondelete="CASCADE"), primary_key=True
     )
     watchlist: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    watchlist_groups: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    monitoring_policy: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     positions: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     total_assets: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
     exit_monitor_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -207,6 +209,12 @@ class ModelConfigurationVersion(Base):
     providers: Mapped[list[dict[str, Any]]] = mapped_column(
         JSON, nullable=False, default=list, server_default="[]"
     )
+    encrypted_provider_keys: Mapped[dict[str, str]] = mapped_column(
+        JSON, nullable=False, default=dict, server_default="{}"
+    )
+    primary_provider_id: Mapped[str | None] = mapped_column(String(64))
+    fallback_provider_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list, server_default="[]")
+    routing: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False, default=dict, server_default="{}")
     timeout_seconds: Mapped[float] = mapped_column(Float, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
     config_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -1119,3 +1127,58 @@ class AuditEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     run: Mapped[JobRun] = relationship(back_populates="audit_events")
+
+
+class FactorGenomeVersion(Base):
+    """Immutable, auditable revision of the deterministic factor genome.
+
+    A row is written once and never mutated except for its ``status`` and the
+    approval columns, so the exact parameters, metrics and dataset that produced
+    a decision remain reconstructible.  Approving a candidate only moves the
+    :class:`ActiveFactorGenome` pointer; it never rewrites historical research
+    results, scores or backtest reports.
+    """
+
+    __tablename__ = "factor_genome_versions"
+    __table_args__ = (
+        UniqueConstraint("candidate_id", name="uq_factor_genome_candidate"),
+        Index("ix_factor_genome_status_created", "status", "created_at"),
+    )
+
+    candidate_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="CANDIDATE")
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="DETERMINISTIC")
+    formula_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    genome: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    parameter_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    metrics: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    dataset_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    proposal_sha256: Mapped[str | None] = mapped_column(String(64))
+    hypothesis: Mapped[str | None] = mapped_column(Text)
+    risk_notes: Mapped[str | None] = mapped_column(Text)
+    explanation: Mapped[str | None] = mapped_column(Text)
+    decision_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(ForeignKey("user_accounts.user_id"))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_note: Mapped[str | None] = mapped_column(Text)
+
+
+class ActiveFactorGenome(Base):
+    """Pointer to the one active factor genome revision."""
+
+    __tablename__ = "active_factor_genome"
+
+    scope: Mapped[str] = mapped_column(String(32), primary_key=True, default="default")
+    candidate_id: Mapped[str] = mapped_column(
+        ForeignKey("factor_genome_versions.candidate_id"), nullable=False
+    )
+    previous_candidate_id: Mapped[str | None] = mapped_column(
+        ForeignKey("factor_genome_versions.candidate_id")
+    )
+    activated_by: Mapped[str | None] = mapped_column(ForeignKey("user_accounts.user_id"))
+    activated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    candidate: Mapped[FactorGenomeVersion] = relationship(
+        foreign_keys=[candidate_id]
+    )

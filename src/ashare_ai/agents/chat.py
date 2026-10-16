@@ -694,14 +694,12 @@ async def stream_chat_response(
                 )
             if existing_compaction is None:
                 yield {"type": "stage", "stage": "compaction", "status": "STARTED"}
-                compaction_client = OpenAICompatibleStructuredLLMClient(
-                    base_url=runtime.base_url,
-                    api_key=runtime.api_key,
+                compaction_client = ModelConfigurationService().client_for(
+                    runtime,
+                    purpose="chat",
                     model=model,
                     reasoning_effort=reasoning_effort,
-                    timeout_seconds=runtime.timeout_seconds,
                     max_retries=2,
-                    cache_policy=profile.cache_policy,
                 )
                 compaction_cache = AIResultCacheService(session_factory=SessionLocal)
 
@@ -925,14 +923,12 @@ async def stream_chat_response(
         yield {"type": "context", "cache_hit": False, "sources": sources}
         yield {"type": "stage", "stage": "generation", "status": "STARTED"}
         yield {"type": "heartbeat", "stage": "generation"}
-        client = OpenAICompatibleStructuredLLMClient(
-            base_url=runtime.base_url,
-            api_key=runtime.api_key,
+        client = ModelConfigurationService().client_for(
+            runtime,
+            purpose="chat",
             model=model,
             reasoning_effort=reasoning_effort,
-            timeout_seconds=runtime.timeout_seconds,
             max_retries=2,
-            cache_policy=profile.cache_policy,
         )
         input_tokens = cached_input_tokens = cache_write_tokens = output_tokens = (
             reasoning_tokens

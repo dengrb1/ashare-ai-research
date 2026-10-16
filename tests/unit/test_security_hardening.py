@@ -6,7 +6,12 @@ import pytest
 from cryptography.fernet import Fernet
 from starlette.requests import Request
 
-from ashare_ai.agents.model_settings import ModelSettingsError, normalize_base_url
+from ashare_ai.agents.model_settings import (
+    ModelSettingsError,
+    _public_provider_dict,
+    _validate_provider_metadata,
+    normalize_base_url,
+)
 from ashare_ai.api.auth import _auth_source
 from ashare_ai.core.config import Settings
 from ashare_ai.core.security import safe_error_message, safe_error_text
@@ -116,3 +121,12 @@ def test_local_object_store_rejects_content_named_file_outside_its_root(tmp_path
     outside.write_bytes(payload)
     with pytest.raises(ValueError, match="outside"):
         store.get(outside.as_uri())
+
+
+def test_provider_metadata_rejects_nested_secrets_and_scrubs_legacy_values() -> None:
+    with pytest.raises(ModelSettingsError, match="嵌套凭据"):
+        _validate_provider_metadata({"provider_id": "relay", "metadata": {"api_key": "secret"}})
+    public = _public_provider_dict(
+        {"provider_id": "relay", "metadata": {"token": "secret", "region": "cn"}}
+    )
+    assert public == {"provider_id": "relay", "metadata": {"region": "cn"}}

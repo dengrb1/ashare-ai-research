@@ -1064,16 +1064,16 @@ def _merge_preference(
         if config is None:
             config = AutomaticResearchReportConfig(
                 **key,
-                total_budget=Decimal(str(raw.get("total_budget", "1000000"))),
-                per_symbol_budget=Decimal(str(raw.get("per_symbol_budget", "80000"))),
+                total_budget=Decimal(str(raw.get("total_budget", "100000"))),
+                per_symbol_budget=Decimal(str(raw.get("per_symbol_budget", "10000"))),
                 updated_at=now,
             )
             session.add(config)
         config.enabled = bool(raw.get("enabled", False))
         config.scope = str(raw.get("scope", "MARKET"))
         config.symbols = list(raw.get("symbols") or [])
-        config.total_budget = Decimal(str(raw.get("total_budget", "1000000")))
-        config.per_symbol_budget = Decimal(str(raw.get("per_symbol_budget", "80000")))
+        config.total_budget = Decimal(str(raw.get("total_budget", "100000")))
+        config.per_symbol_budget = Decimal(str(raw.get("per_symbol_budget", "10000")))
         maximum = raw.get("max_stock_price")
         config.max_stock_price = Decimal(str(maximum)) if maximum is not None else None
         config.config_version = max(1, int(raw.get("config_version", 1)))
@@ -1096,8 +1096,8 @@ def _merge_preference(
                 enabled=bool(row.auto_enabled and slot == "A"),
                 scope="MARKET",
                 symbols=[],
-                total_budget=Decimal("1000000"),
-                per_symbol_budget=Decimal("80000"),
+                total_budget=Decimal("100000"),
+                per_symbol_budget=Decimal("10000"),
                 updated_at=now,
             )
         )

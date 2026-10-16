@@ -25,7 +25,7 @@ def test_job_worker_builds_one_consumer_for_every_research_queue() -> None:
         "trade-plan",
         "backtest",
         "exit-review",
-        "jev-training",
+        "strategy-evolution",
         "system2-diagnostic",
     ]
 

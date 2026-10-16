@@ -72,7 +72,6 @@ from ashare_ai.api.auth import (
 )
 from ashare_ai.api.decision_endpoints import router as decision_router
 from ashare_ai.api.dependencies import get_auth_context, get_db, get_write_context
-from ashare_ai.api.model_management_endpoints import router as model_management_router
 from ashare_ai.api.search_endpoints import router as search_router
 from ashare_ai.api.strategy_endpoints import router as strategy_router
 from ashare_ai.api.run_cleanup import TERMINAL_RUN_STATUSES
@@ -96,6 +95,11 @@ from ashare_ai.api.schemas import (
     AppCapabilitiesResponse,
     AssetStateRequest,
     AssetStateResponse,
+    PaperPosition,
+    MonitoringPolicyRequest,
+    FormAssistRequest,
+    FormAssistGeneration,
+    FormAssistResponse,
     AuditEventResponse,
     BacktestRequest,
     BacktestResponse,
@@ -107,6 +111,7 @@ from ashare_ai.api.schemas import (
     ExitMonitorSettingsRequest,
     HealthResponse,
     KlineResponse,
+    LiveMonitorResponse,
     LoginRequest,
     ManualExitAdviceRequest,
     MarketIndicesResponse,
@@ -172,10 +177,12 @@ from ashare_ai.api.schemas import (
     UserCreateRequest,
     UserResponse,
     UserUpdateRequest,
+    WatchlistBulkRequest,
+    WatchlistGroupRequest,
+    WatchlistParseRequest,
 )
 from ashare_ai.api.static_web import NativeSPAStaticFiles
 from ashare_ai.api.system_settings_unlock import issue_unlock, require_settings_unlock
-from ashare_ai.api.training_endpoints import router as training_router
 from ashare_ai.core import energy_saving
 from ashare_ai.core.config import get_settings
 from ashare_ai.core.hashing import sha256_bytes, stable_hash
@@ -196,6 +203,7 @@ from ashare_ai.market.service import (
     normalize_adjustment,
     reset_market_data_service,
 )
+from ashare_ai.monitoring.realtime import build_live_snapshot
 from ashare_ai.notifications.push import PushConfigurationError, PushDeviceService
 from ashare_ai.notifications.service import InvalidNotificationCursor, NotificationService
 from ashare_ai.observability.audit import AuditLogger
@@ -226,6 +234,8 @@ from ashare_ai.orchestration.trade_plan_queue import (
 )
 from ashare_ai.orchestration.worker_status import read_heartbeats
 from ashare_ai.portfolio.user_assets import UNSET_TOTAL_ASSETS, UserAssetService
+from ashare_ai.portfolio.user_assets import DEFAULT_MONITORING_POLICY
+from ashare_ai.portfolio.asset_contracts import parse_watchlist_text
 from ashare_ai.reports.chinese_summary import component_summary, symbol_summary
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import (
@@ -316,6 +326,12 @@ _market_session_calendar_cache_lock = Lock()
 # native client wake, web navigation) do not each re-warm the same symbols.
 _bootstrap_warm_at: dict[str, float] = {}
 _bootstrap_warm_guard = Lock()
+_LIVE_MONITOR_STREAM_LIMIT = 16
+_live_monitor_streams = 0
+_live_monitor_streams_lock = Lock()
+_NOTIFICATION_STREAM_LIMIT = 32
+_notification_streams = 0
+_notification_streams_lock = Lock()
 
 # Bound the number of symbols a single quote request may ask for; the market
 # service scans a full-market snapshot per request, so this prevents one
@@ -733,10 +749,12 @@ def _trade_plan_error(code: str, message: str, *, symbols: list[str] | None = No
 
 def _backtest_response(db: Session, row: BacktestRun) -> BacktestResponse:
     job = db.get(JobRun, row.run_id) if row.run_id else None
+    config = row.config if isinstance(row.config, dict) else {}
     return BacktestResponse.model_validate(
         {
             **{column.name: getattr(row, column.name) for column in row.__table__.columns},
             "error_message": job.error_message if job else None,
+            "mode": config.get("training_mode", "SNAPSHOT"),
         }
     )
 
@@ -858,6 +876,7 @@ def _research_run_response(db: Session, row: JobRun) -> ResearchRunResponse:
 @app.get("/api/v1/health", response_model=HealthResponse)
 def health(db: DbSession) -> HealthResponse:
     from ashare_ai.core.health import check_infrastructure_health
+    from ashare_ai.monitoring.health import public_health_payload
 
     database = "ok"
     try:
@@ -869,6 +888,7 @@ def health(db: DbSession) -> HealthResponse:
     infrastructure = check_infrastructure_health(_api_settings)
 
     # Always expose research-only status in health check
+    runtime_health = public_health_payload(_api_settings)
     return HealthResponse(
         status="ok" if database == "ok" else "degraded",
         version=__version__,
@@ -879,6 +899,9 @@ def health(db: DbSession) -> HealthResponse:
         execution_mode="RESEARCH_ONLY",
         quote_bridge=infrastructure.get("quote_bridge"),
         gateway=infrastructure.get("gateway"),
+        redis=runtime_health.get("redis"),
+        workers=runtime_health.get("workers"),
+        resources=runtime_health.get("resources"),
     )
 
 
@@ -1037,6 +1060,8 @@ def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
                 "profit_exit_monitor": True,
                 "stop_loss_monitor": True,
                 "buy_entry_monitor": True,
+                "live_position_monitor": True,
+                "mobile_monitor_stream": True,
                 "market_refresh_interval_setting": True,
                 "notifications": True,
                 "chat_context_metrics": True,
@@ -1050,6 +1075,15 @@ def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
                 "assets": "/api/v1/assets",
                 "exit_monitor_settings": "/api/v1/assets/exit-monitor",
                 "market_refresh_settings": "/api/v1/assets/market-refresh",
+                "monitoring_policy": "/api/v1/assets/monitoring-policy",
+                "watchlist_parse": "/api/v1/assets/watchlist/parse",
+                "watchlist_bulk": "/api/v1/assets/watchlist/bulk",
+                "watchlist_groups": "/api/v1/assets/watchlist/groups",
+                "ai_form_assist": "/api/v1/ai/form-assist",
+                "live_monitor": "/api/v1/monitor/live",
+                "live_monitor_stream": "/api/v1/monitor/stream",
+                "mobile_live_monitor": "/api/v1/mobile/monitor/live",
+                "mobile_live_monitor_stream": "/api/v1/mobile/monitor/stream",
                 "research_runs": "/api/v1/research/runs",
                 "research_run": "/api/v1/research/runs/{run_id}",
                 "research_settings": "/api/v1/research/settings",
@@ -1063,6 +1097,8 @@ def app_bootstrap(db: DbSession, context: Current) -> AppBootstrapResponse:
                 "buy_entry_monitors": "/api/v1/buy-entry-monitors",
                 "notifications": "/api/v1/notifications",
                 "notification_summary": "/api/v1/notifications/summary",
+                "notification_stream": "/api/v1/notifications/stream",
+                "mobile_notification_stream": "/api/v1/mobile/notifications/stream",
                 "security_resolve": "/api/v1/securities/resolve",
                 "chat_metrics": "/api/v1/ai/chat/metrics",
                 "ai_costs": "/api/v1/ai/costs",
@@ -1119,6 +1155,8 @@ def update_asset_state(
             and payload.market_refresh_interval_seconds is not None
             else None
         ),
+        watchlist_groups=[item.model_dump() for item in payload.watchlist_groups] if payload.watchlist_groups is not None else None,
+        monitoring_policy=payload.monitoring_policy.model_dump() if payload.monitoring_policy is not None else None,
     )
     removed = set(previous["watchlist"]) - set(payload.watchlist)
     if removed:
@@ -1132,6 +1170,339 @@ def update_asset_state(
             monitor.enabled = False
         db.commit()
     return AssetStateResponse.model_validate(state)
+
+
+def _normalize_watchlist_symbols(values: list[str]) -> list[str]:
+    import re
+    result: list[str] = []
+    for value in values:
+        symbol = value.strip().upper()
+        if not symbol:
+            continue
+        if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol) is None:
+            raise HTTPException(status_code=422, detail=f"invalid A-share symbol: {symbol}")
+        if symbol not in result:
+            result.append(symbol)
+    if len(result) > MAX_WATCHLIST_SYMBOLS:
+        raise HTTPException(status_code=422, detail="watchlist contains too many symbols")
+    return result
+
+
+@app.post("/api/v1/assets/watchlist/parse")
+def parse_watchlist(payload: WatchlistParseRequest, _: Current) -> dict[str, Any]:
+    try:
+        return parse_watchlist_text(payload.text)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.put("/api/v1/assets/watchlist/bulk", response_model=AssetStateResponse)
+def bulk_watchlist(payload: WatchlistBulkRequest, db: DbSession, context: Writer) -> AssetStateResponse:
+    service = UserAssetService(db)
+    previous = service.get(context.user.user_id)
+    incoming = _normalize_watchlist_symbols(payload.symbols)
+    groups = [dict(group) for group in previous.get("watchlist_groups", [])]
+    group = next((item for item in groups if item.get("group_id") == payload.group_id), None)
+    if group is None:
+        group = {"group_id": payload.group_id, "name": payload.group_id, "sort_order": len(groups), "enabled": True, "symbols": [], "monitoring_policy": {}}
+        groups.append(group)
+    current = _normalize_watchlist_symbols(list(group.get("symbols", [])))
+    if payload.operation == "REPLACE":
+        current = incoming
+    elif payload.operation == "ADD":
+        current = _normalize_watchlist_symbols(current + incoming)
+    else:
+        current = [symbol for symbol in current if symbol not in set(incoming)]
+    group["symbols"] = current
+    flat = list(dict.fromkeys(symbol for item in groups for symbol in item.get("symbols", [])))
+    state = service.save(context.user.user_id, flat, previous["positions"], UNSET_TOTAL_ASSETS,
+        bool(previous.get("exit_monitor_enabled", False)), previous.get("default_profit_trigger"),
+        bool(previous.get("stop_loss_monitor_enabled", True)), bool(previous.get("buy_monitor_enabled", True)),
+        int(previous.get("market_refresh_interval_seconds") or 5), watchlist_groups=groups,
+        monitoring_policy=previous.get("monitoring_policy") or DEFAULT_MONITORING_POLICY)
+    return AssetStateResponse.model_validate(state)
+
+
+@app.post("/api/v1/assets/watchlist/groups", response_model=AssetStateResponse)
+def create_watchlist_group(payload: WatchlistGroupRequest, db: DbSession, context: Writer) -> AssetStateResponse:
+    service = UserAssetService(db); previous = service.get(context.user.user_id)
+    group_id = uuid4().hex
+    groups = [dict(item) for item in previous.get("watchlist_groups", [])]
+    groups.append({**payload.model_dump(mode="json"), "group_id": group_id})
+    flat = list(dict.fromkeys(symbol for group in groups for symbol in group.get("symbols", [])))
+    state = service.save(context.user.user_id, flat, previous["positions"], UNSET_TOTAL_ASSETS,
+        bool(previous.get("exit_monitor_enabled", False)), previous.get("default_profit_trigger"),
+        bool(previous.get("stop_loss_monitor_enabled", True)), bool(previous.get("buy_monitor_enabled", True)),
+        int(previous.get("market_refresh_interval_seconds") or 5), watchlist_groups=groups,
+        monitoring_policy=previous.get("monitoring_policy") or DEFAULT_MONITORING_POLICY)
+    return AssetStateResponse.model_validate(state)
+
+
+@app.patch("/api/v1/assets/watchlist/groups/{group_id}", response_model=AssetStateResponse)
+def update_watchlist_group(group_id: str, payload: WatchlistGroupRequest, db: DbSession, context: Writer) -> AssetStateResponse:
+    service = UserAssetService(db); previous = service.get(context.user.user_id)
+    groups = [dict(item) for item in previous.get("watchlist_groups", [])]
+    if not any(item.get("group_id") == group_id for item in groups):
+        raise HTTPException(status_code=404, detail="watchlist group not found")
+    groups = [{**item, **payload.model_dump(mode="json")} if item.get("group_id") == group_id else item for item in groups]
+    flat = list(dict.fromkeys(symbol for group in groups for symbol in group.get("symbols", [])))
+    state = service.save(context.user.user_id, flat, previous["positions"], UNSET_TOTAL_ASSETS,
+        bool(previous.get("exit_monitor_enabled", False)), previous.get("default_profit_trigger"),
+        bool(previous.get("stop_loss_monitor_enabled", True)), bool(previous.get("buy_monitor_enabled", True)),
+        int(previous.get("market_refresh_interval_seconds") or 5), watchlist_groups=groups,
+        monitoring_policy=previous.get("monitoring_policy") or DEFAULT_MONITORING_POLICY)
+    return AssetStateResponse.model_validate(state)
+
+
+@app.delete("/api/v1/assets/watchlist/groups/{group_id}", response_model=AssetStateResponse)
+def delete_watchlist_group(group_id: str, db: DbSession, context: Writer) -> AssetStateResponse:
+    service = UserAssetService(db); previous = service.get(context.user.user_id)
+    groups = [dict(item) for item in previous.get("watchlist_groups", []) if item.get("group_id") != group_id]
+    if not groups:
+        groups = [{"group_id": "default", "name": "默认分组", "sort_order": 0, "enabled": True, "symbols": [], "monitoring_policy": {}}]
+    flat = list(dict.fromkeys(symbol for group in groups for symbol in group.get("symbols", [])))
+    state = service.save(context.user.user_id, flat, previous["positions"], UNSET_TOTAL_ASSETS,
+        bool(previous.get("exit_monitor_enabled", False)), previous.get("default_profit_trigger"),
+        bool(previous.get("stop_loss_monitor_enabled", True)), bool(previous.get("buy_monitor_enabled", True)),
+        int(previous.get("market_refresh_interval_seconds") or 5), watchlist_groups=groups,
+        monitoring_policy=previous.get("monitoring_policy") or DEFAULT_MONITORING_POLICY)
+    return AssetStateResponse.model_validate(state)
+
+
+@app.post("/api/v1/ai/form-assist", response_model=FormAssistResponse)
+async def ai_form_assist(payload: FormAssistRequest, db: DbSession, context: Current) -> FormAssistResponse:
+    """Build a reviewable, deterministic draft from common human-entered forms."""
+    import re
+
+    # The assistant is deliberately allow-listed per form.  This prevents a
+    # provider from smuggling credentials or arbitrary keys into a draft that
+    # may later be submitted to an asset/settings endpoint.
+    allowed_fields: dict[str, set[str]] = {
+        "POSITION": set(PaperPosition.model_fields) | {"positions"},
+        "WATCHLIST": {"symbols", "group_id"},
+        "TOTAL_ASSETS": {"total_assets"},
+        "RESEARCH": {"trading_date", "scope", "symbols", "total_budget", "per_symbol_budget", "max_stock_price", "supreme_mode"},
+        "MONITOR": set(MonitoringPolicyRequest.model_fields),
+        "STRATEGY": {"strategy_name", "name", "symbols", "parameters", "constraints", "config"},
+    }
+
+    def _sanitize_generated(value: dict[str, Any], form_type: str) -> dict[str, Any]:
+        secret_value = re.compile(
+            r"(?i)(api[_ -]?key|password|secret|token|credential)\s*[:=]\s*([^\s,;]+)"
+        )
+
+        def scrub_text(value: str) -> str:
+            return secret_value.sub(r"\1=[REDACTED]", value)
+
+        def scrub(item: Any) -> Any:
+            if isinstance(item, dict):
+                return {
+                    key: scrub(child) for key, child in item.items()
+                    if not re.search(r"(?:api[_-]?key|password|secret|token|credential)", str(key), re.I)
+                }
+            if isinstance(item, list):
+                return [scrub(child) for child in item]
+            if isinstance(item, str):
+                return scrub_text(item)
+            return item
+
+        result = {key: scrub(item) for key, item in value.items() if key in allowed_fields[form_type]}
+        # Secret-looking keys are rejected even if a future form allow-list is
+        # accidentally broadened.
+        return {
+            key: item for key, item in result.items()
+            if not re.search(r"(?:api[_-]?key|password|secret|token|credential)", key, re.I)
+        }
+
+    def _validated_draft(value: dict[str, Any], form_type: str) -> tuple[dict[str, Any], list[str]]:
+        clean = _sanitize_generated(value, form_type)
+        rejected: list[str] = [key for key in value if key not in clean]
+        if form_type == "POSITION":
+            rows = clean.get("positions", clean.get("position", []))
+            if isinstance(rows, dict):
+                rows = [rows]
+            valid_rows: list[dict[str, Any]] = []
+            if isinstance(rows, list):
+                for row in rows:
+                    try:
+                        valid_rows.append(PaperPosition.model_validate(row).model_dump(mode="json"))
+                    except Exception:
+                        rejected.append("positions")
+            clean = {**clean, "positions": valid_rows}
+            clean.pop("position", None)
+        elif form_type == "WATCHLIST" and "symbols" in clean:
+            try:
+                clean["symbols"] = _normalize_watchlist_symbols(list(clean["symbols"]))
+            except (TypeError, ValueError):
+                rejected.append("symbols")
+                clean.pop("symbols", None)
+        elif form_type == "TOTAL_ASSETS" and "total_assets" in clean:
+            try:
+                amount = float(clean["total_assets"])
+                if amount < 0:
+                    raise ValueError
+                clean["total_assets"] = amount
+            except (TypeError, ValueError):
+                rejected.append("total_assets")
+                clean.pop("total_assets", None)
+        elif form_type == "MONITOR":
+            try:
+                clean = MonitoringPolicyRequest.model_validate(clean).model_dump(mode="json", exclude_unset=True)
+            except Exception:
+                rejected.append("monitoring_policy")
+                clean = {}
+        elif form_type == "RESEARCH":
+            if "trading_date" in clean:
+                try:
+                    date.fromisoformat(str(clean["trading_date"]))
+                except ValueError:
+                    rejected.append("trading_date")
+                    clean.pop("trading_date", None)
+            if "scope" in clean and clean["scope"] not in {"MARKET", "WATCHLIST", "CUSTOM"}:
+                rejected.append("scope")
+                clean.pop("scope", None)
+            if "symbols" in clean:
+                try:
+                    clean["symbols"] = _normalize_watchlist_symbols(list(clean["symbols"]))
+                except (TypeError, ValueError):
+                    rejected.append("symbols")
+                    clean.pop("symbols", None)
+            for key in ("total_budget", "per_symbol_budget", "max_stock_price"):
+                if key in clean:
+                    try:
+                        amount = float(clean[key])
+                        if not (0 < amount < float("inf")):
+                            raise ValueError
+                        clean[key] = amount
+                    except (TypeError, ValueError):
+                        rejected.append(key)
+                        clean.pop(key, None)
+            if "supreme_mode" in clean and not isinstance(clean["supreme_mode"], bool):
+                rejected.append("supreme_mode")
+                clean.pop("supreme_mode", None)
+        return clean, rejected
+
+    text_value = payload.text
+    warnings: list[str] = []
+    fields: list[dict[str, Any]] = []
+    draft, initial_rejected = _validated_draft(dict(payload.draft), payload.form_type)
+    if initial_rejected:
+        warnings.append("当前草稿中存在未通过校验的字段，已忽略")
+    if payload.form_type == "WATCHLIST":
+        symbols = re.findall(r"\d{6}(?:\.(?:SH|SZ|BJ))?", text_value.upper())
+        normalized = [item if "." in item else (f"{item}.SH" if item.startswith(("5", "6", "688")) else f"{item}.SZ") for item in symbols]
+        draft["symbols"] = _normalize_watchlist_symbols(list(dict.fromkeys(normalized)))
+        fields.append({"field": "symbols", "value": draft["symbols"], "evidence": text_value})
+    elif payload.form_type == "POSITION":
+        rows = []
+        for line in text_value.splitlines():
+            match = re.search(r"(\d{6}(?:\.(?:SH|SZ|BJ))?)\D+(\d+)\D+(\d+(?:\.\d+)?)", line.upper())
+            if match:
+                code = match.group(1); code = code if "." in code else (f"{code}.SH" if code.startswith(("5", "6", "688")) else f"{code}.SZ")
+                rows.append({"symbol": code, "name": "", "quantity": int(match.group(2)), "cost": float(match.group(3))})
+        draft["positions"] = rows
+        if not rows: warnings.append("未识别到完整的证券代码、数量和成本，请补充后再确认")
+        fields.append({"field": "positions", "value": rows, "evidence": text_value})
+    elif payload.form_type == "TOTAL_ASSETS":
+        match = re.search(r"\d+(?:\.\d+)?", text_value.replace(",", ""))
+        if match: draft["total_assets"] = float(match.group(0)); fields.append({"field": "total_assets", "value": draft["total_assets"], "evidence": match.group(0)})
+        else: warnings.append("未识别到总资产金额")
+    else:
+        warnings.append("该表单当前提供结构化草稿建议，请确认所有字段")
+    source = "DETERMINISTIC_ASSIST"
+    runtime = ModelConfigurationService().resolve(db)
+    attachment_parts: list[dict[str, Any]] = []
+    if payload.attachment_ids:
+        attachment_service = AttachmentService(db)
+        for attachment_id in dict.fromkeys(payload.attachment_ids):
+            row = attachment_service.get_owned(context.user.user_id, attachment_id)
+            if row is None:
+                warnings.append(f"附件不存在或不属于当前用户: {attachment_id}")
+                continue
+            try:
+                image_url = attachment_service.model_data_url(row)
+            except AttachmentError:
+                image_url = None
+            if image_url:
+                attachment_parts.append({"type": "input_image", "image_url": image_url})
+            else:
+                warnings.append(f"附件已过期或无法读取: {attachment_id}")
+    if runtime is not None and runtime.enabled and (payload.text.strip() or attachment_parts):
+        try:
+            client = ModelConfigurationService().client_for(
+                runtime,
+                purpose="form_assist",
+                max_retries=0,
+                timeout_seconds=min(runtime.timeout_seconds, 20),
+            )
+            user_content: list[dict[str, Any]] = [{"type": "input_text", "text": f"表单类型: {payload.form_type}\n用户输入:\n{payload.text}\n当前草稿:\n{json.dumps(payload.draft, ensure_ascii=False)}"}]
+            user_content.extend(attachment_parts)
+            generation = await client.generate_structured(
+                schema=FormAssistGeneration,
+                messages=(
+                    {"role": "system", "content": "你是表单草稿助手。只从用户输入提取事实，不猜测缺失金额或价格。API Key、密码等秘密字段永远不要输出。"},
+                    {"role": "user", "content": user_content},
+                ), idempotency_key=stable_hash({"kind": "form-assist", "user": context.user.user_id, "form": payload.form_type, "text": payload.text}),
+            )
+            generated = FormAssistGeneration.model_validate(generation.output)
+            generated_draft, rejected = _validated_draft(generated.draft, payload.form_type)
+            draft.update(generated_draft)
+            if rejected:
+                warnings.append("模型返回了无法校验或不允许的字段，已忽略")
+            allowed = allowed_fields[payload.form_type]
+            safe_fields: list[dict[str, Any]] = []
+            for item in generated.fields or fields:
+                if not isinstance(item, dict):
+                    continue
+                field_name = item.get("field")
+                if field_name not in generated_draft:
+                    continue
+                evidence = item.get("evidence", "")
+                if isinstance(evidence, str):
+                    evidence = secret_value.sub(r"\1=[REDACTED]", evidence)[:2000]
+                else:
+                    evidence = ""
+                safe_fields.append({"field": field_name, "value": generated_draft[field_name], "evidence": evidence})
+            fields = safe_fields or fields
+            warnings.extend(item for item in generated.warnings if isinstance(item, str))
+            source = "AI_ASSISTED"
+            confidence = generated.confidence
+        except Exception:
+            confidence = 0.85 if fields and not warnings else 0.35
+    else:
+        confidence = 0.85 if fields and not warnings else 0.35
+    # Re-validate deterministic and model output together before returning the
+    # reviewable draft.  No route writes this object to the database.
+    draft, rejected = _validated_draft(draft, payload.form_type)
+    if rejected:
+        warnings.append("草稿中存在未通过校验的字段，已移除")
+    required_by_form = {
+        "POSITION": ["positions"],
+        "WATCHLIST": ["symbols"],
+        "TOTAL_ASSETS": ["total_assets"],
+        "RESEARCH": ["trading_date", "scope"],
+        "MONITOR": [],
+        "STRATEGY": ["parameters"],
+    }
+    missing_fields = [field for field in required_by_form[payload.form_type] if not draft.get(field)]
+    # Evidence is user-visible audit material and may contain pasted secrets
+    # even when the generated draft itself was correctly allow-listed.
+    fields = [
+        {
+            **item,
+            "value": draft[item["field"]],
+            "evidence": re.sub(
+                r"(?i)(api[_ -]?key|password|secret|token|credential)\s*[:=]\s*([^\s,;]+)",
+                r"\1=[REDACTED]",
+                str(item.get("evidence") or "")
+            )[:2000],
+        }
+        for item in fields
+        if isinstance(item, dict) and item.get("field") in draft
+    ]
+    return FormAssistResponse(form_type=payload.form_type, draft=draft, fields=fields,
+        warnings=list(dict.fromkeys(warnings)), missing_fields=missing_fields,
+        confidence=confidence, source=source)
 
 
 @app.put("/api/v1/assets/exit-monitor", response_model=AssetStateResponse)
@@ -1256,6 +1627,20 @@ def update_market_refresh_settings(
         if winner is not None and winner.resource_type == "MARKET_REFRESH_SETTINGS":
             return AssetStateResponse.model_validate(service.get(context.user.user_id))
         raise HTTPException(status_code=409, detail="market refresh update conflicted") from exc
+    return AssetStateResponse.model_validate(state)
+
+
+@app.put("/api/v1/assets/monitoring-policy", response_model=AssetStateResponse)
+def update_monitoring_policy(payload: MonitoringPolicyRequest, db: DbSession, context: Writer) -> AssetStateResponse:
+    service = UserAssetService(db)
+    previous = service.get(context.user.user_id)
+    state = service.save(
+        context.user.user_id, previous["watchlist"], previous["positions"], UNSET_TOTAL_ASSETS,
+        bool(previous.get("exit_monitor_enabled", False)), previous.get("default_profit_trigger"),
+        bool(previous.get("stop_loss_monitor_enabled", True)), bool(previous.get("buy_monitor_enabled", True)),
+        int(previous.get("market_refresh_interval_seconds") or 5),
+        watchlist_groups=previous.get("watchlist_groups"), monitoring_policy=payload.model_dump(),
+    )
     return AssetStateResponse.model_validate(state)
 
 
@@ -1524,6 +1909,87 @@ def notification_list(
     return NotificationListResponse(
         items=[NotificationResponse.model_validate(item) for item in items],
         next_cursor=next_cursor,
+    )
+
+
+@app.get(
+    "/api/v1/notifications/stream",
+    response_class=StreamingResponse,
+    summary="Stream the current user's notification edges",
+)
+@app.get("/api/v1/mobile/notifications/stream", response_class=StreamingResponse)
+async def notification_stream(
+    context: Current,
+    interval: int = Query(default=2, ge=1, le=30),
+    since: datetime | None = Query(default=None),
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+) -> StreamingResponse:
+    """Deliver durable notification edges with bounded polling and heartbeats."""
+
+    global _notification_streams
+    with _notification_streams_lock:
+        if _notification_streams >= _NOTIFICATION_STREAM_LIMIT:
+            raise HTTPException(status_code=503, detail="notification stream capacity reached")
+        _notification_streams += 1
+    user_id = context.user.user_id
+
+    async def events() -> AsyncIterator[str]:
+        global _notification_streams
+        cursor = since.astimezone(UTC) if since is not None else None
+        cursor_id: str | None = None
+        if last_event_id and "|" in last_event_id:
+            raw_time, raw_id = last_event_id.split("|", 1)
+            with suppress(ValueError):
+                cursor = datetime.fromisoformat(raw_time).astimezone(UTC)
+                cursor_id = raw_id or None
+        try:
+            while True:
+                try:
+                    with SessionLocal() as session:
+                        rows = NotificationService(session).list_after(
+                            user_id, after=cursor, after_id=cursor_id, limit=100
+                        )
+                        summary = NotificationService(session).summary(user_id)
+                    for row in rows:
+                        cursor = max(cursor, row.created_at.astimezone(UTC)) if cursor else row.created_at.astimezone(UTC)
+                        cursor_id = row.notification_id
+                        yield _monitor_sse_event(
+                            "NOTIFICATION",
+                            NotificationResponse.model_validate(row).model_dump(mode="json"),
+                            event_id=f"{row.created_at.astimezone(UTC).isoformat()}|{row.notification_id}",
+                        )
+                    yield _monitor_sse_event(
+                        "STATUS",
+                        {
+                            "state": "OK",
+                            "generated_at": datetime.now(UTC).isoformat(),
+                            "unread_count": summary["unread_count"],
+                            "high_risk_unread_count": summary["high_risk_unread_count"],
+                            "next_poll_seconds": interval,
+                        },
+                    )
+                    yield ": heartbeat\n\n"
+                    await asyncio.sleep(interval)
+                except asyncio.CancelledError:
+                    return
+                except Exception:
+                    logger.warning("notification stream iteration failed", exc_info=True)
+                    yield _monitor_sse_event(
+                        "STATUS", {"state": "DEGRADED", "next_poll_seconds": interval}
+                    )
+                    await asyncio.sleep(interval)
+        finally:
+            with _notification_streams_lock:
+                _notification_streams = max(0, _notification_streams - 1)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
@@ -2508,6 +2974,8 @@ def _model_draft(payload: ModelSettingsRequest) -> ModelSettingsDraft:
     values["model_profiles"] = tuple(
         ModelProfileDraft(**item.model_dump()) for item in payload.model_profiles
     )
+    values["providers"] = None if payload.providers is None else tuple(dict(item) for item in payload.providers)
+    values["fallback_provider_ids"] = tuple(payload.fallback_provider_ids)
     return ModelSettingsDraft(**values)
 
 
@@ -2534,6 +3002,10 @@ def _model_settings_response(db: Session) -> ModelSettingsResponse:
             status_message="尚未配置模型 API",
             structured_output_supported=False,
             streaming_supported=False,
+            providers=[],
+            primary_provider_id=None,
+            fallback_provider_ids=[],
+            routing={},
         )
     health = service.status(db)
     return ModelSettingsResponse(
@@ -2559,6 +3031,10 @@ def _model_settings_response(db: Session) -> ModelSettingsResponse:
         checked_at=(health["checked_at"] if isinstance(health["checked_at"], datetime) else None),
         structured_output_supported=bool(health.get("structured_output_supported")),
         streaming_supported=bool(health.get("streaming_supported")),
+        providers=[dict(item) for item in runtime.providers],
+        primary_provider_id=runtime.primary_provider_id,
+        fallback_provider_ids=list(runtime.fallback_provider_ids),
+        routing=dict(runtime.routing),
     )
 
 
@@ -2572,7 +3048,10 @@ _SYSTEM_QUEUE_KEYS = {
         "ashare:system2-diagnostic:pending",
         "ashare:system2-diagnostic:processing",
     ),
-    "jev_training": ("ashare:jev-training:pending", "ashare:jev-training:processing"),
+    "strategy_evolution": (
+        "ashare:strategy-evolution:pending",
+        "ashare:strategy-evolution:processing",
+    ),
 }
 
 
@@ -4255,9 +4734,20 @@ def submit_backtest(
             raise HTTPException(status_code=409, detail="idempotent resource is unavailable")
         response.status_code = status.HTTP_200_OK
         return _backtest_response(db, existing_backtest)
-    if request.start_date > request.end_date:
-        raise HTTPException(status_code=422, detail="start_date must be <= end_date")
-    if len(request.snapshot_ids) != 1:
+    if request.mode == "WATCHLIST_HISTORICAL":
+        assets = UserAssetService(db).get(context.user.user_id)
+        owned = {str(item).upper() for item in assets.get("watchlist", [])}
+        requested_symbols = {str(item).strip().upper() for item in request.config.get("symbols", [])}
+        if not requested_symbols or not requested_symbols <= owned:
+            raise HTTPException(status_code=422, detail="training symbols must belong to your watchlist")
+        requested_config = {
+            "training_mode": request.mode,
+            **dict(request.config),
+            "symbols": sorted(requested_symbols),
+        }
+        manifests = []
+        file_hashes: dict[str, str] = {}
+    elif len(request.snapshot_ids) != 1:
         raise HTTPException(
             status_code=422,
             detail="select exactly one cumulative backtest snapshot",
@@ -4274,14 +4764,18 @@ def submit_backtest(
     )
     if context.user.role != "ADMIN":
         manifest_statement = manifest_statement.where(JobRun.user_id == context.user.user_id)
-    manifests = db.scalars(manifest_statement).all()
+    manifests = db.scalars(manifest_statement).all() if request.mode == "SNAPSHOT" else []
     if len(manifests) != len(request.snapshot_ids):
         raise HTTPException(status_code=422, detail="committed snapshot is unavailable")
-    selected_manifest = manifests[0]
+    selected_manifest = manifests[0] if manifests else None
     try:
-        calendar_start = date.fromisoformat(str(selected_manifest.details["calendar_start"]))
-        calendar_end = date.fromisoformat(str(selected_manifest.details["calendar_end"]))
-        executable_signals = int(selected_manifest.details["executable_signal_count"])
+        if request.mode == "WATCHLIST_HISTORICAL":
+            calendar_start, calendar_end, executable_signals = request.start_date, request.end_date, 1
+        else:
+            assert selected_manifest is not None
+            calendar_start = date.fromisoformat(str(selected_manifest.details["calendar_start"]))
+            calendar_end = date.fromisoformat(str(selected_manifest.details["calendar_end"]))
+            executable_signals = int(selected_manifest.details["executable_signal_count"])
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(status_code=422, detail="snapshot lacks calendar metadata") from exc
     if (calendar_start - request.start_date).days > 7 or (request.end_date - calendar_end).days > 7:
@@ -4297,23 +4791,41 @@ def submit_backtest(
             status_code=422,
             detail="snapshot has no PIT signal with a following execution session",
         )
-    try:
-        file_hashes = {
-            item.snapshot_id: str(item.details["parquet_file_sha256"]) for item in manifests
-        }
-    except KeyError as exc:
-        raise HTTPException(status_code=422, detail="snapshot lacks a verified file hash") from exc
-    requested_config = dict(request.config)
+    if request.mode == "SNAPSHOT":
+        try:
+            file_hashes = {
+                item.snapshot_id: str(item.details["parquet_file_sha256"]) for item in manifests
+            }
+        except KeyError as exc:
+            raise HTTPException(status_code=422, detail="snapshot lacks a verified file hash") from exc
+        requested_config = dict(request.config)
     runtime_settings = get_effective_settings()
     system_configuration = SystemConfigurationService().resolve(db).manifest_reference()
     executor_config = {
         "artifact_root": str(runtime_settings.lake_root.parent / "artifacts"),
         "snapshot_file_hashes": file_hashes,
+        "training_mode": request.mode,
         "requested_start_date": request.start_date.isoformat(),
         "requested_end_date": request.end_date.isoformat(),
         "initial_capital": requested_config.get("initial_capital", 1_000_000),
         "benchmark": requested_config.get("benchmark", "000300.SH"),
     }
+    if request.mode == "WATCHLIST_HISTORICAL":
+        # Preserve only the schema-validated collector inputs on the queued
+        # job.  The worker uses these to collect the user's symbols before it
+        # filters executor-only fields; no arbitrary request keys cross the
+        # API boundary.
+        for key in (
+            "scope",
+            "symbols",
+            "training_sessions",
+            "history_sessions",
+            "entry_discounts",
+            "use_real_watchlist_quotes",
+            "monitor_buy_entry_alerts",
+        ):
+            if key in requested_config:
+                executor_config[key] = requested_config[key]
     input_hash = stable_hash(
         {"user_id": context.user.user_id, "request": request, "executor": executor_config}
     )
@@ -4570,6 +5082,141 @@ def monitor_signals(
     return MonitorSignalsResponse(items=items, generated_at=now, decision_at=selected_decision_at)
 
 
+def _monitor_sse_event(
+    event: str, payload: dict[str, Any], *, event_id: str | None = None
+) -> str:
+    """Encode one compact SSE frame for browsers and native mobile clients."""
+
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+    prefix = f"id: {event_id}\n" if event_id else ""
+    return f"{prefix}event: {event}\ndata: {body}\n\n"
+
+
+@app.get(
+    "/api/v1/monitor/live",
+    response_model=LiveMonitorResponse,
+    summary="Return the current user's live position monitor snapshot",
+)
+@app.get(
+    "/api/v1/mobile/monitor/live",
+    response_model=LiveMonitorResponse,
+)
+def live_monitor(
+    context: Current,
+    refresh: bool = False,
+    include_watchlist: bool = False,
+) -> LiveMonitorResponse:
+    """Mobile-safe bounded snapshot; live values stay separate from research snapshots."""
+
+    payload = build_live_snapshot(
+        context.user.user_id,
+        refresh=refresh,
+        include_watchlist=include_watchlist,
+    )
+    return LiveMonitorResponse.model_validate(payload)
+
+
+@app.get(
+    "/api/v1/monitor/stream",
+    response_class=StreamingResponse,
+    summary="Stream live quote and risk events for the current user",
+)
+@app.get(
+    "/api/v1/mobile/monitor/stream",
+    response_class=StreamingResponse,
+)
+async def live_monitor_stream(
+    context: Current,
+    interval: int = Query(default=5, ge=5, le=120),
+    refresh: bool = False,
+    include_watchlist: bool = False,
+) -> StreamingResponse:
+    """Stream bounded monitor events; reconnecting clients can fall back to REST."""
+
+    global _live_monitor_streams
+    with _live_monitor_streams_lock:
+        if _live_monitor_streams >= _LIVE_MONITOR_STREAM_LIMIT:
+            raise HTTPException(status_code=503, detail="live monitor stream capacity reached")
+        _live_monitor_streams += 1
+    user_id = context.user.user_id
+
+    async def events() -> AsyncIterator[str]:
+        global _live_monitor_streams
+        force_refresh = refresh
+        previous_risks: dict[str, str] = {}
+        try:
+            while True:
+                try:
+                    snapshot = await asyncio.to_thread(
+                        build_live_snapshot,
+                        user_id,
+                        refresh=force_refresh,
+                        include_watchlist=include_watchlist,
+                    )
+                    force_refresh = False
+                    yield _monitor_sse_event(
+                        "STATUS",
+                        {
+                            "generated_at": snapshot["generated_at"],
+                            "decision_at": snapshot["decision_at"],
+                            "session": snapshot["session"],
+                            "stale": snapshot["stale"],
+                            "market_error": snapshot["market_error"],
+                            "next_poll_seconds": interval,
+                        },
+                    )
+                    for quote in snapshot.get("watchlist_quotes", []):
+                        yield _monitor_sse_event("QUOTE", quote)
+                    current_risks: dict[str, str] = {}
+                    for position in snapshot.get("positions", []):
+                        symbol = str(position.get("symbol") or "")
+                        state = str(position.get("risk_state") or "NORMAL")
+                        current_risks[symbol] = state
+                        yield _monitor_sse_event("QUOTE", position)
+                        # RISK and SIGNAL are edge events; QUOTE carries the current
+                        # state on every tick so a mobile client never needs to
+                        # deduplicate repeated alerts itself.
+                        if previous_risks.get(symbol) != state:
+                            yield _monitor_sse_event("RISK", position)
+                            if state != "NORMAL":
+                                yield _monitor_sse_event(
+                                    "SIGNAL",
+                                    {
+                                        "symbol": symbol,
+                                        "signal_type": state,
+                                        "severity": position.get("risk_level", "WARNING"),
+                                        "evidence": position.get("evidence", {}),
+                                        "available_at": position.get("available_at"),
+                                        "decision_at": position.get("decision_at"),
+                                    },
+                                )
+                    previous_risks = current_risks
+                    yield ": heartbeat\n\n"
+                    await asyncio.sleep(interval)
+                except asyncio.CancelledError:
+                    return
+                except Exception:
+                    logger.warning("live monitor stream iteration failed", exc_info=True)
+                    yield _monitor_sse_event(
+                        "STATUS",
+                        {"state": "DEGRADED", "next_poll_seconds": interval},
+                    )
+                    await asyncio.sleep(interval)
+        finally:
+            with _live_monitor_streams_lock:
+                _live_monitor_streams = max(0, _live_monitor_streams - 1)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.get("/api/v1/market/quotes", response_model=list[QuoteResponse])
 def market_quotes(symbols: str, _: Current, refresh: bool = False) -> list[QuoteResponse]:
     requested = [item.strip() for item in symbols.split(",") if item.strip()]
@@ -4690,7 +5337,5 @@ _mount_native_web()
 
 # Include decision mode routers
 app.include_router(decision_router)
-app.include_router(model_management_router)
-app.include_router(training_router)
 app.include_router(search_router)
 app.include_router(strategy_router)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Literal
@@ -18,6 +18,7 @@ from ashare_ai.agents.openai_compatible import (
     OpenAICompatibleError,
     OpenAICompatibleStructuredLLMClient,
 )
+from ashare_ai.agents.provider_failover import ProviderClient, ProviderFailoverStructuredLLMClient
 from ashare_ai.core.config import Settings, get_settings
 from ashare_ai.core.hashing import stable_hash
 from ashare_ai.storage.models import (
@@ -106,6 +107,10 @@ class ModelSettingsDraft:
     model_profiles: tuple[ModelProfileDraft, ...] = ()
     timeout_seconds: float = 90.0
     enabled: bool = True
+    providers: tuple[dict[str, Any], ...] | None = None
+    primary_provider_id: str | None = None
+    fallback_provider_ids: tuple[str, ...] = ()
+    routing: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -122,10 +127,15 @@ class ModelRuntimeConfiguration:
     model_profiles: tuple[ModelRuntimeProfile, ...]
     timeout_seconds: float
     enabled: bool
+    providers: tuple[dict[str, Any], ...] = ()
+    primary_provider_id: str | None = None
+    fallback_provider_ids: tuple[str, ...] = ()
+    routing: dict[str, str] = field(default_factory=dict)
+    encrypted_provider_keys: dict[str, str] = field(default_factory=dict)
 
     def model_for(self, purpose: str = "research") -> tuple[str, str]:
-        del purpose
-        return self.research_model, self.research_reasoning_effort
+        key = _purpose_alias(purpose)
+        return self.routing.get(key, self.research_model), self.research_reasoning_effort
 
     def profile_for(self, model: str) -> ModelRuntimeProfile:
         for profile in self.model_profiles:
@@ -145,6 +155,10 @@ class ModelRuntimeConfiguration:
             "model_profiles": [profile.public_dict() for profile in self.model_profiles],
             "timeout_seconds": self.timeout_seconds,
             "enabled": self.enabled,
+            "providers": list(self.providers),
+            "primary_provider_id": self.primary_provider_id,
+            "fallback_provider_ids": list(self.fallback_provider_ids),
+            "routing": dict(self.routing),
         }
 
 
@@ -246,6 +260,33 @@ class ModelConfigurationService:
             draft.model_profiles,
             models=(draft.research_model.strip(),),
         )
+        provider_items = tuple(draft.providers) if draft.providers is not None else (current.providers if current else ())
+        for provider in provider_items:
+            if not isinstance(provider, dict):
+                raise ModelSettingsError("供应商配置必须是对象")
+            _validate_provider_metadata(provider)
+        primary_provider_id = draft.primary_provider_id if draft.providers is not None else (draft.primary_provider_id or (current.primary_provider_id if current else None))
+        fallback_provider_ids = tuple(draft.fallback_provider_ids) if draft.providers is not None else (tuple(draft.fallback_provider_ids) or (current.fallback_provider_ids if current else ()))
+        routing = dict(draft.routing) if draft.providers is not None else (dict(draft.routing) or (dict(current.routing) if current else {}))
+        provider_ids = [str(item.get("provider_id") or item.get("id") or "").strip() for item in provider_items]
+        if any(not provider_id for provider_id in provider_ids) or len(set(provider_ids)) != len(provider_ids):
+            raise ModelSettingsError("供应商 ID 必须存在且唯一")
+        if primary_provider_id and primary_provider_id not in provider_ids:
+            raise ModelSettingsError("主供应商必须属于当前供应商列表")
+        if any(provider_id not in provider_ids for provider_id in fallback_provider_ids):
+            raise ModelSettingsError("备用供应商必须属于当前供应商列表")
+        public_provider_hash = [
+            {
+                key: value
+                for key, value in _public_provider_dict(dict(item)).items()
+            }
+            | {
+                "api_key_configured": bool(item.get("api_key") or item.get("api_key_configured")),
+                "api_key_sha256": hashlib.sha256(str(item.get("api_key")).encode()).hexdigest()
+                if item.get("api_key") else None,
+            }
+            for item in provider_items
+        ]
         config_hash = _config_hash(
             base_url=base_url,
             api_key=api_key,
@@ -254,6 +295,10 @@ class ModelConfigurationService:
             model_profiles=[profile.public_dict() for profile in profiles],
             timeout_seconds=draft.timeout_seconds,
             enabled=draft.enabled,
+            providers=public_provider_hash,
+            primary_provider_id=primary_provider_id,
+            fallback_provider_ids=list(fallback_provider_ids),
+            routing=routing,
         )
         row = session.scalar(
             select(ModelConfigurationVersion).where(
@@ -263,6 +308,24 @@ class ModelConfigurationService:
         now = datetime.now(UTC)
         if row is None:
             fernet, key_id = self._cipher()
+            provider_keys: dict[str, str] = {}
+            public_providers: list[dict[str, Any]] = []
+            previous_provider_keys = dict(current.encrypted_provider_keys) if current else {}
+            for item in provider_items:
+                provider = _public_provider_dict(dict(item))
+                provider_id = str(provider.get("provider_id") or provider.get("id") or "").strip()
+                if not provider_id:
+                    raise ModelSettingsError("provider_id is required")
+                secret = item.get("api_key")
+                if secret:
+                    provider_keys[provider_id] = fernet.encrypt(str(secret).encode()).decode()
+                elif provider_id in previous_provider_keys:
+                    # Keep an existing encrypted secret when the settings form
+                    # intentionally leaves the password field blank.
+                    provider_keys[provider_id] = previous_provider_keys[provider_id]
+                provider["provider_id"] = provider_id
+                provider["api_key_configured"] = bool(secret or provider.get("api_key_configured") or provider_id in provider_keys)
+                public_providers.append(provider)
             version = (
                 int(session.scalar(select(func.max(ModelConfigurationVersion.version))) or 0) + 1
             )
@@ -277,6 +340,11 @@ class ModelConfigurationService:
                 model_profiles=[_profile_storage_dict(profile) for profile in profiles],
                 timeout_seconds=draft.timeout_seconds,
                 enabled=draft.enabled,
+                providers=public_providers,
+                encrypted_provider_keys=provider_keys,
+                primary_provider_id=primary_provider_id,
+                fallback_provider_ids=list(fallback_provider_ids),
+                routing=routing,
                 config_sha256=config_hash,
                 created_by=user_id,
                 created_at=now,
@@ -327,22 +395,55 @@ class ModelConfigurationService:
         )
         profile_by_model = {item.model: item for item in profiles}
         configured_models = ((draft.research_model.strip(), draft.research_reasoning_effort),)
+        provider_specs: list[tuple[str, str, str, str, str]] = []
+        if draft.providers:
+            previous = self.resolve(session, require_enabled=False)
+            previous_keys = dict(previous.encrypted_provider_keys) if previous else {}
+            cipher = self._cipher()[0]
+            for item in draft.providers:
+                if not item.get("enabled", True):
+                    continue
+                provider_id = str(item.get("provider_id") or item.get("id") or "").strip()
+                if not provider_id:
+                    raise ModelSettingsError("provider_id is required")
+                secret = str(item.get("api_key") or "")
+                if not secret and provider_id in previous_keys:
+                    try:
+                        secret = cipher.decrypt(previous_keys[provider_id].encode()).decode()
+                    except (InvalidToken, UnicodeDecodeError) as exc:
+                        raise ModelSettingsError(f"供应商 {provider_id} 的 API Key 无法解密") from exc
+                if not secret:
+                    secret = api_key
+                provider_specs.append((
+                    provider_id,
+                    normalize_base_url(str(item.get("base_url") or item.get("endpoint") or base_url), self.settings),
+                    secret,
+                    str(item.get("model") or item.get("research_model") or draft.research_model.strip()),
+                    str(item.get("reasoning_effort") or draft.research_reasoning_effort),
+                ))
+            configured_models = tuple((spec[3], spec[4]) for spec in provider_specs)
         purposes: dict[str, list[str]] = {}
-        for purpose, (model, _effort) in zip(("research",), configured_models, strict=True):
-            purposes.setdefault(model, []).append(purpose)
+        for model, _effort in configured_models:
+            purposes.setdefault(model, []).append("research")
         clients: list[OpenAICompatibleStructuredLLMClient] = []
         diagnostics: list[ModelProbeDiagnostic] = []
+        failures: list[tuple[str, str, str]] = []
         checked_at = datetime.now(UTC)
-        for model, effort in dict.fromkeys(configured_models):
+        async def close_probe_client(value: object) -> None:
+            close = getattr(value, "aclose", None)
+            if close is not None:
+                await close()
+        probe_targets = provider_specs or [("default", base_url, api_key, draft.research_model.strip(), draft.research_reasoning_effort)]
+        for provider_id, provider_base_url, provider_api_key, model, effort in probe_targets:
             started = asyncio.get_running_loop().time()
             client = OpenAICompatibleStructuredLLMClient(
-                base_url=base_url,
-                api_key=api_key,
+                base_url=provider_base_url,
+                api_key=provider_api_key,
                 model=model,
                 reasoning_effort=effort,
                 timeout_seconds=min(draft.timeout_seconds, 8.0),
                 max_retries=0,
-                cache_policy=profile_by_model[model].cache_policy,
+                cache_policy=profile_by_model.get(model, _default_profile(model)).cache_policy,
             )
             try:
                 result = await asyncio.wait_for(
@@ -371,7 +472,7 @@ class ModelConfigurationService:
                     _probe_diagnostic(
                         client=client,
                         model=model,
-                        purpose="/".join(purposes.get(model, ("unknown",))),
+                        purpose=f"{provider_id}:" + "/".join(purposes.get(model, ("unknown",))),
                         outcome="FAILED",
                         error_code="MODEL_PROBE_TIMEOUT",
                         message=f"模型 {model} 探测超时",
@@ -379,17 +480,15 @@ class ModelConfigurationService:
                         checked_at=checked_at,
                     )
                 )
-                raise ModelSettingsError(
-                    f"模型 {model} 探测超时",
-                    code="MODEL_PROBE_TIMEOUT",
-                    diagnostics=tuple(diagnostics),
-                ) from exc
+                failures.append((provider_id, "MODEL_PROBE_TIMEOUT", f"模型 {model} 探测超时"))
+                await close_probe_client(client)
+                continue
             except ModelSettingsError as exc:
                 diagnostics.append(
                     _probe_diagnostic(
                         client=client,
                         model=model,
-                        purpose="/".join(purposes.get(model, ("unknown",))),
+                        purpose=f"{provider_id}:" + "/".join(purposes.get(model, ("unknown",))),
                         outcome="FAILED",
                         error_code=exc.code,
                         message=str(exc),
@@ -397,16 +496,16 @@ class ModelConfigurationService:
                         checked_at=checked_at,
                     )
                 )
-                raise ModelSettingsError(
-                    str(exc), code=exc.code, diagnostics=tuple(diagnostics)
-                ) from exc
+                failures.append((provider_id, exc.code, str(exc)))
+                await close_probe_client(client)
+                continue
             except (OpenAICompatibleError, httpx.HTTPError) as exc:
                 error_code = _safe_error_code(exc)
                 diagnostics.append(
                     _probe_diagnostic(
                         client=client,
                         model=model,
-                        purpose="/".join(purposes.get(model, ("unknown",))),
+                        purpose=f"{provider_id}:" + "/".join(purposes.get(model, ("unknown",))),
                         outcome="FAILED",
                         error_code=error_code,
                         message=_safe_error(exc),
@@ -414,16 +513,14 @@ class ModelConfigurationService:
                         checked_at=checked_at,
                     )
                 )
-                raise ModelSettingsError(
-                    _safe_error(exc),
-                    code=error_code,
-                    diagnostics=tuple(diagnostics),
-                ) from exc
+                failures.append((provider_id, error_code, _safe_error(exc)))
+                await close_probe_client(client)
+                continue
             diagnostics.append(
                 _probe_diagnostic(
                     client=client,
                     model=model,
-                    purpose="/".join(purposes.get(model, ("unknown",))),
+                    purpose=f"{provider_id}:" + "/".join(purposes.get(model, ("unknown",))),
                     outcome="SUCCEEDED",
                     error_code=None,
                     message="结构化探测成功",
@@ -432,6 +529,19 @@ class ModelConfigurationService:
                 )
             )
             clients.append(client)
+        if failures:
+            provider_id, error_code, message = failures[0]
+            detail = "; ".join(
+                f"{failed_provider}: {failed_message}"
+                for failed_provider, _failed_code, failed_message in failures
+            )
+            for open_client in clients:
+                await close_probe_client(open_client)
+            raise ModelSettingsError(
+                f"供应商探测失败（{detail}）",
+                code=error_code,
+                diagnostics=tuple(diagnostics),
+            )
         streaming_supported = False
         if include_streaming:
             stream_started = asyncio.get_running_loop().time()
@@ -486,6 +596,8 @@ class ModelConfigurationService:
                         checked_at=checked_at,
                     )
                 )
+        for open_client in clients:
+            await close_probe_client(open_client)
         return ModelProbeResult(
             reachable=True,
             message=(
@@ -594,7 +706,85 @@ class ModelConfigurationService:
             ),
             timeout_seconds=row.timeout_seconds,
             enabled=row.enabled,
+            providers=tuple(_public_provider_dict(dict(item)) for item in (row.providers or [])),
+            primary_provider_id=row.primary_provider_id or (row.providers[0].get("provider_id") if row.providers else None),
+            fallback_provider_ids=tuple(row.fallback_provider_ids or []),
+            routing=dict(row.routing or {}),
+            encrypted_provider_keys=dict(row.encrypted_provider_keys or {}),
         )
+
+    def client_for(
+        self,
+        runtime: ModelRuntimeConfiguration,
+        *,
+        purpose: str = "research",
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        max_retries: int = 2,
+        reuse_client: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> OpenAICompatibleStructuredLLMClient | ProviderFailoverStructuredLLMClient:
+        """Build the ordered provider chain for one runtime request.
+
+        Provider metadata is public and never contains a secret. The encrypted
+        provider key map is decrypted only here, at the point where a client is
+        constructed, so it cannot leak through API responses or manifests.
+        """
+        selected_model = model or runtime.routing.get(_purpose_alias(purpose)) or runtime.research_model
+        selected_effort = reasoning_effort or runtime.research_reasoning_effort
+        request_timeout = timeout_seconds or runtime.timeout_seconds
+        providers = [dict(item) for item in runtime.providers if item.get("enabled", True)]
+        if not providers:
+            return OpenAICompatibleStructuredLLMClient(
+                base_url=runtime.base_url,
+                api_key=runtime.api_key,
+                model=selected_model,
+                reasoning_effort=selected_effort,
+                timeout_seconds=request_timeout,
+                max_retries=max_retries,
+                cache_policy=runtime.profile_for(selected_model).cache_policy,
+                reuse_client=reuse_client,
+            )
+        primary = runtime.primary_provider_id
+        fallback = list(runtime.fallback_provider_ids)
+        by_id = {str(item.get("provider_id") or item.get("id")): item for item in providers}
+        ordered_ids: list[str] = []
+        for provider_id in ([primary] if primary else []) + fallback:
+            if provider_id and provider_id in by_id and provider_id not in ordered_ids:
+                ordered_ids.append(provider_id)
+        if not ordered_ids:
+            for item in sorted(providers, key=lambda value: int(value.get("priority", 0))):
+                provider_id = str(item.get("provider_id") or item.get("id") or "")
+                if provider_id and provider_id not in ordered_ids:
+                    ordered_ids.append(provider_id)
+        fernet = self._cipher()[0]
+        clients: list[ProviderClient] = []
+        for provider_id in ordered_ids:
+            item = by_id[provider_id]
+            encrypted = runtime.encrypted_provider_keys.get(provider_id)
+            secret = runtime.api_key
+            if encrypted:
+                try:
+                    secret = fernet.decrypt(encrypted.encode()).decode()
+                except (InvalidToken, UnicodeDecodeError) as exc:
+                    raise ModelSettingsError(f"供应商 {provider_id} 的 API Key 无法解密") from exc
+            provider_model = str(item.get("model") or item.get("research_model") or selected_model)
+            provider_url = str(item.get("base_url") or item.get("endpoint") or runtime.base_url)
+            provider_url = normalize_base_url(provider_url, self.settings)
+            clients.append(ProviderClient(
+                provider_id=provider_id,
+                client=OpenAICompatibleStructuredLLMClient(
+                    base_url=provider_url,
+                    api_key=secret,
+                    model=provider_model,
+                    reasoning_effort=str(item.get("reasoning_effort") or selected_effort),
+                    timeout_seconds=float(item.get("timeout_seconds") or request_timeout),
+                    max_retries=max_retries,
+                    cache_policy=runtime.profile_for(provider_model).cache_policy,
+                    reuse_client=reuse_client,
+                ),
+            ))
+        return ProviderFailoverStructuredLLMClient(clients)
 
     def _environment_runtime(self) -> ModelRuntimeConfiguration | None:
         if (
@@ -705,6 +895,70 @@ def normalize_base_url(value: str, settings: Settings | None = None) -> str:
 def _config_hash(**values: object) -> str:
     api_key = str(values.pop("api_key"))
     return stable_hash({**values, "api_key_sha256": hashlib.sha256(api_key.encode()).hexdigest()})
+
+
+def _is_secret_field(key: str) -> bool:
+    normalized = key.casefold().replace("-", "_")
+    return (
+        normalized in {
+            "api_key",
+            "encrypted_api_key",
+            "password",
+            "secret",
+            "token",
+            "credential",
+            "private_key",
+        }
+        or normalized.endswith(("_secret", "_token", "_password", "_credential", "_key"))
+    )
+
+
+def _validate_provider_metadata(value: object, *, _depth: int = 0, _path: str = "provider") -> None:
+    """Reject nested credentials before they can reach persistence or logs."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            key_text = str(key)
+            if _is_secret_field(key_text) and (_depth > 0 or key_text.casefold().replace("-", "_") != "api_key"):
+                raise ModelSettingsError("供应商配置不得包含嵌套凭据字段")
+            _validate_provider_metadata(child, _depth=_depth + 1, _path=f"{_path}.{key_text}")
+    elif isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            _validate_provider_metadata(child, _depth=_depth + 1, _path=f"{_path}[{index}]")
+
+
+def _public_provider_dict(value: dict[str, Any]) -> dict[str, Any]:
+    """Recursively remove secret fields from legacy provider metadata."""
+    def clean(item: object, *, depth: int) -> object:
+        if isinstance(item, dict):
+            return {
+                str(key): clean(child, depth=depth + 1)
+                for key, child in item.items()
+                if not _is_secret_field(str(key))
+            }
+        if isinstance(item, list):
+            return [clean(child, depth=depth + 1) for child in item]
+        if isinstance(item, tuple):
+            return [clean(child, depth=depth + 1) for child in item]
+        return item
+
+    return clean(value, depth=0)  # type: ignore[return-value]
+
+
+def _purpose_alias(purpose: str) -> str:
+    normalized = str(purpose or "research").strip().casefold().replace("-", "_")
+    aliases = {
+        "research_component": "research",
+        "research": "research",
+        "form_assist": "form_assist",
+        "form": "form_assist",
+        "chat": "chat",
+        "strategy": "strategy",
+        "trade_plan": "strategy",
+        "exit_advice": "strategy",
+        "monitoring": "monitoring",
+        "monitor": "monitoring",
+    }
+    return aliases.get(normalized, normalized)
 
 
 def _default_profile(model: str) -> ModelRuntimeProfile:

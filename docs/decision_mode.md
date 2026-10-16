@@ -1,101 +1,25 @@
-# Decision Mode Configuration
+# Deterministic Factor Decisions
 
-统一决策协议和模式路由已实现，支持 Legacy 和 Jev 两种模式。
+新决策统一使用版本化的 `factor` 公式，默认版本为 `factor-v1.0.0`。
+`legacy` 仅是兼容输入别名，仍然返回 `mode=factor`；`jev` 已移除，新请求会返回弃用错误。
 
-## 配置选项
-
-在 `.env` 或环境变量中配置：
+## 配置
 
 ```bash
-# 决策模式：legacy 或 jev
-DECISION_MODE=legacy
-
-# 是否启用 fallback（Jev 失败时回退到 Legacy）
-DECISION_FALLBACK_ENABLED=false
-
-# Jev 模型配置
-JEV_MODEL_DIR=data/models/jev
-JEV_MODEL_VERSION=jev-baseline-v1
-JEV_DEVICE=auto  # auto, cpu, cuda
-# JEV_CHECKPOINT=  # 可选：指定具体 checkpoint 路径
+DECISION_MODE=factor
+DECISION_FALLBACK_ENABLED=true
+FACTOR_CONFIDENCE_THRESHOLD=0.60
+DECISION_SYSTEM2_ENABLED=true
 ```
 
-## 默认行为
+FactorDecisionProvider 只读取冻结的点内时间市场状态和 CompositeScore，使用基本面、技术面、情绪面、质量分、事件风险乘数以及冻结市场指数快照生成结果。相同输入与相同 FactorGenome 始终产生相同输出。
 
-- 默认模式：`legacy`
-- Fallback 默认关闭
-- Jev 模型异常时默认停止并返回错误，不静默回退
-- 只有显式开启 `DECISION_FALLBACK_ENABLED=true` 才允许回退
+每个结果记录 `formula_version`、`parameter_sha256`、`dataset_sha256` 和 `input_manifest_hash`。历史 `legacy` 与 `jev` JSON 仍可由 UnifiedDecision 反序列化，用于只读展示和回测。
 
-## 使用示例
+## 周度因子进化
 
-### Python API
+单一 job-worker 每周最多运行一次。任务使用固定训练、验证和测试窗口，从冻结 CanonicalDailyBundle 构建点内数据集；LLM 最多提出一次权重和阈值候选，所有候选经过 Pydantic 校验和确定性 walk-forward 回测。至少 60 个样本、最大回撤 20%、换手率 20% 和相对 active 策略的改善门槛必须同时满足。
 
-```python
-from ashare_ai.agents.decision import create_decision_router, MarketState
-from datetime import date, datetime, timezone
+通过门槛的候选保存为 `CANDIDATE`，不会自动改变 active 版本。管理员可在设置页或 `/api/v1/strategies/evolution` 下查看、批准、拒绝和回滚。批准只切换 active 指针，不改写历史研究结果。
 
-# 创建路由器
-router = create_decision_router(
-    mode="legacy",
-    fallback_enabled=False,
-)
-
-# 构建市场状态
-market_state = MarketState(
-    symbol="600000.SH",
-    trading_date=date(2026, 7, 17),
-    available_at=datetime(2026, 7, 17, 15, 0, tzinfo=timezone.utc),
-    open=10.0,
-    high=10.5,
-    low=9.8,
-    close=10.2,
-    volume=1000000.0,
-    amount=10000000.0,
-)
-
-# 生成决策
-decision = await router.predict(market_state)
-
-print(f"Action: {decision.action}, Risk: {decision.risk}, Position: {decision.position}")
-print(f"Mode: {decision.mode}, Model: {decision.model_version}")
-```
-
-### 回测集成
-
-```python
-from ashare_ai.agents.decision.backtest_adapter import decision_to_signal
-
-# 将决策转换为回测信号
-signal = decision_to_signal(
-    decision=decision,
-    snapshot_hash="...",
-    industry_code="801010",
-)
-
-# 信号可直接用于 BacktestEngine
-```
-
-## 训练 Jev 模型
-
-```powershell
-# 训练模型（骨架实现，需补充完整训练流程）
-ashare-ai train-jev --dataset path/to/dataset --output data/models/jev/jev-baseline-v1
-```
-
-## 审计
-
-每次决策都会记录：
-- mode（legacy/jev）
-- model_version
-- 全部概率分布
-- action/risk/position
-- input_manifest_hash
-- fallback 是否发生
-
-## 安全边界
-
-- 保持 `RESEARCH_ONLY` 模式约束
-- 不新增真实交易路径
-- QMT 保持禁用
-- 所有模式都受现有风险控制约束
+System-2 只生成低置信度风险诊断，不修改因子评分、动作或仓位。

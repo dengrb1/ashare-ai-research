@@ -22,7 +22,7 @@ import webbrowser
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from config_store import (
     ConfigError,
@@ -76,7 +76,7 @@ COLORS = {
 
 UI_FONT = "Segoe UI"
 MONO_FONT = "Consolas"
-COMPACT_WIDTH = 1220
+COMPACT_WIDTH = 1280
 
 NAV_ITEMS: tuple[tuple[str, str, str], ...] = (
     ("gateway", "⌂", "网关监控"),
@@ -88,6 +88,7 @@ NAV_ITEMS: tuple[tuple[str, str, str], ...] = (
     ("strategy", "▥", "策略与数据"),
     ("admin", "▣", "管理面板"),
     ("cockpit", "◉", "驾驶舱"),
+    ("dev", "◆", "开发工作台"),
 )
 
 PAGE_SUBTITLES = {
@@ -100,6 +101,28 @@ PAGE_SUBTITLES = {
     "strategy": "策略信号、行情源与数据刷新参数",
     "admin": "配置重读、日志来源和本地路径",
     "cockpit": "打开现有 Web 控制台查看交易驾驶舱",
+    "dev": "直接运行当前源码，复用安装版 runtime 和后台服务",
+}
+
+# Human-friendly labels and examples keep the configuration form usable for
+# people who do not know the JSON schema. Unknown fields still fall back to
+# their original key so new schema fields remain editable.
+FIELD_LABELS = {
+    "control_api_port": ("控制 API 端口", "例如 8000"),
+    "gateway_port": ("网关端口", "例如 8787"),
+    "local_model_port": ("本地模型端口", "例如 11434"),
+    "quote_bridge_port": ("行情桥接端口", "例如 8790"),
+    "base_url": ("服务地址", "例如 https://api.openai.com/v1"),
+    "client_api_key_env": ("客户端密钥环境变量", "例如 ASHARE_API_KEY"),
+    "default_model": ("默认模型", "例如 gpt-4o-mini"),
+    "log_level": ("日志级别", "INFO 通常足够"),
+    "trading_market": ("交易市场", "SH 或 SZ"),
+    "risk_level": ("风险等级", "先使用稳健"),
+    "trade_mode": ("运行模式", "模拟环境不会下实盘单"),
+    "kline_period": ("K 线周期", "例如 1d"),
+    "watchlist": ("自选股", "多个代码用逗号分隔"),
+    "listen": ("监听地址", "例如 127.0.0.1:8787"),
+    "service_type": ("协议类型", "openai、responses 或 local"),
 }
 
 
@@ -110,7 +133,7 @@ class TraderConsole:
         self.root = root
         self.root.title(APP_TITLE)
         self.root.geometry("1320x860")
-        self.root.minsize(1100, 700)
+        self.root.minsize(1060, 680)
         self.root.configure(bg=COLORS["bg"])
 
         self.repo_root: Path | None = self._load_repo_root()
@@ -148,6 +171,13 @@ class TraderConsole:
         self._last_gateway_error: str | None = None
         self._dashboard_layout_mode: str | None = None
         self._layout_refresh_pending = False
+        self.var_dev_source = tk.StringVar()
+        self.var_dev_runtime = tk.StringVar()
+        self.var_dev_status = tk.StringVar(value="尚未初始化")
+        self.var_dev_url = tk.StringVar(value="http://127.0.0.1:58000")
+        self._dev_buttons: list[ttk.Button] = []
+        self._auth_token: str | None = None
+        self._auth_user_id: str | None = None
 
         self._setup_console_logger(self.repo_root)
         self._build_vars()
@@ -212,6 +242,19 @@ class TraderConsole:
         self.var_data_dir = tk.StringVar(value="—")
         self.var_settings_path = tk.StringVar(value="—")
         self.var_gateway_config_path = tk.StringVar(value="—")
+        local_app_data = Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
+        self.var_dev_source.set(str(self.repo_root or Path.cwd()))
+        self.var_dev_runtime.set(str(local_app_data / "AshareAI" / "dev-runtime"))
+        try:
+            if CONFIG_FILE.is_file():
+                saved = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+                if isinstance(saved, dict):
+                    if saved.get("dev_source_root"):
+                        self.var_dev_source.set(str(saved["dev_source_root"]))
+                    if saved.get("dev_runtime_root"):
+                        self.var_dev_runtime.set(str(saved["dev_runtime_root"]))
+        except (OSError, ValueError, TypeError):
+            pass
         self._load_runtime_preferences()
 
     def _load_runtime_preferences(self) -> None:
@@ -372,8 +415,167 @@ class TraderConsole:
             self._build_gateway_config_page(self.content, "subscription" if key == "subscriptions" else "full")
         elif key == "cockpit":
             self._build_cockpit_page(self.content)
+        elif key == "dev":
+            self._build_dev_page(self.content)
         else:
             self._build_config_page(self.content, key)
+
+    def _build_dev_page(self, parent: tk.Frame) -> None:
+        self._dev_buttons.clear()
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(2, weight=1)
+        intro = self._card(parent)
+        intro.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        self._label(intro, "源码开发模式", fg=COLORS["cyan"], font=(UI_FONT, 17, "bold")).grid(row=0, column=0, columnspan=3, sticky="w", padx=18, pady=(16, 3))
+        self._label(intro, "修改 Python 后重启即可生效；修改 Web 后先构建 Web，再重启或刷新浏览器。数据库、依赖和运行状态保存在独立 runtime。", fg=COLORS["muted"], wraplength=940, justify=tk.LEFT).grid(row=1, column=0, columnspan=3, sticky="w", padx=18, pady=(0, 14))
+        intro.columnconfigure(1, weight=1)
+        self._label(intro, "源码目录", fg=COLORS["faint"]).grid(row=2, column=0, sticky="w", padx=(18, 10), pady=5)
+        ttk.Entry(intro, textvariable=self.var_dev_source, style="Console.TEntry").grid(row=2, column=1, sticky="ew", pady=5)
+        ttk.Button(intro, text="浏览", style="Ghost.TButton", command=self._choose_dev_source).grid(row=2, column=2, padx=(8, 18), pady=5)
+        self._label(intro, "开发 runtime", fg=COLORS["faint"]).grid(row=3, column=0, sticky="w", padx=(18, 10), pady=5)
+        ttk.Entry(intro, textvariable=self.var_dev_runtime, style="Console.TEntry").grid(row=3, column=1, sticky="ew", pady=5)
+        ttk.Button(intro, text="浏览", style="Ghost.TButton", command=self._choose_dev_runtime).grid(row=3, column=2, padx=(8, 18), pady=5)
+        self._label(intro, textvariable=self.var_dev_status, fg=COLORS["amber"], font=(UI_FONT, 10, "bold")).grid(row=4, column=0, columnspan=3, sticky="w", padx=18, pady=(8, 16))
+
+        actions = self._card(parent)
+        actions.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        self._label(actions, "开发操作", fg=COLORS["muted"], font=(UI_FONT, 10, "bold")).pack(anchor="w", padx=18, pady=(13, 8))
+        button_bar = tk.Frame(actions, bg=COLORS["surface"])
+        button_bar.pack(fill=tk.X, padx=18, pady=(0, 15))
+        specs = (
+            ("初始化 / 更新 runtime", "Primary.TButton", self._dev_install),
+            ("启动源码服务", "Primary.TButton", self._dev_start),
+            ("停止服务", "Danger.TButton", self._dev_stop),
+            ("重启服务", "Console.TButton", self._dev_restart),
+            ("构建 Web", "Console.TButton", self._dev_build_web),
+            ("Python 测试", "Ghost.TButton", self._dev_python_tests),
+            ("Web 测试", "Ghost.TButton", self._dev_web_tests),
+            ("诊断", "Ghost.TButton", self._dev_doctor),
+            ("打开 Web", "Ghost.TButton", self._dev_open_web),
+            ("编译托盘管理器", "Console.TButton", self._dev_build_native),
+            ("构建 Windows 安装包", "Console.TButton", self._dev_build_installer),
+            ("编译开发控制台", "Console.TButton", self._dev_build_console),
+            ("一键全量构建", "Primary.TButton", self._dev_build_all),
+        )
+        for index, (label, style, command) in enumerate(specs):
+            button = ttk.Button(button_bar, text=label, style=style, command=command)
+            button.grid(row=index // 5, column=index % 5, sticky="ew", padx=(0 if index % 5 == 0 else 7, 0), pady=(0 if index < 5 else 7, 0))
+            button_bar.columnconfigure(index % 5, weight=1, uniform="dev-button")
+            self._dev_buttons.append(button)
+
+        info = self._card(parent)
+        info.grid(row=2, column=0, sticky="nsew")
+        self._label(info, "运行提示", fg=COLORS["muted"], font=(UI_FONT, 10, "bold")).pack(anchor="w", padx=18, pady=(14, 8))
+        details = (
+            "1. 首次使用点击‘初始化 / 更新 runtime’，只安装依赖和准备数据目录。\n"
+            "2. 点击‘启动源码服务’，运行中的 Python 会优先加载源码 src。\n"
+            "3. Web 修改后点击‘构建 Web’，然后点击‘重启服务’。\n"
+            "4. 运行状态、PostgreSQL、Redis、凭据和日志都在开发 runtime，不写回源码目录。"
+        )
+        self._label(info, details, fg=COLORS["muted"], justify=tk.LEFT, anchor="nw", wraplength=920).pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 18))
+
+    def _dev_paths(self) -> tuple[Path, Path] | None:
+        source = Path(self.var_dev_source.get().strip()).expanduser().resolve()
+        runtime = Path(self.var_dev_runtime.get().strip()).expanduser().resolve()
+        if not source.is_dir() or not (source / "scripts" / "native" / "ashare-native.ps1").is_file():
+            self._log("error", "源码目录无效，需要包含 scripts\\native\\ashare-native.ps1")
+            return None
+        if source == runtime or str(runtime).lower().startswith(str(source).lower() + os.sep):
+            self._log("error", "开发 runtime 必须位于源码目录之外")
+            return None
+        self._save_dev_preferences()
+        return source, runtime
+
+    def _save_dev_preferences(self) -> None:
+        try:
+            payload = {}
+            if CONFIG_FILE.is_file():
+                loaded = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    payload.update(loaded)
+            payload["repo_root"] = str(self.repo_root) if self.repo_root else payload.get("repo_root")
+            payload["dev_source_root"] = self.var_dev_source.get().strip()
+            payload["dev_runtime_root"] = self.var_dev_runtime.get().strip()
+            CONFIG_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except (OSError, ValueError, TypeError) as exc:
+            self._log_console(logging.WARNING, f"保存开发路径失败: {exc}")
+
+    def _choose_dev_source(self) -> None:
+        chosen = filedialog.askdirectory(title="选择源码仓库根目录")
+        if chosen:
+            self.var_dev_source.set(str(Path(chosen).resolve()))
+            self._save_dev_preferences()
+
+    def _choose_dev_runtime(self) -> None:
+        chosen = filedialog.askdirectory(title="选择开发 runtime 目录（源码目录之外）")
+        if chosen:
+            self.var_dev_runtime.set(str(Path(chosen).resolve()))
+            self._save_dev_preferences()
+
+    def _dev_action(self, action: Callable[[Path, Path], bool], label: str) -> None:
+        paths = self._dev_paths()
+        if paths is None or self._busy_message():
+            return
+        if action(*paths):
+            self.var_dev_status.set(f"正在{label}…")
+
+    def _dev_install(self) -> None:
+        self._dev_action(self.controller.native_install, "初始化开发 runtime")
+
+    def _dev_start(self) -> None:
+        self._dev_action(self.controller.native_start, "启动源码服务")
+
+    def _dev_stop(self) -> None:
+        self._dev_action(self.controller.native_stop, "停止源码服务")
+
+    def _dev_restart(self) -> None:
+        self._dev_action(self.controller.native_restart, "重启源码服务")
+
+    def _dev_doctor(self) -> None:
+        self._dev_action(self.controller.native_doctor, "诊断")
+
+    def _dev_build_web(self) -> None:
+        paths = self._dev_paths()
+        if paths is None or self._busy_message():
+            return
+        if self.controller.build_web(paths[0]):
+            self.var_dev_status.set("正在构建 Web…")
+
+    def _dev_python_tests(self) -> None:
+        paths = self._dev_paths()
+        if paths is None or self._busy_message():
+            return
+        if self.controller.run_python_tests(paths[0]):
+            self.var_dev_status.set("正在运行 Python 测试…")
+
+    def _dev_web_tests(self) -> None:
+        paths = self._dev_paths()
+        if paths is None or self._busy_message():
+            return
+        if self.controller.run_web_tests(paths[0]):
+            self.var_dev_status.set("正在运行 Web 测试…")
+
+    def _dev_build_native(self) -> None:
+        self._dev_build_task(self.controller.build_native_manager, "编译托盘管理器")
+
+    def _dev_build_installer(self) -> None:
+        self._dev_build_task(self.controller.build_installer, "构建 Windows 安装包")
+
+    def _dev_build_console(self) -> None:
+        self._dev_build_task(self.controller.build_console, "编译开发控制台")
+
+    def _dev_build_all(self) -> None:
+        self._dev_build_task(self.controller.build_all, "一键全量构建")
+
+    def _dev_build_task(self, action: Callable[[Path], bool], label: str) -> None:
+        paths = self._dev_paths()
+        if paths is None or self._busy_message():
+            return
+        if action(paths[0]):
+            self.var_dev_status.set(f"正在{label}…")
+
+    def _dev_open_web(self) -> None:
+        webbrowser.open(self.var_dev_url.get())
 
     # ---------- dashboard ----------
 
@@ -448,20 +650,20 @@ class TraderConsole:
         card = self._card(parent)
         card.grid(row=1, column=0, sticky="ew", pady=(0, 13))
         card.columnconfigure(0, weight=0)
-        self._label(card, "服务探测", font=(UI_FONT, 10, "bold")).grid(row=0, column=0, sticky="w", padx=(16, 18), pady=13)
+        self._label(card, "服务探测", font=(UI_FONT, 10, "bold")).grid(row=0, column=0, sticky="w", padx=(16, 12), pady=10)
         services = (("api", "控制面", self.var_api), ("gateway", "网关", self.var_gateway), ("local_model", "本地模型", self.var_local_model), ("quote_bridge", "行情桥", self.var_quote_bridge))
         for column in range(1, len(services) + 1):
             card.columnconfigure(column, weight=1, uniform="service-probe")
         for index, (key, label, variable) in enumerate(services, start=1):
             service = tk.Frame(card, bg=COLORS["surface_2"])
-            service.grid(row=0, column=index, sticky="ew", padx=(0, 6), pady=7)
+            service.grid(row=0, column=index, sticky="ew", padx=(0, 5), pady=6)
             service.columnconfigure(1, weight=1)
             dot = self._label(service, "●", fg=COLORS["faint"], font=(UI_FONT, 10))
             dot.grid(row=0, column=0, padx=(9, 4), pady=8)
             value = self._label(service, label, fg=COLORS["muted"], font=(UI_FONT, 10))
             value.grid(row=0, column=1, sticky="w", pady=8)
             detail = self._label(service, textvariable=variable, fg=COLORS["faint"], font=(UI_FONT, 9))
-            detail.grid(row=0, column=2, sticky="e", padx=(4, 9), pady=8)
+            detail.grid(row=0, column=2, sticky="e", padx=(3, 7), pady=7)
             self._status_cards[key] = (value, detail, dot)
 
     def _build_command_area(self, parent: tk.Frame) -> None:
@@ -492,14 +694,17 @@ class TraderConsole:
         for index, (attribute, text, style, command) in enumerate(button_specs):
             button = ttk.Button(buttons, text=text, style=style, command=command)
             setattr(self, attribute, button)
-            column = index if compact else index % 3
-            row = 0 if compact else index // 3
+            # Five controls in one row become unusably narrow at the compact
+            # breakpoint. Three columns preserve readable labels and leave a
+            # second row for the model-only actions.
+            column = index % 3
+            row = index // 3
             buttons.columnconfigure(column, weight=1, uniform="command-button")
             button.grid(row=row, column=column, sticky="ew", padx=(0 if column == 0 else 6, 0), pady=(0 if row == 0 else 6, 0))
         options = tk.Frame(commands, bg=COLORS["surface"])
         options.grid(row=2, column=0, sticky="ew", padx=17, pady=(9, 13))
         option_specs = (
-            ("完整构建 npm + cargo", self.var_full_build, None),
+            ("强制重建 Web + 网关（慢）", self.var_full_build, None),
             ("本地虚拟盘", self.var_virtual_trading, self._save_operator_preferences),
         )
         for index, (text, variable, command) in enumerate(option_specs):
@@ -833,8 +1038,9 @@ class TraderConsole:
         inner = self._new_scroll_area(parent)
         inner.columnconfigure(0, weight=1)
         self._page_toolbar(inner, self._save_current_page)
+        self._render_first_run_help(inner, key)
         if not self.config_store:
-            self._empty_config_message(inner, "未定位仓库，请先在管理面板选择包含 scripts\\service_control.ps1 的目录。", True)
+            self._empty_config_message(inner, "未定位仓库，请先在管理面板选择包含 scripts\\service_control.ps1 的目录。", True, row=2)
             return
         if not self._settings_cache_dirty:
             try:
@@ -846,16 +1052,30 @@ class TraderConsole:
         self._form_vars.clear()
         self._secret_original.clear()
         self._provider_rows.clear()
-        row = 1
+        row = 2
         for module in PAGE_MAPPINGS[key]["modules"]:
             row = self._render_module(inner, module, self._settings_cache, row)
         if key == "admin":
             self._render_admin_tools(inner, row)
         self._set_page_status("已从磁盘读取", "ok")
 
-    def _empty_config_message(self, parent: tk.Frame, text: str, error: bool = False) -> None:
+    def _render_first_run_help(self, parent: tk.Frame, key: str) -> None:
         card = self._card(parent)
         card.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        card.columnconfigure(1, weight=1)
+        title = "首次使用" if not self.config_store else "配置提示"
+        self._label(card, title, fg=COLORS["cyan"], font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="nw", padx=(16, 12), pady=(12, 4))
+        message = (
+            "先选择仓库并初始化，再填写带示例的字段，点击“保存当前页”，最后到网关监控页启动服务。"
+            if key != "admin"
+            else "配置保存到当前仓库；密钥字段可留空或填写环境变量名，保存后按页面提示重启相关服务。"
+        )
+        self._label(card, message, fg=COLORS["muted"], font=("Segoe UI", 9), wraplength=900, justify=tk.LEFT).grid(row=0, column=1, sticky="w", padx=(0, 16), pady=(12, 4))
+        self._label(card, "下拉框可直接输入自定义值；红色提示表示保存前校验未通过。", fg=COLORS["faint"], font=("Segoe UI", 8), wraplength=900, justify=tk.LEFT).grid(row=1, column=1, sticky="w", padx=(0, 16), pady=(0, 12))
+
+    def _empty_config_message(self, parent: tk.Frame, text: str, error: bool = False, row: int = 1) -> None:
+        card = self._card(parent)
+        card.grid(row=row, column=0, sticky="ew", pady=(0, 12))
         self._label(card, text, fg=COLORS["red"] if error else COLORS["muted"], font=("Segoe UI", 10), wraplength=760, justify=tk.LEFT).pack(anchor="w", padx=18, pady=18)
 
     def _render_module(self, parent: tk.Frame, module: str, settings: Mapping[str, Any], start_row: int) -> int:
@@ -876,12 +1096,13 @@ class TraderConsole:
             if isinstance(value, (Mapping, list, tuple)):
                 display_value = self._display_complex(value)
             field_type = infer_field_type(module, name, value)
-            label = self._label(card, name, fg=COLORS["muted"], font=("Segoe UI", 9), anchor="w")
+            label_text, example = FIELD_LABELS.get(name, (name, ""))
+            label = self._label(card, label_text, fg=COLORS["muted"], font=("Segoe UI", 9), anchor="w")
             label.grid(row=row, column=0, sticky="w", padx=(16, 10), pady=5)
             variable, widget = self._field_widget(card, module, name, display_value, field_type)
             widget.grid(row=row, column=1, sticky="ew", padx=(0, 10), pady=4)
             hint = SELECT_OPTIONS.get((module, name), ())
-            hint_text = " / ".join(hint) if hint else ("布尔开关" if field_type == "bool" else "")
+            hint_text = " / ".join(hint) if hint else ("布尔开关" if field_type == "bool" else example)
             self._label(card, hint_text, fg=COLORS["faint"], font=("Segoe UI", 8), anchor="w").grid(row=row, column=2, sticky="w", padx=(0, 16), pady=4)
             self._form_vars[(module, name)] = (variable, field_type, value)
             if field_type == "secret":
@@ -895,7 +1116,7 @@ class TraderConsole:
             return variable, ttk.Checkbutton(parent, variable=variable, style="Console.TCheckbutton")
         if field_type == "select":
             variable = tk.StringVar(value=str(value))
-            return variable, ttk.Combobox(parent, textvariable=variable, state="readonly", values=SELECT_OPTIONS.get((module, name), ()), style="Console.TCombobox")
+            return variable, ttk.Combobox(parent, textvariable=variable, state="normal", values=SELECT_OPTIONS.get((module, name), ()), style="Console.TCombobox")
         if isinstance(value, (list, tuple)):
             display = ",".join(str(item) for item in value)
         else:
@@ -992,8 +1213,10 @@ class TraderConsole:
             value = self._gateway_cache.get(name, "")
             field_type = "bool" if name == "protocol_fallback" else ("number" if name in {"max_body_bytes", "failure_threshold", "recovery_seconds", "health_probe_seconds", "key_failure_cooldown_seconds"} else "text")
             variable, widget = self._field_widget(scalar, "gateway", name, value, field_type)
-            self._label(scalar, name, fg=COLORS["muted"], font=("Segoe UI", 9)).grid(row=row, column=0, sticky="w", padx=(16, 10), pady=4)
+            label_text, example = FIELD_LABELS.get(name, (name, ""))
+            self._label(scalar, label_text, fg=COLORS["muted"], font=("Segoe UI", 9)).grid(row=row, column=0, sticky="w", padx=(16, 10), pady=4)
             widget.grid(row=row, column=1, sticky="ew", padx=(0, 10), pady=4)
+            self._label(scalar, example, fg=COLORS["faint"], font=("Segoe UI", 8)).grid(row=row, column=2, sticky="w", padx=(0, 16), pady=4)
             self._gateway_scalar_vars[name] = (variable, field_type, value)
         channels_card = self._card(inner)
         channels_card.grid(row=2, column=0, sticky="ew", pady=(0, 12))
@@ -1045,7 +1268,7 @@ class TraderConsole:
                 current = ",".join(str(item) for item in current)
             if field_type == "select_gateway":
                 variable = tk.StringVar(value=str(current))
-                widget: tk.Widget = ttk.Combobox(card, textvariable=variable, state="readonly", values=("openai", "responses", "local"), style="Console.TCombobox")
+                widget: tk.Widget = ttk.Combobox(card, textvariable=variable, state="normal", values=("openai", "responses", "local"), style="Console.TCombobox")
                 actual_type = "select"
             else:
                 variable = tk.StringVar(value=str(current or ""))
@@ -1178,9 +1401,12 @@ class TraderConsole:
             self.page_save_button.configure(state=tk.DISABLED)
         threading.Thread(target=self._save_worker, args=(endpoint, payload), daemon=True, name="console-config-save").start()
 
-    def _http_json(self, method: str, url: str, payload: object, timeout: float = 5.0) -> dict[str, Any]:
+    def _http_json(self, method: str, url: str, payload: object, timeout: float = 5.0, headers: Mapping[str, str] | None = None) -> dict[str, Any]:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        request = urllib.request.Request(url, data=body, method=method, headers={"Content-Type": "application/json", "Accept": "application/json"})
+        request_headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if headers:
+            request_headers.update(headers)
+        request = urllib.request.Request(url, data=body, method=method, headers=request_headers)
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 status = int(response.status)
@@ -1241,6 +1467,61 @@ class TraderConsole:
         ttk.Button(buttons, text="重读全部配置", style="Console.TButton", command=self._reload_all_from_disk).pack(side=tk.LEFT)
         ttk.Button(buttons, text="打开配置目录", style="Ghost.TButton", command=self._open_config_dir).pack(side=tk.LEFT, padx=(7, 0))
         ttk.Button(buttons, text="查看系统日志", style="Ghost.TButton", command=lambda: (self._show_page("gateway"), self.root.after(100, self._open_log_viewer))).pack(side=tk.LEFT, padx=(7, 0))
+        ttk.Button(buttons, text="修改登录密码", style="Console.TButton", command=self._change_password_dialog).pack(side=tk.LEFT, padx=(7, 0))
+
+    def _change_password_dialog(self) -> None:
+        dialog = tk.Toplevel(self.root)
+        dialog.title("修改登录密码")
+        dialog.configure(bg=COLORS["surface"])
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        fields: list[tuple[str, tk.StringVar, bool]] = [
+            ("用户名", tk.StringVar(), False),
+            ("当前密码", tk.StringVar(), True),
+            ("新密码（至少 12 位）", tk.StringVar(), True),
+            ("确认新密码", tk.StringVar(), True),
+        ]
+        self._label(dialog, "修改 Console 登录密码", fg=COLORS["cyan"], font=(UI_FONT, 13, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", padx=20, pady=(18, 14))
+        for row_index, (label, variable, secret) in enumerate(fields, start=1):
+            self._label(dialog, label, fg=COLORS["muted"]).grid(row=row_index, column=0, sticky="w", padx=(20, 10), pady=6)
+            entry = ttk.Entry(dialog, textvariable=variable, style="Console.TEntry", show="●" if secret else "")
+            entry.grid(row=row_index, column=1, sticky="ew", padx=(0, 20), pady=6)
+        status = tk.StringVar(value="")
+        self._label(dialog, textvariable=status, fg=COLORS["red"], wraplength=360, justify=tk.LEFT).grid(row=5, column=0, columnspan=2, sticky="w", padx=20, pady=(4, 8))
+        actions = tk.Frame(dialog, bg=COLORS["surface"])
+        actions.grid(row=6, column=0, columnspan=2, sticky="e", padx=20, pady=(0, 18))
+        def submit() -> None:
+            username, current, new, confirm = (item[1].get().strip() for item in fields)
+            if not username or not current or not new:
+                status.set("请填写全部密码字段")
+                return
+            if len(new) < 12:
+                status.set("新密码至少需要 12 位")
+                return
+            if new != confirm:
+                status.set("两次输入的新密码不一致")
+                return
+            try:
+                base = self._control_api_base()
+                token_payload = self._http_json("POST", f"{base}/api/v1/auth/token", {"username": username, "password": current})
+                token = str(token_payload.get("access_token") or "")
+                if not token:
+                    raise ConfigError("登录成功但未返回访问令牌")
+                me = self._http_json("GET", f"{base}/api/v1/auth/me", {}, headers={"Authorization": f"Bearer {token}"})
+                user_id = str(me.get("user_id") or "")
+                if not user_id:
+                    raise ConfigError("无法识别当前用户")
+                self._http_json("POST", f"{base}/api/v1/admin/users/{user_id}/password", {"password": new}, headers={"Authorization": f"Bearer {token}"})
+                self._log("success", f"用户 {username} 的登录密码已修改")
+                messagebox.showinfo(APP_TITLE, "密码修改成功，请使用新密码登录。", parent=dialog)
+                dialog.destroy()
+            except (ConfigError, urllib.error.URLError, OSError) as exc:
+                status.set(str(exc))
+        ttk.Button(actions, text="取消", style="Ghost.TButton", command=dialog.destroy).pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Button(actions, text="确认修改", style="Primary.TButton", command=submit).pack(side=tk.RIGHT)
+        dialog.columnconfigure(1, weight=1)
+        dialog.bind("<Return>", lambda _event: submit())
 
     def _reload_all_from_disk(self) -> None:
         if not self.config_store:
@@ -1358,8 +1639,8 @@ class TraderConsole:
         self._busy_label = action
         for name in ("btn_start", "btn_stop", "btn_restart", "btn_model_start", "btn_model_stop"):
             button = getattr(self, name, None)
-            if button is not None:
-                button.configure(state=tk.DISABLED)
+            self._configure_widget_if_alive(button, state=tk.DISABLED)
+        self._dev_buttons = [button for button in self._dev_buttons if self._configure_widget_if_alive(button, state=tk.DISABLED)]
         self.var_status.set(f"正在{action}")
         self.var_status_detail.set("统一服务控制器执行中")
         self._set_status_color(COLORS["amber"])
@@ -1369,8 +1650,20 @@ class TraderConsole:
         self._busy_label = ""
         for name in ("btn_start", "btn_stop", "btn_restart", "btn_model_start", "btn_model_stop"):
             button = getattr(self, name, None)
-            if button is not None:
-                button.configure(state=tk.NORMAL)
+            self._configure_widget_if_alive(button, state=tk.NORMAL)
+        self._dev_buttons = [button for button in self._dev_buttons if self._configure_widget_if_alive(button, state=tk.NORMAL)]
+
+    def _configure_widget_if_alive(self, widget: tk.Widget | None, **kwargs: Any) -> bool:
+        """Update a Tk widget only while its Tcl command still exists."""
+        if widget is None:
+            return False
+        try:
+            if not self.root.winfo_exists() or not widget.winfo_exists():
+                return False
+            widget.configure(**kwargs)
+            return True
+        except (tk.TclError, AttributeError):
+            return False
 
     def _start(self) -> None:
         if not self._ensure_repo() or self._busy_message():
@@ -1458,10 +1751,10 @@ class TraderConsole:
             card = self._status_cards.get(key)
             if card:
                 value_label, detail_label, dot = card
-                value_label.configure(fg=COLORS["green"] if ok else COLORS["red"])
-                dot.configure(fg=COLORS["green"] if ok else COLORS["red"])
+                self._configure_widget_if_alive(value_label, fg=COLORS["green"] if ok else COLORS["red"])
+                self._configure_widget_if_alive(dot, fg=COLORS["green"] if ok else COLORS["red"])
                 payload = snapshot.payload(key)
-                detail_label.configure(text=(str(payload.get("status", "ready")) if isinstance(payload, Mapping) else "未响应").upper())
+                self._configure_widget_if_alive(detail_label, text=(str(payload.get("status", "ready")) if isinstance(payload, Mapping) else "未响应").upper())
         gateway = snapshot.gateway_status if isinstance(snapshot.gateway_status, Mapping) else {}
         self.var_gateway_port.set(self._display_number(gateway.get("port")))
         self.var_gateway_uptime.set(self._format_uptime(gateway.get("uptime_seconds")))
@@ -1496,10 +1789,8 @@ class TraderConsole:
             self._set_status_color(COLORS["faint"])
 
     def _set_status_color(self, color: str) -> None:
-        if getattr(self, "status_label", None):
-            self.status_label.configure(fg=color)
-        if getattr(self, "sidebar_status_dot", None):
-            self.sidebar_status_dot.configure(fg=color)
+        self._configure_widget_if_alive(getattr(self, "status_label", None), fg=color)
+        self._configure_widget_if_alive(getattr(self, "sidebar_status_dot", None), fg=color)
 
     def _pump_queue(self) -> None:
         try:
@@ -1522,6 +1813,12 @@ class TraderConsole:
                     self._release_busy()
                     if isinstance(value, OperationResult):
                         self.var_last_action.set(f"{value.action}完成 · {value.elapsed_seconds:.1f}s")
+                        if self._page_key == "dev":
+                            self.var_dev_status.set(
+                                f"{value.action}完成"
+                                if value.error is None and value.exit_code == 0
+                                else f"{value.action}失败，请查看实时日志"
+                            )
                     self._refresh_once()
                 elif kind == "config_status" and isinstance(value, tuple):
                     self._set_page_status(str(value[0]), str(value[1]))
@@ -1536,8 +1833,7 @@ class TraderConsole:
                     self._log("error", f"配置保存失败：{value}")
                 elif kind == "config_done":
                     self._config_busy = False
-                    if getattr(self, "page_save_button", None):
-                        self.page_save_button.configure(state=tk.NORMAL)
+                    self._configure_widget_if_alive(getattr(self, "page_save_button", None), state=tk.NORMAL)
                 processed += 1
         except queue.Empty:
             pass

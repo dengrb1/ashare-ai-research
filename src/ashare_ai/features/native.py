@@ -53,7 +53,21 @@ def native_monitor_signals(
         if mode == "on":
             raise RuntimeError("ASHARE_NATIVE_TECHNICAL=on requires ashare_ai_core")
         return None
-    result = module.detect_monitor_signals(closes, volumes)
+    capability = getattr(module, "detect_monitor_signals", None)
+    if capability is None:
+        if mode == "on":
+            raise RuntimeError(
+                "ASHARE_NATIVE_TECHNICAL=on requires detect_monitor_signals in ashare_ai_core"
+            )
+        return None
+    try:
+        result = capability(closes, volumes)
+    except AttributeError:
+        if mode == "on":
+            raise RuntimeError(
+                "ASHARE_NATIVE_TECHNICAL=on requires detect_monitor_signals in ashare_ai_core"
+            )
+        return None
     if not isinstance(result, list) or len(result) != 4:
         raise RuntimeError("ashare_ai_core returned an invalid monitor signal payload")
     return [tuple(item) for item in result]

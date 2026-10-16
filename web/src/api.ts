@@ -1,4 +1,4 @@
-import type { AIChatAttachment, AIChatMessage, AIChatThread, AICostSummary, AssetState, AuditEvent, BuyEntryMonitor, Candidate, DataEnvelope, ExitAdvice, HealthStatus, KlineBar, KlineQueryOptions, MarketPrefetchResponse, MarketServiceStatus, ModelProbeLog, ModelSettings, ModelSettingsDraft, MonitorSignalsResponse, Notification, NotificationSummary, PersonalArchiveJob, Portfolio, Quote, Report, ReportExecutionStatus, ReportSymbol, ResearchSettings, ResearchSubmission, Run, RunActivityResponse, Score, Snapshot, SystemResources, SystemSettings, SystemSettingsDraft, SystemSettingsUnlock, TokenPair, TradeAdviceMonitor, TradePlan, TrainingHistory, TrainingStatus, User } from './types'
+import type { AIChatAttachment, AIChatMessage, AIChatThread, AICostSummary, AssetState, AuditEvent, BuyEntryMonitor, Candidate, DataEnvelope, ExitAdvice, FactorEvolutionSchedule, FactorGenomeVersion, HealthStatus, KlineBar, KlineQueryOptions, LiveMonitorSnapshot, MarketPrefetchResponse, MarketServiceStatus, ModelProbeLog, ModelSettings, ModelSettingsDraft, MonitorSignalsResponse, Notification, NotificationSummary, PersonalArchiveJob, Portfolio, Quote, Report, ReportExecutionStatus, ReportSymbol, ResearchSettings, ResearchSubmission, Run, RunActivityResponse, Score, Snapshot, SystemResources, SystemSettings, SystemSettingsDraft, SystemSettingsUnlock, TokenPair, TradeAdviceMonitor, TradePlan, User } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api/v1').replace(/\/$/, '')
 
@@ -84,8 +84,15 @@ export const api = {
   me: () => request<User>('/auth/me'),
   assets: () => request<AssetState>('/assets'),
   saveAssets: (payload: AssetState) => request<AssetState>('/assets', { method: 'PUT', body: JSON.stringify(payload) }),
+  parseWatchlist: (text: string) => request<{ symbols: string[]; duplicates_removed: number }>('/assets/watchlist/parse', { method: 'POST', body: JSON.stringify({ text }) }),
+  bulkWatchlist: (payload: { symbols: string[]; operation: 'ADD' | 'REMOVE' | 'REPLACE'; group_id?: string }) => request<AssetState>('/assets/watchlist/bulk', { method: 'PUT', body: JSON.stringify({ group_id: 'default', ...payload }) }),
+  createWatchlistGroup: (payload: { name: string; symbols?: string[]; sort_order?: number; enabled?: boolean; monitoring_policy?: Record<string, unknown> }) => request<AssetState>('/assets/watchlist/groups', { method: 'POST', body: JSON.stringify(payload) }),
+  updateWatchlistGroup: (groupId: string, payload: { name: string; symbols?: string[]; sort_order?: number; enabled?: boolean; monitoring_policy?: Record<string, unknown> }) => request<AssetState>(`/assets/watchlist/groups/${encodeURIComponent(groupId)}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  deleteWatchlistGroup: (groupId: string) => request<AssetState>(`/assets/watchlist/groups/${encodeURIComponent(groupId)}`, { method: 'DELETE' }),
+  assistForm: (payload: { form_type: 'POSITION' | 'WATCHLIST' | 'TOTAL_ASSETS' | 'RESEARCH' | 'MONITOR' | 'STRATEGY'; text: string; draft?: Record<string, unknown>; attachment_ids?: string[] }) => request<import('./types').FormAssistResponse>('/ai/form-assist', { method: 'POST', body: JSON.stringify(payload) }),
   saveExitMonitorSettings: (payload: Pick<AssetState, 'exit_monitor_enabled' | 'default_profit_trigger' | 'stop_loss_monitor_enabled' | 'buy_monitor_enabled'>, idempotencyKey = crypto.randomUUID()) => request<AssetState>('/assets/exit-monitor', { method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify(payload) }),
   saveMarketRefreshSettings: (marketRefreshIntervalSeconds: 5 | 10 | 15 | 30 | 60 | 120, idempotencyKey = crypto.randomUUID()) => request<AssetState>('/assets/market-refresh', { method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ market_refresh_interval_seconds: marketRefreshIntervalSeconds }) }),
+  saveMonitoringPolicy: (payload: Record<string, unknown>) => request<AssetState>('/assets/monitoring-policy', { method: 'PUT', body: JSON.stringify(payload) }),
   exitAdvice: (limit = 30) => request<ExitAdvice[]>(`/exit-advice${params({ limit })}`),
   submitManualExitAdvice: (symbol: string, idempotencyKey = crypto.randomUUID()) => request<ExitAdvice>('/exit-advice/manual', { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ symbol }) }),
   buyEntryMonitors: (limit = 50) => request<BuyEntryMonitor[]>(`/buy-entry-monitors${params({ limit })}`),
@@ -98,6 +105,7 @@ export const api = {
   markAllNotificationsRead: (idempotencyKey = crypto.randomUUID()) => request<NotificationSummary>('/notifications/read-all', { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey } }),
   deleteNotification: (notificationId: string) => request<void>(`/notifications/${encodeURIComponent(notificationId)}`, { method: 'DELETE' }),
   clearNotifications: (idempotencyKey = crypto.randomUUID()) => request<NotificationSummary>('/notifications/clear', { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey } }),
+  notificationStreamUrl: (options: { interval?: number; since?: string } = {}) => `${API_BASE}/notifications/stream${params({ interval: options.interval || 2, since: options.since })}`,
   aiModels: () => request<{ models: string[]; reasoning_efforts: string[]; cache_enabled: boolean }>('/ai/models'),
   aiCostSummary: (options: { days?: number; limit?: number; before?: string; threadId?: string } = {}) => request<AICostSummary>(`/ai/costs${params({ days: options.days, limit: options.limit, before: options.before, thread_id: options.threadId })}`),
   aiChatThreads: () => request<AIChatThread[]>('/ai/chat/threads'),
@@ -122,11 +130,14 @@ export const api = {
   },
   personalImport: (archiveId: string) => request<PersonalArchiveJob>(`/me/data-imports/${encodeURIComponent(archiveId)}`),
   applyPersonalImport: (archiveId: string, mergeOptions: Record<string, unknown>, idempotencyKey: string) => request<PersonalArchiveJob>(`/me/data-imports/${encodeURIComponent(archiveId)}/apply`, { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ merge_options: mergeOptions }) }),
-  jevTrainingStatus: (trainingId: string) => request<TrainingStatus>(`/training/jev/status/${encodeURIComponent(trainingId)}`),
-  currentJevTraining: () => request<TrainingStatus>('/training/jev/status/current'),
-  jevTrainingHistory: (limit = 20) => request<TrainingHistory>(`/training/jev/history?limit=${limit}`),
-  triggerJevTraining: (payload: { force?: boolean; dataset_config?: Record<string, unknown> } = {}) => request<{ training_id: string; status: string; message: string }>('/training/jev/trigger', { method: 'POST', body: JSON.stringify(payload) }),
-  cancelJevTraining: (trainingId: string) => request<TrainingStatus>(`/training/jev/cancel/${encodeURIComponent(trainingId)}`, { method: 'POST' }),
+  factorEvolutionActive: () => request<FactorGenomeVersion>('/strategies/evolution/active'),
+  factorEvolutionCandidates: (status?: string, limit = 50) => request<{ versions: FactorGenomeVersion[]; count: number }>(`/strategies/evolution/candidates${params({ status, limit })}`),
+  factorEvolutionCandidate: (candidateId: string) => request<FactorGenomeVersion>(`/strategies/evolution/candidates/${encodeURIComponent(candidateId)}`),
+  approveFactorCandidate: (candidateId: string, note?: string) => request<FactorGenomeVersion>(`/strategies/evolution/candidates/${encodeURIComponent(candidateId)}/approve`, { method: 'POST', body: JSON.stringify({ note }) }),
+  rejectFactorCandidate: (candidateId: string, note?: string) => request<FactorGenomeVersion>(`/strategies/evolution/candidates/${encodeURIComponent(candidateId)}/reject`, { method: 'POST', body: JSON.stringify({ note }) }),
+  rollbackFactorGenome: (note?: string) => request<FactorGenomeVersion>('/strategies/evolution/rollback', { method: 'POST', body: JSON.stringify({ note }) }),
+  factorEvolutionSchedule: () => request<FactorEvolutionSchedule>('/strategies/evolution/schedule'),
+  setFactorEvolutionEnabled: (enabled: boolean) => request<FactorEvolutionSchedule>('/strategies/evolution/schedule', { method: 'POST', body: JSON.stringify({ enabled }) }),
 
   quote: async (symbol: string, refresh = false, signal?: AbortSignal) => normalizeQuote(await request<RawQuote>(`/market/quotes/${encodeURIComponent(symbol)}${params({ refresh: refresh ? 'true' : undefined })}`, { signal })),
   quotes: async (symbols: string[], refresh = false, signal?: AbortSignal) => {
@@ -161,6 +172,9 @@ export const api = {
   },
   marketStatus: () => request<MarketServiceStatus>('/market/status'),
   marketIndices: (refresh = false) => request<{ quotes: RawQuote[]; labels: Record<string, string> }>(`/market/indices${params({ refresh: refresh ? 'true' : undefined })}`).then((payload) => ({ ...payload, quotes: (payload.quotes || []).map(normalizeQuote) })),
+  monitorLive: (options: { refresh?: boolean; includeWatchlist?: boolean } = {}, signal?: AbortSignal) => request<LiveMonitorSnapshot>(`/monitor/live${params({ refresh: options.refresh ? 'true' : undefined, include_watchlist: options.includeWatchlist ? 'true' : undefined })}`, { signal }).then((payload) => ({ ...payload, watchlist_quotes: (payload.watchlist_quotes || []).map((row) => normalizeQuote(row as RawQuote)) })),
+  mobileMonitorLive: (options: { refresh?: boolean; includeWatchlist?: boolean } = {}, signal?: AbortSignal) => request<LiveMonitorSnapshot>(`/mobile/monitor/live${params({ refresh: options.refresh ? 'true' : undefined, include_watchlist: options.includeWatchlist ? 'true' : undefined })}`, { signal }).then((payload) => ({ ...payload, watchlist_quotes: (payload.watchlist_quotes || []).map((row) => normalizeQuote(row as RawQuote)) })),
+  monitorStreamUrl: (options: { interval?: number; includeWatchlist?: boolean } = {}) => `${API_BASE}/monitor/stream${params({ interval: options.interval || 60, include_watchlist: options.includeWatchlist ? 'true' : undefined })}`,
   monitorSignals: (symbols: string[], options: { period?: string; limit?: number; refresh?: boolean; decisionAt?: string } = {}) => request<MonitorSignalsResponse>(`/monitor/signals${params({ symbols: symbols.join(','), period: options.period || '5m', limit: options.limit || 120, refresh: options.refresh ? 'true' : undefined, decision_at: options.decisionAt })}`),
   decisionModels: () => request<{ models: Array<{ version: string; path: string; mode: string }>; current_version?: string | null }>('/decision/models'),
   decisionMode: () => request<{ decision_mode: string; confidence_threshold: number; system2_enabled: boolean }>('/decision/mode'),
@@ -188,10 +202,10 @@ export const api = {
   audit: (runId: string) => request<AuditEvent[]>(`/runs/${runId}/audit`),
   deleteRun: (runId: string) => request<void>(`/runs/${encodeURIComponent(runId)}`, { method: 'DELETE' }),
   clearCompletedRuns: (before?: string, idempotencyKey = crypto.randomUUID()) => request<{ deleted: number; before?: string | null }>('/runs/clear-completed', { method: 'POST', headers: { 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ before: before || null }) }),
-  submitBacktest: (payload: { name: string; start_date: string; end_date: string; snapshot_ids: string[]; config: Record<string, unknown> }) => request<Run>('/backtests', { method: 'POST', body: JSON.stringify(payload) }),
-  backtest: (backtestId: string) => request<Run>(`/backtests/${backtestId}`),
-  backtests: () => request<Run[] | { items: Run[] }>('/backtests'),
-  retryBacktest: (backtestId: string) => request<Run>(`/backtests/${backtestId}/retry`, { method: 'POST' }),
+  submitBacktest: (payload: { name: string; start_date: string; end_date: string; mode?: 'SNAPSHOT' | 'WATCHLIST_HISTORICAL'; snapshot_ids?: string[]; config: Record<string, unknown> }) => request<import('./types').Backtest>('/backtests', { method: 'POST', body: JSON.stringify(payload) }),
+  backtest: (backtestId: string) => request<import('./types').Backtest>(`/backtests/${backtestId}`),
+  backtests: () => request<import('./types').Backtest[]>('/backtests'),
+  retryBacktest: (backtestId: string) => request<import('./types').Backtest>(`/backtests/${backtestId}/retry`, { method: 'POST' }),
   snapshots: () => request<Snapshot[]>('/snapshots?dataset=backtest_bundle'),
 
   users: () => request<User[]>('/admin/users'),
@@ -213,6 +227,25 @@ export const api = {
   saveSystemSettings: (payload: SystemSettingsDraft, unlockToken: string, idempotencyKey: string = crypto.randomUUID()) => request<SystemSettings>('/admin/system-settings', { method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey, 'X-System-Settings-Unlock': unlockToken }, body: JSON.stringify(payload) }),
   restoreSystemSetting: (field: string, unlockToken: string) => request<SystemSettings>(`/admin/system-settings/${encodeURIComponent(field)}`, { method: 'DELETE', headers: { 'X-System-Settings-Unlock': unlockToken } }),
   restoreAllSystemSettings: (unlockToken: string) => request<SystemSettings>('/admin/system-settings', { method: 'DELETE', headers: { 'X-System-Settings-Unlock': unlockToken } }),
+}
+
+export function openLiveMonitorStream(
+  options: { interval?: number; includeWatchlist?: boolean } = {},
+  onEvent: (event: { type: string; payload: Record<string, unknown> }) => void,
+  onError?: () => void,
+) {
+  const source = new EventSource(api.monitorStreamUrl(options), { withCredentials: true })
+  const eventNames = ['QUOTE', 'RISK', 'SIGNAL', 'STATUS', 'HEARTBEAT']
+  eventNames.forEach((name) => source.addEventListener(name, (event) => {
+    if (name === 'HEARTBEAT') return
+    try {
+      onEvent({ type: name, payload: JSON.parse((event as MessageEvent).data) as Record<string, unknown> })
+    } catch {
+      // Keep the connection alive when an intermediary sends a malformed frame.
+    }
+  }))
+  source.onerror = () => onError?.()
+  return () => source.close()
 }
 
 export async function streamAIChat(

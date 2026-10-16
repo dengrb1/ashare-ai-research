@@ -39,6 +39,16 @@ class BacktestJobExecutor(Protocol):
         snapshot_uris: dict[str, str],
     ) -> BacktestJobOutput: ...
 
+    def prepare_watchlist_historical(
+        self,
+        *,
+        backtest_id: str,
+        user_id: str,
+        start_date: Any,
+        end_date: Any,
+        config: dict[str, Any],
+    ) -> dict[str, Any]: ...
+
 
 def enqueue_backtest(backtest_id: str, redis_url: str | None = None) -> None:
     import redis
@@ -110,6 +120,43 @@ def execute_backtest_job(
         if backtest is None:
             raise KeyError(backtest_id)
         job = session.get(JobRun, backtest.run_id) if backtest.run_id else None
+        config = dict(backtest.config)
+        watchlist_training = config.get("training_mode") == "WATCHLIST_HISTORICAL"
+        prepared_snapshot = False
+        if watchlist_training and not backtest.snapshot_ids:
+            prepare = getattr(executor, "prepare_watchlist_historical", None)
+            if prepare is None:
+                raise RuntimeError("watchlist historical training collector is unavailable")
+            prepared = prepare(
+                backtest_id=backtest_id,
+                user_id=str(backtest.user_id or ""),
+                start_date=backtest.start_date,
+                end_date=backtest.end_date,
+                config=config,
+            )
+            if not isinstance(prepared, dict):
+                raise RuntimeError("watchlist historical collector returned invalid metadata")
+            snapshot_ids = prepared.get("snapshot_ids")
+            if not isinstance(snapshot_ids, list) or len(snapshot_ids) != 1:
+                raise RuntimeError("watchlist historical collector must return one frozen snapshot")
+            snapshot_id = snapshot_ids[0]
+            if not isinstance(snapshot_id, str) or not snapshot_id.strip():
+                raise RuntimeError("watchlist historical collector returned an invalid snapshot id")
+            file_hashes = prepared.get("snapshot_file_hashes")
+            if not isinstance(file_hashes, dict) or set(file_hashes) != {snapshot_id}:
+                raise RuntimeError("watchlist historical collector must return one snapshot file hash")
+            file_hash = file_hashes[snapshot_id]
+            if not isinstance(file_hash, str) or len(file_hash) != 64:
+                raise RuntimeError("watchlist historical collector returned an invalid file hash")
+            snapshot_hash = prepared.get("snapshot_sha256")
+            if not isinstance(snapshot_hash, str) or len(snapshot_hash) != 64:
+                raise RuntimeError("watchlist historical collector returned an invalid snapshot hash")
+            backtest.snapshot_ids = [snapshot_id]
+            config["snapshot_file_hashes"] = {snapshot_id: file_hash}
+            config["training_snapshot_sha256"] = snapshot_hash
+            backtest.config = config
+            prepared_snapshot = True
+            session.flush()
         manifests = list(
             session.scalars(
                 select(SnapshotManifestRow).where(
@@ -127,6 +174,24 @@ def execute_backtest_job(
                 "backtest requires committed snapshots; "
                 f"missing={missing}, uncommitted={uncommitted}"
             )
+        if watchlist_training:
+            if len(by_id) != 1 or by_id[next(iter(by_id))].dataset != "backtest_bundle":
+                raise ValueError("watchlist historical training requires a backtest bundle snapshot")
+            manifest = by_id[next(iter(by_id))]
+            owner = manifest.details.get("user_id") if isinstance(manifest.details, dict) else None
+            if owner is None or str(owner) != str(backtest.user_id or ""):
+                raise ValueError("watchlist historical snapshot ownership mismatch")
+            expected_hash = config.get("snapshot_file_hashes", {}).get(manifest.snapshot_id)
+            actual_hash = manifest.details.get("parquet_file_sha256") if isinstance(manifest.details, dict) else None
+            if not isinstance(expected_hash, str) or expected_hash != actual_hash:
+                raise ValueError("watchlist historical snapshot hash metadata changed")
+            expected_snapshot_hash = config.get("training_snapshot_sha256")
+            if (
+                not isinstance(expected_snapshot_hash, str)
+                or len(expected_snapshot_hash) != 64
+                or expected_snapshot_hash != manifest.payload_sha256
+            ):
+                raise ValueError("watchlist historical snapshot payload hash changed")
         backtest.status = "RUNNING"
         if job is not None:
             job.status = "RUNNING"
@@ -134,11 +199,23 @@ def execute_backtest_job(
                 job.run_id,
                 "BACKTEST_STARTED",
                 "Backtest worker started a fixed-snapshot run",
-                details={"backtest_id": backtest_id, "snapshot_ids": backtest.snapshot_ids},
+                details={
+                    "backtest_id": backtest_id,
+                    "snapshot_ids": backtest.snapshot_ids,
+                    "training_mode": config.get("training_mode", "SNAPSHOT"),
+                    "snapshot_collected": prepared_snapshot,
+                },
             )
-        config = dict(backtest.config)
         snapshot_uris = {
             snapshot_id: by_id[snapshot_id].parquet_uri for snapshot_id in backtest.snapshot_ids
+        }
+        config = {
+            key: config[key]
+            for key in (
+                "artifact_root", "snapshot_file_hashes", "requested_start_date",
+                "requested_end_date", "initial_capital", "benchmark",
+            )
+            if key in config
         }
         session.commit()
 

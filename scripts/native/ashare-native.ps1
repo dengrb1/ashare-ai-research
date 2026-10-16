@@ -4,6 +4,7 @@ param(
     [string]$Command = "status",
     [string]$Root,
     [string]$SourceRoot,
+    [switch]$DevMode,
     [ValidateRange(5, 300)]
     [int]$WatchdogIntervalSeconds = 10,
     [switch]$Json,
@@ -24,6 +25,7 @@ $script:SourceRoot = if ($SourceRoot) {
 } else {
     (Resolve-Path (Join-Path $script:ScriptRoot "..\..")).Path
 }
+$script:DevMode = [bool]$DevMode
 $script:Root = if ($Root) {
     [IO.Path]::GetFullPath($Root)
 } elseif ($env:ASHARE_NATIVE_ROOT) {
@@ -988,7 +990,8 @@ function Get-NativeTaskArguments {
     }
     $root = $script:Root.TrimEnd("\")
     $source = $script:SourceRoot.TrimEnd("\")
-    return '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Command watchdog -Root "{1}" -SourceRoot "{2}" -WatchdogIntervalSeconds {3}' -f $scriptPath, $root, $source, $WatchdogIntervalSeconds
+    $devArgument = if ($script:DevMode) { " -DevMode" } else { "" }
+    return ('-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Command watchdog -Root "{1}" -SourceRoot "{2}" -WatchdogIntervalSeconds {3}{4}' -f $scriptPath, $root, $source, $WatchdogIntervalSeconds, $devArgument)
 }
 
 function Get-NativeTaskSummary([switch]$Fast) {
@@ -1474,11 +1477,15 @@ function Invoke-StartCore([switch]$ForWatchdog) {
     # The Windows venv launcher keeps a second process alive. Long-lived native
     # services use the installed base interpreter with the venv packages added
     # explicitly; sys.executable then preserves the isolated market subprocess.
-    $envValues.PYTHONPATH = if ($envValues.PYTHONPATH) {
-        "$pythonSitePackages;$($envValues.PYTHONPATH)"
-    } else {
-        $pythonSitePackages
+    $sourcePythonPath = if ($script:DevMode) { Join-Path $script:SourceRoot "src" } else { $null }
+    if ($script:DevMode -and -not (Test-Path -LiteralPath $sourcePythonPath -PathType Container)) {
+        throw "development source directory is missing: $sourcePythonPath"
     }
+    $pythonPaths = @()
+    if ($sourcePythonPath) { $pythonPaths += $sourcePythonPath }
+    $pythonPaths += $pythonSitePackages
+    if ($envValues.PYTHONPATH) { $pythonPaths += [string]$envValues.PYTHONPATH }
+    $envValues.PYTHONPATH = $pythonPaths -join ";"
     Set-NativeProcessEnvironment $envValues
     Push-Location $script:Root
     try {
@@ -1557,10 +1564,27 @@ function Invoke-StartCore([switch]$ForWatchdog) {
         Write-NativeEvent "redis process started pid=$($services[-1].pid)"
         Wait-RedisReady $redisCli $redisPassword
         Assert-NativePortOwned $script:RedisPort $services
+        if ($script:DevMode) {
+            foreach ($relativePath in @("migrations", "configs")) {
+                $sourcePath = Join-Path $script:SourceRoot $relativePath
+                $runtimePath = Join-Path $script:Root $relativePath
+                if (-not (Test-Path -LiteralPath $sourcePath -PathType Container)) {
+                    throw "development source directory is missing: $sourcePath"
+                }
+                New-Item -ItemType Directory -Force -Path $runtimePath | Out-Null
+                Copy-Item -Path (Join-Path $sourcePath "*") -Destination $runtimePath -Recurse -Force
+            }
+            Copy-Item -Force -LiteralPath (Join-Path $script:SourceRoot "alembic.ini") -Destination (Join-Path $script:Root "alembic.ini")
+        }
         Invoke-NativePython @("-m", "ashare_ai.cli", "migrate")
         $apiEnv = @{}
         foreach ($key in $envValues.Keys) { $apiEnv[$key] = $envValues[$key] }
-        $apiEnv.ASHARE_NATIVE_WEB_ROOT = (Join-Path $script:Root "web")
+        $webRoot = if ($script:DevMode) { Join-Path $script:SourceRoot "web\dist" } else { Join-Path $script:Root "web" }
+        if (-not (Test-Path -LiteralPath (Join-Path $webRoot "index.html") -PathType Leaf)) {
+            if ($script:DevMode) { throw "development Web build is missing: $webRoot\index.html; click Build Web first" }
+            throw "native Web payload is missing: $webRoot\index.html; run install first"
+        }
+        $apiEnv.ASHARE_NATIVE_WEB_ROOT = $webRoot
         Assert-NativePortFree $script:ApiPort
         $services += Start-ManagedProcess "api" $pythonWindowlessExecutable @("-m", "ashare_ai.cli", "api", "--host", "127.0.0.1", "--port", "$script:ApiPort") $script:Root $apiEnv "api" $null $serviceCredential
         Write-NativeEvent "api process started pid=$($services[-1].pid)"

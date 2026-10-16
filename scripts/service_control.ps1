@@ -22,6 +22,14 @@ $llmScript = Join-Path $PSScriptRoot "llm_stack.ps1"
 $settingsPath = Join-Path $repoRoot "config\settings.json"
 $bundledPython = Join-Path $repoRoot "runtime\python\python.exe"
 $pythonCommand = if (Test-Path $bundledPython) { $bundledPython } else { "python.exe" }
+# Source checkouts do not necessarily have the package installed.  Keep the
+# lifecycle entry point usable from the repository as well as from the bundled
+# runtime; the native launcher may override this with its own environment.
+if (Test-Path (Join-Path $repoRoot "src")) {
+    $existingPythonPath = [Environment]::GetEnvironmentVariable("PYTHONPATH", "Process")
+    $sourcePath = Join-Path $repoRoot "src"
+    $env:PYTHONPATH = if ($existingPythonPath) { "$sourcePath;$existingPythonPath" } else { $sourcePath }
+}
 $configuredPorts = @{}
 if (Test-Path $settingsPath) {
     try {
@@ -51,7 +59,7 @@ $serviceDefinitions = @{
     Api = [pscustomobject]@{
         StateKey = "api_pid"
         Port = $(if ($configuredPorts.api) { $configuredPorts.api } else { 8000 })
-        HealthUrl = "http://127.0.0.1:$($(if ($configuredPorts.api) { $configuredPorts.api } else { 8000 }))/api/health"
+        HealthUrl = "http://127.0.0.1:$($(if ($configuredPorts.api) { $configuredPorts.api } else { 8000 }))/api/v1/health"
         LogPrefix = "api"
         ProcessNames = @("python", "python3")
     }
@@ -196,7 +204,8 @@ function Test-ProjectOwnedProcess {
     switch ($Service) {
         "Api" {
             return $combined.Contains("a_share_ai_trader.control_api") -or
-                $combined.Contains("a_share_ai_trader\\control_api.py")
+                $combined.Contains("a_share_ai_trader\\control_api.py") -or
+                (($combined.Contains("ashare_ai.cli") -or $combined.Contains("ashare_ai\\cli.py")) -and $combined.Contains(" api "))
         }
         "QuoteBridge" {
             return $combined.Contains("tools\\quote_bridge\\server.py") -or
@@ -299,6 +308,43 @@ function Build-StackAssets {
     if ($LASTEXITCODE -ne 0) { throw "gateway build failed" }
 }
 
+function Ensure-GatewayAsset {
+    $gatewayExe = Join-Path $gatewayDir "target\release\ashare-model-gateway.exe"
+    if (-not (Test-Path -LiteralPath $gatewayExe -PathType Leaf)) {
+        if (-not (Get-Command cargo.exe -ErrorAction SilentlyContinue)) {
+            throw "Gateway binary is missing at $gatewayExe and cargo.exe was not found. Install Rust or use the Console Development Workbench to prepare the toolchain."
+        }
+        Write-Host "Gateway binary is missing; building the release gateway now..."
+        & cargo.exe build --release --manifest-path (Join-Path $gatewayDir "Cargo.toml")
+        if ($LASTEXITCODE -ne 0) { throw "gateway build failed while repairing the missing binary" }
+    }
+}
+
+function Ensure-WebAsset {
+    $webIndex = Join-Path $webDir "dist\index.html"
+    if (-not (Test-Path -LiteralPath $webIndex -PathType Leaf)) {
+        if (-not (Get-Command npm.cmd -ErrorAction SilentlyContinue)) {
+            throw "Web build is missing at $webIndex and npm.cmd was not found. Install Node.js or use the Console Development Workbench."
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $webDir "node_modules") -PathType Container)) {
+            $env:npm_config_cache = $npmCache
+            & npm.cmd install --prefix $webDir
+            if ($LASTEXITCODE -ne 0) { throw "npm install failed while repairing the missing Web build" }
+        }
+        Write-Host "Web build is missing; building the Web assets now..."
+        & npm.cmd run build --prefix $webDir
+        if ($LASTEXITCODE -ne 0) { throw "web build failed while repairing the missing Web assets" }
+    }
+}
+
+function Ensure-RequiredStackAssets {
+    # SkipBuild is intended to skip unnecessary rebuilds, not to make a fresh
+    # checkout impossible to start. Build only the missing assets and keep the
+    # normal full-build switch available for an explicit clean rebuild.
+    Ensure-GatewayAsset
+    Ensure-WebAsset
+}
+
 function Start-ManagedService {
     param(
         [string]$Service,
@@ -342,10 +388,10 @@ function Start-ManagedService {
                 -RedirectStandardError $stderrPath -WindowStyle Hidden -PassThru
         }
         "QuoteBridge" {
-            Start-Process -FilePath $pythonCommand -ArgumentList "tools\quote_bridge\server.py", "--port", "8081" @commonArgs
+            Start-Process -FilePath $pythonCommand -ArgumentList "tools\quote_bridge\server.py", "--port", "$($definition.Port)" @commonArgs
         }
         "Api" {
-            Start-Process -FilePath $pythonCommand -ArgumentList "-m", "a_share_ai_trader.control_api" @commonArgs
+            Start-Process -FilePath $pythonCommand -ArgumentList "-m", "ashare_ai.cli", "api", "--host", "127.0.0.1", "--port", "$($definition.Port)" @commonArgs
         }
     }
     Set-StatePid $State $definition.StateKey ([Nullable[int]]$process.Id)
@@ -470,12 +516,22 @@ if ($Action -eq "Stop") {
 
 if (-not $SkipBuild -and ($Services -contains "Stack" -or $Services -contains "All")) {
     Build-StackAssets
+} elseif ($SkipBuild) {
+    if ($targets -contains "Gateway") { Ensure-GatewayAsset }
+    if ($targets -contains "Api") { Ensure-WebAsset }
 }
 foreach ($service in ($targets | Where-Object { $_ -ne "LocalModel" })) {
     Start-ManagedService $service $state
     Save-StackState $state
 }
 if ($targets -contains "LocalModel") {
-    & $llmScript -Start
+    try {
+        & $llmScript -Start
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "LocalModel 未启动（退出码 $LASTEXITCODE），核心服务仍已启动。请在 tools\llama.cpp 放置 llama-server.exe 后重试。"
+        }
+    } catch {
+        Write-Warning "LocalModel 未启动：$($_.Exception.Message)；核心服务仍已启动。请准备 llama-server.exe 和模型文件后重试。"
+    }
 }
 Wait-ForHealth $targets

@@ -47,7 +47,7 @@ def test_cli_migrate_bootstraps_empty_database_at_alembic_head(tmp_path, monkeyp
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar()
-                assert revision == "0034_research_only_cleanup"
+                assert revision == "0038_provider_routing"
             assert {
                 "exit_advice",
                 "ai_response_cache",
@@ -81,6 +81,12 @@ def test_cli_migrate_bootstraps_empty_database_at_alembic_head(tmp_path, monkeyp
                 if column["name"] == "providers"
             )
             assert str(providers_column["default"]).strip("()'") == "[]"
+            assert {"watchlist_groups", "monitoring_policy"} <= {
+                column["name"] for column in inspect(engine).get_columns("user_asset_states")
+            }
+            assert "encrypted_provider_keys" in {
+                column["name"] for column in inspect(engine).get_columns("model_configuration_versions")
+            }
         finally:
             engine.dispose()
     finally:

@@ -45,3 +45,19 @@ npm run build
 ## 目录
 
 `src/ashare_ai/` 后端与评分；`web/` React/Vite；`configs/` 版本化配置；`migrations/` 数据库迁移；`docker/` 容器与模型网关；`docs/` 部署与 API 文档；`tests/` 测试。
+## Windows 一键开发与桌面运行
+
+Windows 用户可以直接运行 `scripts\dev.cmd`，无需记忆多个构建脚本：
+
+```powershell
+scripts\dev.cmd all          # Web、原生管理器、安装包和开发控制台
+scripts\dev.cmd web          # 仅编译 Web
+scripts\dev.cmd native       # 仅编译 Windows 托盘管理器
+scripts\dev.cmd installer    # 生成 dist\AshareAI-Setup.exe
+scripts\dev.cmd check        # Python/Web 测试、构建和 diff 检查
+```
+
+安装 `windows\native-control-center\dist\AshareAI-Setup.exe` 后，开始菜单会出现
+`AshareAI\AshareAI 本机运行管理器`。管理器支持托盘运行、开机启动、启动/停止本机研究服务和一键打开 Web 工作台；关闭窗口会隐藏到托盘，托盘菜单中的“退出”才会结束管理器。
+
+开发时无需重编译或重装桌面安装包。双击 `tools\console\run-console.vbs` 打开开发工作台，在“开发工作台”页面选择源码目录和源码外的 runtime 目录，首次点击“初始化 / 更新 runtime”，之后点击“启动源码服务”。Python 改动后重启服务即可加载当前源码；Web 改动后先点“构建 Web”，再重启服务并刷新浏览器。工作台还提供 Python/Web 测试、诊断、日志、打开 Web、编译托盘管理器、构建安装包、编译开发控制台和一键全量构建。

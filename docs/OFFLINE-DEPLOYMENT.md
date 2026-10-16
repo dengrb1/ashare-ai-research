@@ -53,4 +53,4 @@ docker compose -p ashare-ai-src -f compose.yaml exec -T postgres \
 
 离线环境不能执行需要外部模型或行情供应商的请求。研究快照仍必须满足 `symbol`、`trading_date`、
 `available_at` 和 `decision_at` 的 PIT 约束；低置信度 System-2 诊断在模型网关不可用时显示失败状态，
-不会改变 Jev 的确定性裁决。
+不会改变 factor 的确定性裁决。

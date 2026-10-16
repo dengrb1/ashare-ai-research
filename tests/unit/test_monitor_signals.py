@@ -101,3 +101,18 @@ def test_monitor_signal_api_contract_keeps_pit_and_evidence_fields(
     assert item.available_at <= item.decision_at
     assert item.signal_type == "INTRADAY_DROP"
     assert "primary" in item.evidence
+
+
+def test_custom_drop_threshold_changes_trigger(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ASHARE_NATIVE_TECHNICAL", "off")
+    bars = _bars([100.0, 99.8, 99.5, 99.0], [100.0] * 4)
+    common = dict(
+        symbol="600000.SH",
+        bars=bars,
+        available_at=datetime(2026, 9, 25, 16, 0, tzinfo=UTC),
+        decision_at=datetime(2026, 9, 25, 18, 0, tzinfo=UTC),
+    )
+    assert not detect_monitor_signals(**common)
+    signals = detect_monitor_signals(**common, thresholds={"intraday_drop": -0.01})
+    assert [item.signal_type for item in signals] == ["INTRADAY_DROP"]
+    assert signals[0].evidence["drop_threshold"] == -0.01

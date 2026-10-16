@@ -90,10 +90,12 @@ if ($Start) {
         throw "Port $modelPort is in use. Run .\scripts\llm_stack.ps1 -Stop first, or check the process."
     }
     if (-not (Test-Path $serverExe)) {
-        throw "llama-server.exe not found at $serverExe. Extract the win-cuda zip into tools\llama.cpp first."
+        Write-Warning "LocalModel unavailable: llama-server.exe not found at $serverExe. Extract the win-cuda zip into tools\llama.cpp first."
+        return
     }
     if (-not (Test-Path $modelPath)) {
-        throw "Model not found at $modelPath. Run the packaged installer or set LOCAL_MODEL_PATH."
+        Write-Warning "LocalModel unavailable: model not found at $modelPath. Run the packaged installer or set LOCAL_MODEL_PATH."
+        return
     }
     $proc = Start-Process -FilePath $serverExe `
         -ArgumentList "-m", "`"$modelPath`"", "--host", "127.0.0.1", "--port", "$modelPort", `

@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 from ashare_ai.agents.decision.models import MarketState, UnifiedDecision
+
+if TYPE_CHECKING:
+    from ashare_ai.core.contracts import CompositeScore
 
 
 class DecisionProvider(ABC):
     """统一决策接口，所有决策模式必须实现此协议"""
 
     @abstractmethod
-    async def predict(self, market_state: MarketState) -> UnifiedDecision:
+    async def predict(
+        self,
+        market_state: MarketState,
+        composite_score: CompositeScore | None = None,
+    ) -> UnifiedDecision:
         """
         根据市场状态生成决策。
 
@@ -28,7 +36,7 @@ class DecisionProvider(ABC):
     @property
     @abstractmethod
     def mode(self) -> str:
-        """返回当前 Provider 的模式标识：legacy 或 jev"""
+        """返回当前 Provider 的模式标识：factor"""
         ...
 
     @property

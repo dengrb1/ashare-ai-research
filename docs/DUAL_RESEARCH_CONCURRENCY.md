@@ -1,7 +1,7 @@
 # 单一 Job Worker 运行说明
 
 研究专用分支固定使用 `SERIAL` 运行模式。Compose、GHCR 和 Windows/Linux 原生控制器都只启动一个
-`job-worker`，它按租约顺序消费以下队列：研究、回测、Trade Plan、个人档案、退出建议、Jev 训练和
+`job-worker`，它按租约顺序消费以下队列：研究、回测、Trade Plan、个人档案、退出建议、因子进化和
 System-2 诊断。
 
 ## 启动

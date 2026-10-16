@@ -37,6 +37,7 @@ interface MarketValue {
   stopLossMonitorEnabled: boolean
   buyMonitorEnabled: boolean
   marketRefreshIntervalSeconds: MarketRefreshIntervalSeconds
+  monitoringPolicy: import('../types').MonitoringPolicy | null
   assetsLoading: boolean
   assetsSaving: boolean
   quotesLoading: boolean
@@ -115,6 +116,7 @@ export function MarketProvider({ children }: { children: ReactNode }) {
   const [stopLossMonitorEnabled, setStopLossMonitorEnabled] = useState(true)
   const [buyMonitorEnabled, setBuyMonitorEnabled] = useState(true)
   const [marketRefreshIntervalSeconds, setMarketRefreshIntervalSeconds] = useState<MarketRefreshIntervalSeconds>(5)
+  const [monitoringPolicy, setMonitoringPolicy] = useState<import('../types').MonitoringPolicy | null>(null)
   const [assetsLoading, setAssetsLoading] = useState(true)
   const [assetsSaving, setAssetsSaving] = useState(false)
   const [quotesLoading, setQuotesLoading] = useState(true)
@@ -155,6 +157,7 @@ export function MarketProvider({ children }: { children: ReactNode }) {
       setStopLossMonitorEnabled(state.stop_loss_monitor_enabled !== false)
       setBuyMonitorEnabled(state.buy_monitor_enabled !== false)
       setMarketRefreshIntervalSeconds(state.market_refresh_interval_seconds ?? 5)
+      setMonitoringPolicy(state.monitoring_policy || null)
     }).catch((error) => {
       if (!active) return
       setMeta((current) => ({ ...current, error: error instanceof Error ? error.message : '自选与持仓加载失败' }))
@@ -626,7 +629,7 @@ export function MarketProvider({ children }: { children: ReactNode }) {
     return work
   }, [])
 
-  const value = useMemo(() => ({ quotes, watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, stopLossMonitorEnabled, buyMonitorEnabled, marketRefreshIntervalSeconds, assetsLoading, assetsSaving, quotesLoading, marketSession, ...meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings, saveMarketRefreshInterval, subscribe, refresh, refreshSymbol, refreshRemaining, prefetch, getKline, loadKline }), [quotes, watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, stopLossMonitorEnabled, buyMonitorEnabled, marketRefreshIntervalSeconds, assetsLoading, assetsSaving, quotesLoading, marketSession, meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings, saveMarketRefreshInterval, subscribe, refresh, refreshSymbol, refreshRemaining, prefetch, getKline, loadKline])
+  const value = useMemo(() => ({ quotes, watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, stopLossMonitorEnabled, buyMonitorEnabled, marketRefreshIntervalSeconds, monitoringPolicy, assetsLoading, assetsSaving, quotesLoading, marketSession, ...meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings, saveMarketRefreshInterval, subscribe, refresh, refreshSymbol, refreshRemaining, prefetch, getKline, loadKline }), [quotes, watchlist, positions, totalAssets, exitMonitorEnabled, defaultProfitTrigger, stopLossMonitorEnabled, buyMonitorEnabled, marketRefreshIntervalSeconds, monitoringPolicy, assetsLoading, assetsSaving, quotesLoading, marketSession, meta, klineVersion, addWatch, removeWatch, reorderWatchlist, upsertPosition, removePosition, saveTotalAssets, saveExitSettings, saveMarketRefreshInterval, subscribe, refresh, refreshSymbol, refreshRemaining, prefetch, getKline, loadKline])
   return <MarketContext.Provider value={value}>{children}</MarketContext.Provider>
 }
 

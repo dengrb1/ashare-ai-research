@@ -37,6 +37,13 @@ class ProviderFailoverStructuredLLMClient:
         self.last_request_mode = "json_schema"
         self.last_status_code: int | None = None
 
+    async def aclose(self) -> None:
+        """Close every owned provider client, including after partial failures."""
+        for provider in self._providers:
+            close = getattr(provider.client, "aclose", None)
+            if close is not None:
+                await close()
+
     async def generate_structured(
         self,
         *,

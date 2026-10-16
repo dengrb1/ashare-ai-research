@@ -11,6 +11,21 @@ $buildDir = Join-Path $consoleDir "build"
 $outExe = Join-Path $distDir "A-Share-AI-Trader-Console.exe"
 $rootExe = Join-Path $repoRoot "A-Share-AI-Trader-Console.exe"
 
+# Remove only artifacts owned by this build. A running exe may be locked; in
+# that case keep it until publish below and use the deterministic pending file.
+foreach ($path in @($distDir, $buildDir)) {
+    if (Test-Path -LiteralPath $path) {
+        try { Remove-Item -Recurse -Force -LiteralPath $path -ErrorAction Stop }
+        catch { Write-Warning "无法清理旧构建目录（可能仍被占用）：$path" }
+    }
+}
+foreach ($path in @($rootExe, (Join-Path $repoRoot "A-Share-AI-Trader-Console.pending.exe"))) {
+    if (Test-Path -LiteralPath $path) {
+        try { Remove-Item -Force -LiteralPath $path -ErrorAction Stop } catch { Write-Warning "无法删除旧 Console 产物：$path" }
+    }
+}
+New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+
 python -m pip install --upgrade pyinstaller
 if ($LASTEXITCODE -ne 0) { throw "pyinstaller install failed" }
 

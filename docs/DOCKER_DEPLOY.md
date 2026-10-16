@@ -49,7 +49,7 @@ Edge Gateway profile。
 
 - `gateway` 是 LLM 模型网关，监听 `8787`，与 Edge Gateway 概念不同。
 - `quote-bridge` 只提供实时行情补充数据，监听 `8081`。
-- `job-worker` 串行消费研究、回测、Trade Plan、个人档案、退出建议、Jev 训练和 System-2 队列。
+- `job-worker` 串行消费研究、回测、Trade Plan、个人档案、退出建议、因子进化和 System-2 队列。
 - API 使用冻结研究快照生成评分；实时指数展示与研究快照隔离。
 
 不启动搜索服务，也不提供联网新闻检索。研究结果必须携带 `symbol`、`trading_date`、`available_at`

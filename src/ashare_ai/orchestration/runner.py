@@ -21,6 +21,7 @@ def dispatch_auto_research_once() -> dict[str, Any]:
 def dispatch_scheduled_tasks() -> dict[str, Any]:
     from ashare_ai.notifications.service import NotificationService
     from ashare_ai.orchestration.exit_advice_jobs import dispatch_exit_advice
+    from ashare_ai.orchestration.strategy_evolution_jobs import dispatch_weekly_evolution
     from ashare_ai.portfolio.monitoring import BuyEntryMonitorService, StopLossMonitorService
     from ashare_ai.portfolio.trade_advice import TradeAdviceService
     from ashare_ai.storage.database import SessionLocal
@@ -47,6 +48,9 @@ def dispatch_scheduled_tasks() -> dict[str, Any]:
         "buy_entry_refresh_created": refresh_created,
         "expired_notifications": expired_notifications,
         "daily_research": dispatch_auto_research_once(),
+        # Low-frequency factor-genome evolution.  This only enqueues a job that
+        # produces candidates for administrator approval.
+        "strategy_evolution": dispatch_weekly_evolution(now=now),
     }
 
 

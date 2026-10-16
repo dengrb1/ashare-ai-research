@@ -1,9 +1,19 @@
+"""Decision router: the single entry point for every decision request.
+
+The router always produces a deterministic factor decision.  ``legacy`` is
+accepted as a compatibility alias for ``factor``; ``jev`` is rejected with an
+explicit deprecation error so no new Jev decision can be created.
+
+The optional System-2 path is unchanged: it only runs a bounded LLM diagnostic
+when confidence is low or the primary provider fails, and it never alters the
+factor score or the position.
+"""
+
 from __future__ import annotations
 
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
@@ -14,8 +24,15 @@ from ashare_ai.core.hashing import stable_hash
 
 if TYPE_CHECKING:
     from ashare_ai.agents.decision.models import DecisionMode, MarketState, UnifiedDecision
+    from ashare_ai.scoring.factor import FactorGenome
 
 logger = logging.getLogger(__name__)
+
+# ``legacy`` is a compatibility alias: a request that asks for it still gets a
+# deterministic factor decision.  ``jev`` is only accepted when *reading* a
+# historical record, never when creating one.
+COMPATIBLE_REQUEST_MODES = frozenset({"factor", "legacy"})
+RETIRED_REQUEST_MODES = frozenset({"jev"})
 
 
 class System2Diagnostic(BaseModel):
@@ -31,7 +48,7 @@ async def _llm_system2_dispatch(market_state: MarketState, reason: str) -> Syste
 
     The model receives only the frozen market state and never decides an order.
     Its validated response is logged as a diagnostic event; the deterministic
-    Jev/legacy decision returned by the router remains authoritative.
+    factor decision returned by the router remains authoritative.
     """
 
     from ashare_ai.agents.model_settings import ModelConfigurationService
@@ -92,60 +109,47 @@ async def _llm_system2_dispatch(market_state: MarketState, reason: str) -> Syste
         await client.aclose()
 
 
-class DecisionRouter:
-    """
-    决策模式路由器，根据配置选择 Legacy 或 Jev Provider。
+def normalize_request_mode(mode: str) -> str:
+    """Map a requested mode onto the only mode that creates decisions.
 
-    处理：
-    - mode 校验
-    - 模型加载失败处理
-    - fallback 逻辑
-    - 统一的审计记录
+    ``legacy`` is a compatibility alias for ``factor``.  ``jev`` is retired and
+    raises so a caller cannot silently receive a decision it did not ask for.
+    """
+
+    normalized = (mode or "factor").strip().casefold()
+    if normalized in RETIRED_REQUEST_MODES:
+        raise ValueError(
+            "decision mode 'jev' has been removed; use 'factor' "
+            "(the deterministic factor scoring formula)"
+        )
+    if normalized not in COMPATIBLE_REQUEST_MODES:
+        raise ValueError(f"Unsupported decision mode: {mode}")
+    return "factor"
+
+
+class DecisionRouter:
+    """Deterministic factor router with a frozen-genome fallback.
+
+    The primary provider applies the active :class:`FactorGenome`.  If it
+    cannot produce a decision, the router falls back to the frozen default
+    genome so a research run degrades to the baseline formula instead of
+    failing outright.
     """
 
     def __init__(
         self,
-        mode: DecisionMode = "jev",
+        mode: DecisionMode = "factor",
         fallback_enabled: bool = True,
-        jev_model_dir: Path | None = None,
-        jev_model_version: str = "jev-baseline-v1",
-        jev_checkpoint: Path | None = None,
-        jev_device: str = "auto",
-        jev_backend: str = "local",
-        jev_live_base_url: str | None = None,
-        jev_live_api_key: str | None = None,
-        jev_live_model: str = "jev-live",
-        jev_live_endpoint: str = "/v1/decisions",
-        jev_live_timeout_seconds: float = 30.0,
+        genome: FactorGenome | None = None,
         confidence_threshold: float = 0.60,
         system2_enabled: bool = True,
         system2_provider: DecisionProvider | None = None,
         system2_dispatch: Callable[[MarketState, str], Awaitable[None]] | None = None,
         system2_enqueue: Callable[[MarketState, str], str] | None = None,
     ):
-        """
-        初始化决策路由器。
-
-        Args:
-            mode: 决策模式 legacy 或 jev
-            fallback_enabled: Jev 异常时是否回退到 Legacy
-            jev_model_dir: Jev 模型目录
-            jev_model_version: Jev 模型版本
-            jev_checkpoint: Jev checkpoint 路径
-            jev_device: Jev 运行设备
-        """
-        self._mode = mode
+        self._mode = normalize_request_mode(mode)
         self._fallback_enabled = fallback_enabled
-        self._jev_model_dir = jev_model_dir or Path("data/models/jev")
-        self._jev_model_version = jev_model_version
-        self._jev_checkpoint = jev_checkpoint
-        self._jev_device = jev_device
-        self._jev_backend = jev_backend
-        self._jev_live_base_url = jev_live_base_url
-        self._jev_live_api_key = jev_live_api_key
-        self._jev_live_model = jev_live_model
-        self._jev_live_endpoint = jev_live_endpoint
-        self._jev_live_timeout_seconds = jev_live_timeout_seconds
+        self._genome = genome
         if not 0.0 <= confidence_threshold <= 1.0:
             raise ValueError("confidence_threshold must be between 0 and 1")
         self._confidence_threshold = confidence_threshold
@@ -170,6 +174,10 @@ class DecisionRouter:
         self._fallback_provider: DecisionProvider | None = None
 
     @property
+    def mode(self) -> str:
+        return self._mode
+
+    @property
     def system2_state(self) -> str:
         """Current best-effort System-2 diagnostic state for the UI."""
         return self._system2_state
@@ -178,49 +186,23 @@ class DecisionRouter:
     def system2_job_id(self) -> str | None:
         return self._system2_job_id
 
-    def _get_provider(self, mode: DecisionMode) -> DecisionProvider:
-        """根据模式创建 Provider"""
-        if mode == "legacy":
-            from ashare_ai.agents.decision.legacy import LegacyDecisionProvider
+    def _get_provider(self, mode: str) -> DecisionProvider:
+        """Build the provider for a normalized mode."""
 
-            return LegacyDecisionProvider()
-        elif mode == "jev":
-            if self._jev_backend == "live":
-                from ashare_ai.agents.decision.jev_live import JevLiveDecisionProvider
+        from ashare_ai.agents.decision.factor import FactorDecisionProvider
 
-                return JevLiveDecisionProvider(
-                    base_url=self._jev_live_base_url or "",
-                    api_key=self._jev_live_api_key or "",
-                    model=self._jev_live_model,
-                    endpoint=self._jev_live_endpoint,
-                    timeout_seconds=self._jev_live_timeout_seconds,
-                )
-            from ashare_ai.agents.decision.jev import JevDecisionProvider
-
-            return JevDecisionProvider(
-                model_dir=self._jev_model_dir,
-                model_version=self._jev_model_version,
-                checkpoint_path=self._jev_checkpoint,
-                device=self._jev_device,
-            )
-        else:
-            raise ValueError(f"Unsupported decision mode: {mode}")
+        if mode == "factor":
+            return FactorDecisionProvider(self._genome)
+        raise ValueError(f"Unsupported decision mode: {mode}")
 
     async def predict(self, market_state: MarketState) -> UnifiedDecision:
-        """
-        执行决策推理，处理 fallback 逻辑。
-
-        Args:
-            market_state: 市场状态输入
-
-        Returns:
-            UnifiedDecision: 统一决策输出
+        """Execute one decision, handling the frozen-genome fallback.
 
         Raises:
-            RuntimeError: 主 Provider 失败且 fallback 未开启
-            ValueError: 输入非法
+            RuntimeError: the primary provider failed and fallback is disabled.
+            ValueError: the requested mode is retired or unknown.
         """
-        # 延迟初始化主 Provider
+
         if self._primary_provider is None:
             self._primary_provider = self._get_provider(self._mode)
 
@@ -242,7 +224,6 @@ class DecisionRouter:
             return decision
 
         except Exception as exc:
-            # 记录主 Provider 失败
             logger.error(
                 "Primary decision provider failed",
                 extra={
@@ -255,26 +236,20 @@ class DecisionRouter:
                 exc_info=True,
             )
 
-            self._schedule_system2(market_state, "JEV_UNAVAILABLE")
-            # 如果 fallback 未开启，直接抛出异常
+            self._schedule_system2(market_state, "FACTOR_UNAVAILABLE")
             if not self._fallback_enabled:
                 raise RuntimeError(
                     f"Decision provider ({self._mode}) failed and fallback is disabled. "
                     f"Enable fallback in config or fix the primary provider. Error: {exc}"
                 ) from exc
 
-            # fallback 到 Legacy
             logger.warning(
-                "Falling back to legacy decision provider",
-                extra={
-                    "primary_mode": self._mode,
-                    "fallback_mode": "legacy",
-                    "symbol": market_state.symbol,
-                },
+                "Falling back to the frozen default factor genome",
+                extra={"primary_mode": self._mode, "symbol": market_state.symbol},
             )
 
             if self._fallback_provider is None:
-                self._fallback_provider = self._get_provider("legacy")
+                self._fallback_provider = self._get_provider("factor")
 
             try:
                 decision = await self._fallback_provider.predict(market_state)
@@ -282,7 +257,6 @@ class DecisionRouter:
                     "Fallback decision generated",
                     extra={
                         "primary_mode": self._mode,
-                        "fallback_mode": "legacy",
                         "symbol": market_state.symbol,
                         "trading_date": str(market_state.trading_date),
                         "action": decision.action,
@@ -294,14 +268,13 @@ class DecisionRouter:
                     "Fallback decision provider also failed",
                     extra={
                         "primary_mode": self._mode,
-                        "fallback_mode": "legacy",
                         "symbol": market_state.symbol,
                         "error": str(fallback_exc),
                     },
                     exc_info=True,
                 )
                 raise RuntimeError(
-                    f"Both primary ({self._mode}) and fallback (legacy) providers failed. "
+                    f"Both primary ({self._mode}) and fallback (factor) providers failed. "
                     f"Primary error: {exc}. Fallback error: {fallback_exc}"
                 ) from fallback_exc
 
@@ -358,51 +331,21 @@ class DecisionRouter:
 
 
 def create_decision_router(
-    mode: DecisionMode = "jev",
+    mode: DecisionMode = "factor",
     fallback_enabled: bool = True,
-    jev_model_dir: Path | None = None,
-    jev_model_version: str = "jev-baseline-v1",
-    jev_checkpoint: Path | None = None,
-    jev_device: str = "auto",
-    jev_backend: str = "local",
-    jev_live_base_url: str | None = None,
-    jev_live_api_key: str | None = None,
-    jev_live_model: str = "jev-live",
-    jev_live_endpoint: str = "/v1/decisions",
-    jev_live_timeout_seconds: float = 30.0,
+    genome: FactorGenome | None = None,
     confidence_threshold: float = 0.60,
     system2_enabled: bool = True,
-        system2_provider: DecisionProvider | None = None,
-        system2_dispatch: Callable[[MarketState, str], Awaitable[None]] | None = None,
-        system2_enqueue: Callable[[MarketState, str], str] | None = None,
+    system2_provider: DecisionProvider | None = None,
+    system2_dispatch: Callable[[MarketState, str], Awaitable[None]] | None = None,
+    system2_enqueue: Callable[[MarketState, str], str] | None = None,
 ) -> DecisionRouter:
-    """
-    工厂函数：创建决策路由器。
+    """Factory function: create the deterministic factor decision router."""
 
-    Args:
-        mode: 决策模式
-        fallback_enabled: 是否启用 fallback
-        jev_model_dir: Jev 模型目录
-        jev_model_version: Jev 模型版本
-        jev_checkpoint: Jev checkpoint 路径
-        jev_device: Jev 设备
-
-    Returns:
-        DecisionRouter 实例
-    """
     return DecisionRouter(
         mode=mode,
         fallback_enabled=fallback_enabled,
-        jev_model_dir=jev_model_dir,
-        jev_model_version=jev_model_version,
-        jev_checkpoint=jev_checkpoint,
-        jev_device=jev_device,
-        jev_backend=jev_backend,
-        jev_live_base_url=jev_live_base_url,
-        jev_live_api_key=jev_live_api_key,
-        jev_live_model=jev_live_model,
-        jev_live_endpoint=jev_live_endpoint,
-        jev_live_timeout_seconds=jev_live_timeout_seconds,
+        genome=genome,
         confidence_threshold=confidence_threshold,
         system2_enabled=system2_enabled,
         system2_provider=system2_provider,

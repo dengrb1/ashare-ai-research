@@ -1,4 +1,5 @@
-import { Navigate, Outlet, Route, Routes } from 'react-router'
+import { Navigate, Outlet, Route, Routes, useLocation } from 'react-router'
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import { MarketProvider } from './context/MarketContext'
 import { AppShell } from './components/AppShell'
@@ -20,7 +21,11 @@ function ProtectedApp() {
 
 function AppRoutes() {
   const { user } = useAuth()
-  return <Routes>
+  const location = useLocation()
+  const reduceMotion = useReducedMotion()
+  return <AnimatePresence mode="wait" initial={false}>
+    <motion.div key={location.pathname} className="route-transition" initial={reduceMotion ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={reduceMotion ? undefined : { opacity: 0, y: -5 }}>
+      <Routes location={location}>
     <Route path="/login" element={user ? <Navigate to="/" replace /> : <LoginPage />} />
     <Route element={<ProtectedApp />}>
       <Route element={<AppShell />}>
@@ -32,11 +37,13 @@ function AppRoutes() {
         {['dashboard', 'market', 'assets', 'exit-advice', 'portfolio'].map((path) => <Route key={path} path={path} element={<Navigate to="/monitor" replace />} />)}
         {['research', 'candidates', 'reports', 'backtest', 'runs'].map((path) => <Route key={path} path={path} element={<Navigate to="/strategies" replace />} />)}
         <Route path="ai-chat" element={<Navigate to="/copilot" replace />} />
-        {['admin', 'admin/models', 'admin/system-settings', 'admin/jev-model', 'admin/jev-training', 'profile-data', 'search', 'admin/edge-gateway'].map((path) => <Route key={path} path={path} element={<Navigate to="/settings" replace />} />)}
+        {['admin', 'admin/models', 'admin/system-settings', 'profile-data', 'search', 'admin/edge-gateway'].map((path) => <Route key={path} path={path} element={<Navigate to="/settings" replace />} />)}
       </Route>
     </Route>
-    <Route path="*" element={<Navigate to="/" replace />} />
-  </Routes>
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </motion.div>
+  </AnimatePresence>
 }
 
 export function App() {

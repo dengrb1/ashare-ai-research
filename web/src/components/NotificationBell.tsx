@@ -41,6 +41,19 @@ export function NotificationBell() {
   }, [])
 
   useEffect(() => {
+    if (typeof EventSource === 'undefined') return
+    const source = new EventSource(api.notificationStreamUrl({ interval: 3 }), { withCredentials: true })
+    const refresh = () => { void refreshSummary(); if (open) void loadItems() }
+    source.addEventListener('NOTIFICATION', refresh)
+    source.addEventListener('STATUS', refresh)
+    return () => {
+      source.removeEventListener('NOTIFICATION', refresh)
+      source.removeEventListener('STATUS', refresh)
+      source.close()
+    }
+  }, [open])
+
+  useEffect(() => {
     if (!open) return
     void loadItems()
     const onPointerDown = (event: MouseEvent) => {

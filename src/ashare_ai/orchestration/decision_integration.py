@@ -10,14 +10,16 @@ import logging
 from datetime import date
 from typing import TYPE_CHECKING
 
-from ashare_ai.agents.decision.legacy import LegacyDecisionProvider
+from ashare_ai.agents.decision.factor import FactorDecisionProvider
 from ashare_ai.agents.decision.market_state import build_market_state_from_bundle
 from ashare_ai.agents.decision.models import UnifiedDecision
-from ashare_ai.agents.decision.router import DecisionRouter, create_decision_router
+from ashare_ai.agents.decision.router import create_decision_router, normalize_request_mode
+from ashare_ai.quant.factor_registry import load_active_factor_genome
 
 if TYPE_CHECKING:
     from ashare_ai.core.contracts import CompositeScore
     from ashare_ai.orchestration.bundle import CanonicalDailyBundle
+    from ashare_ai.scoring.factor import FactorGenome
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +28,9 @@ async def generate_decision_from_composite_score(
     composite_score: CompositeScore,
     bundle: CanonicalDailyBundle,
     *,
-    mode: str = "legacy",
-    model_version: str = "legacy-v1.0.0",
+    mode: str = "factor",
+    model_version: str | None = None,
+    genome: "FactorGenome | None" = None,
 ) -> UnifiedDecision:
     """
     从现有 CompositeScore 生成 UnifiedDecision。
@@ -37,8 +40,8 @@ async def generate_decision_from_composite_score(
     Args:
         composite_score: 现有评分结果
         bundle: 市场数据 Bundle
-        mode: 决策模式（"legacy" 或 "jev"）
-        model_version: 模型版本
+        mode: 决策模式；``factor`` 与兼容别名 ``legacy`` 都生成因子决策
+        model_version: 模型版本；缺省使用因子公式版本
 
     Returns:
         UnifiedDecision: 统一决策结果
@@ -50,13 +53,12 @@ async def generate_decision_from_composite_score(
         trading_date=composite_score.trading_date,
     )
 
-    if mode == "legacy":
-        provider = LegacyDecisionProvider(model_version=model_version)
-        return await provider.predict(market_state, composite_score=composite_score)
-    else:
-        # Jev 模式需要先训练模型
-        logger.error(f"Unsupported decision mode: {mode}")
-        raise ValueError(f"Decision mode '{mode}' not yet implemented")
+    # ``legacy`` 只是兼容输入别名，仍然由确定性因子公式生成决策。
+    normalize_request_mode(mode)
+    provider = FactorDecisionProvider(genome or load_active_factor_genome())
+    if model_version:
+        logger.debug("ignoring requested model_version %s; factor formula is versioned", model_version)
+    return await provider.predict(market_state, composite_score=composite_score)
 
 
 async def generate_decision_for_symbol(
@@ -64,7 +66,7 @@ async def generate_decision_for_symbol(
     symbol: str,
     trading_date: date,
     *,
-    mode: str = "legacy",
+    mode: str = "factor",
     fallback_enabled: bool = False,
 ) -> UnifiedDecision:
     """
@@ -88,7 +90,11 @@ async def generate_decision_for_symbol(
         trading_date=trading_date,
     )
 
-    router = create_decision_router(mode=mode, fallback_enabled=fallback_enabled)
+    router = create_decision_router(
+        mode=mode,
+        fallback_enabled=fallback_enabled,
+        genome=load_active_factor_genome(),
+    )
     return await router.predict(market_state)
 
 
@@ -96,7 +102,7 @@ async def batch_generate_decisions(
     bundle: CanonicalDailyBundle,
     symbols: list[str],
     *,
-    mode: str = "legacy",
+    mode: str = "factor",
     fallback_enabled: bool = False,
 ) -> dict[str, UnifiedDecision]:
     """
@@ -111,7 +117,14 @@ async def batch_generate_decisions(
     Returns:
         dict[str, UnifiedDecision]: 股票代码到决策的映射
     """
-    router = create_decision_router(mode=mode, fallback_enabled=fallback_enabled)
+    # Resolve once for the whole batch so a mid-run approval cannot mix
+    # strategy versions between symbols.
+    frozen_genome = load_active_factor_genome()
+    router = create_decision_router(
+        mode=mode,
+        fallback_enabled=fallback_enabled,
+        genome=frozen_genome,
+    )
     results: dict[str, UnifiedDecision] = {}
 
     for symbol in symbols:

@@ -27,6 +27,7 @@ from ashare_ai.storage.models import (
     ReportRow,
     ScoreRow,
     SnapshotManifestRow,
+    UserAssetState,
 )
 from ashare_ai.storage.object_service import StoredObjectService
 from ashare_ai.storage.objects import LocalObjectStore
@@ -255,6 +256,59 @@ def test_backtest_enqueue_unavailable_returns_chinese_503(monkeypatch) -> None:
         # The public response never leaks the exception text or endpoint.
         assert "redis" not in response.text
         assert "127.0.0.1" not in response.text
+    finally:
+        app.dependency_overrides.clear()
+        session.close()
+
+
+def test_watchlist_backtest_persists_validated_collector_inputs(monkeypatch) -> None:
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    session = Session(engine, expire_on_commit=False)
+    session.add(
+        UserAssetState(
+            user_id="legacy-test-admin",
+            watchlist=["600000.SH", "000001.SZ"],
+            updated_at=datetime.now(UTC),
+        )
+    )
+    session.commit()
+    _override_authenticated_admin(session)
+    queued: list[str] = []
+    monkeypatch.setattr("ashare_ai.api.app.enqueue_backtest", queued.append)
+    payload = {
+        "name": "watchlist training",
+        "start_date": "2025-01-01",
+        "end_date": "2025-12-31",
+        "mode": "WATCHLIST_HISTORICAL",
+        "config": {
+            "scope": "WATCHLIST",
+            "symbols": ["600000.SH"],
+            "training_sessions": 160,
+            "history_sessions": 240,
+            "entry_discounts": [0.0, 0.02],
+            "use_real_watchlist_quotes": True,
+            "monitor_buy_entry_alerts": True,
+        },
+    }
+    try:
+        response = TestClient(app).post(
+            "/api/v1/backtests",
+            json=payload,
+            headers={"Idempotency-Key": "watchlist-training-1"},
+        )
+        assert response.status_code == 202
+        row = session.query(BacktestRun).one()
+        assert row.snapshot_ids == []
+        assert row.config["training_mode"] == "WATCHLIST_HISTORICAL"
+        assert row.config["symbols"] == ["600000.SH"]
+        assert row.config["history_sessions"] == 240
+        assert row.config["entry_discounts"] == [0.0, 0.02]
+        assert queued == [row.backtest_id]
     finally:
         app.dependency_overrides.clear()
         session.close()

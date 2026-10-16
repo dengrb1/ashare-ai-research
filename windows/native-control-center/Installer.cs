@@ -71,7 +71,7 @@ namespace AshareAI.Setup
                 var sourceRoot = Path.Combine(options.InstallRoot, "app");
                 var launchArguments = StartupEntry.BuildVisibleArguments(sourceRoot, options.RuntimeRoot);
                 var startupArguments = StartupEntry.BuildArguments(sourceRoot, options.RuntimeRoot);
-                CreateShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu), "Programs", "AshareAI 本机运行管理器.lnk"), manager, launchArguments);
+                CreateStartMenuShortcuts(options, manager, launchArguments);
                 if (!options.NoDesktopShortcut)
                     CreateShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), "AshareAI 本机运行管理器.lnk"), manager, launchArguments);
                 if (!options.NoStartup)
@@ -117,7 +117,7 @@ namespace AshareAI.Setup
         {
             var answer = options.Quiet ? DialogResult.Yes : MessageBox.Show("卸载管理器文件？运行数据与数据库会保留。", "卸载 AshareAI", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
             if (answer != DialogResult.Yes) return;
-            DeleteIfExists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu), "Programs", "AshareAI 本机运行管理器.lnk"));
+            DeleteStartMenuShortcuts();
             DeleteIfExists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), "AshareAI 本机运行管理器.lnk"));
             StartupEntry.SetEnabled(Path.Combine(options.InstallRoot, "AshareAI.NativeControlCenter.exe"), String.Empty, false);
             Registry.LocalMachine.DeleteSubKeyTree(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\AshareAI", false);
@@ -167,6 +167,28 @@ namespace AshareAI.Setup
             shortcut.GetType().InvokeMember("Arguments", BindingFlags.SetProperty, null, shortcut, new object[] { arguments ?? String.Empty });
             shortcut.GetType().InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, shortcut, new object[] { Path.GetDirectoryName(target) });
             shortcut.GetType().InvokeMember("Save", BindingFlags.InvokeMethod, null, shortcut, null);
+        }
+
+        private static string StartMenuDirectory()
+        {
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu), "Programs", "AshareAI");
+        }
+
+        private static void CreateStartMenuShortcuts(SetupOptions options, string manager, string launchArguments)
+        {
+            var directory = StartMenuDirectory();
+            CreateShortcut(Path.Combine(directory, "AshareAI 本机运行管理器.lnk"), manager, launchArguments);
+            CreateShortcut(Path.Combine(directory, "AshareAI 安装目录.lnk"), "explorer.exe", Quote(options.InstallRoot));
+            // Keep a flat shortcut for users who search the old display name.
+            CreateShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu), "Programs", "AshareAI 本机运行管理器.lnk"), manager, launchArguments);
+        }
+
+        private static void DeleteStartMenuShortcuts()
+        {
+            DeleteIfExists(Path.Combine(StartMenuDirectory(), "AshareAI 本机运行管理器.lnk"));
+            DeleteIfExists(Path.Combine(StartMenuDirectory(), "AshareAI 安装目录.lnk"));
+            try { Directory.Delete(StartMenuDirectory()); } catch { }
+            DeleteIfExists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu), "Programs", "AshareAI 本机运行管理器.lnk"));
         }
 
         private static void DeleteIfExists(string path) { if (File.Exists(path)) File.Delete(path); }

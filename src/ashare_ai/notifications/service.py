@@ -164,6 +164,43 @@ class NotificationService:
         next_cursor = _encode_cursor(items[-1]) if has_more and items else None
         return items, next_cursor
 
+    def list_after(
+        self,
+        user_id: str,
+        *,
+        after: datetime | None = None,
+        after_id: str | None = None,
+        limit: int = 50,
+        now: datetime | None = None,
+    ) -> list[NotificationRow]:
+        """Return a bounded user-scoped tail for SSE reconnects."""
+
+        current = (now or datetime.now(UTC)).astimezone(UTC)
+        statement = select(NotificationRow).where(
+            NotificationRow.user_id == user_id,
+            NotificationRow.expires_at > current,
+        )
+        if after is not None:
+            after_utc = after.astimezone(UTC)
+            if after_id:
+                statement = statement.where(
+                    or_(
+                        NotificationRow.created_at > after_utc,
+                        and_(
+                            NotificationRow.created_at == after_utc,
+                            NotificationRow.notification_id > after_id,
+                        ),
+                    )
+                )
+            else:
+                statement = statement.where(NotificationRow.created_at > after_utc)
+        return list(
+            self.session.scalars(
+                statement.order_by(NotificationRow.created_at.asc(), NotificationRow.notification_id.asc())
+                .limit(min(max(1, limit), 100))
+            ).all()
+        )
+
     def summary(self, user_id: str, *, now: datetime | None = None) -> dict[str, Any]:
         current = (now or datetime.now(UTC)).astimezone(UTC)
         base = [

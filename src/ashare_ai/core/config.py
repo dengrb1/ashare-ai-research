@@ -125,22 +125,24 @@ class Settings(BaseSettings):
     model_gateway_max_concurrency: int = Field(default=8, ge=1, le=128)
     model_settings_encryption_keys: str | None = None
     # Decision mode configuration
-    # Jev is the deterministic System-1 decision provider.  The optional
-    # System-2 path is only used when Jev is unavailable or below this score.
-    decision_mode: Literal["legacy", "jev"] = "jev"
+    # ``factor`` is the deterministic, versioned factor scoring formula.  The
+    # optional System-2 path only runs a bounded diagnostic when confidence is
+    # low or the factor provider fails; it never changes the score or position.
+    decision_mode: Literal["factor", "legacy"] = "factor"
     decision_fallback_enabled: bool = True
-    jev_confidence_threshold: float = Field(default=0.60, ge=0.0, le=1.0)
+    factor_confidence_threshold: float = Field(default=0.60, ge=0.0, le=1.0)
     decision_system2_enabled: bool = True
-    jev_model_dir: Path = Path("data/models/jev")
-    jev_model_version: str = "jev-baseline-v1"
-    jev_device: Literal["auto", "cpu", "cuda"] = "auto"
-    jev_checkpoint: Path | None = None
-    jev_backend: Literal["local", "live"] = "local"
-    jev_live_base_url: str | None = None
-    jev_live_api_key: str | None = None
-    jev_live_model: str = "jev-live"
-    jev_live_endpoint: str = "/v1/decisions"
-    jev_live_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
+    # Low-frequency factor-genome evolution.  The weekly job only ever produces
+    # candidates that an administrator must approve; it never changes the
+    # active genome on its own.
+    strategy_evolution_enabled: bool = True
+    strategy_evolution_weekday: int = Field(default=5, ge=0, le=6)
+    strategy_evolution_hour: int = Field(default=20, ge=0, le=23)
+    strategy_evolution_min_samples: int = Field(default=60, ge=1, le=100_000)
+    strategy_evolution_max_drawdown: float = Field(default=0.20, gt=0, le=1)
+    strategy_evolution_max_turnover: float = Field(default=20.0, gt=0, le=1000)
+    strategy_evolution_min_improvement: float = Field(default=0.0, ge=-1, le=1)
+    strategy_evolution_max_candidates: int = Field(default=8, ge=1, le=64)
     decision_cache_ttl: int = 3600  # seconds
     bundle_storage_dir: Path = Path("data/bundles")
     personal_data_encryption_keys: str | None = None
@@ -253,8 +255,6 @@ class Settings(BaseSettings):
             problems.append("MODEL_ALLOWED_HOSTS must explicitly allow model gateway hosts")
         if self.agent_backend == "openai_compatible" and not self.model_settings_encryption_keys:
             problems.append("MODEL_SETTINGS_ENCRYPTION_KEYS is required for the model backend")
-        if self.jev_backend == "live" and (not self.jev_live_base_url or not self.jev_live_api_key):
-            problems.append("JEV_LIVE_BASE_URL and JEV_LIVE_API_KEY are required when JEV_BACKEND=live")
         if not (self.personal_data_encryption_keys or self.model_settings_encryption_keys):
             problems.append(
                 "PERSONAL_DATA_ENCRYPTION_KEYS is required for images and personal archives"

@@ -45,53 +45,33 @@ def main() -> None:
         help="Skip the external market connectivity request",
     )
 
-    # Decision commands integration
+    # Decision commands integration.  ``factor`` is the only decision mode that
+    # creates new decisions; ``legacy`` is accepted as a compatibility alias.
     decision = subparsers.add_parser("decision", help="Decision mode commands")
     decision_subs = decision.add_subparsers(dest="decision_command", required=True)
 
     predict_cmd = decision_subs.add_parser("predict", help="Single prediction")
     predict_cmd.add_argument("symbol", help="Stock symbol")
     predict_cmd.add_argument("--bundle-dir", type=str, help="Bundle directory")
-    predict_cmd.add_argument("--mode", default="legacy", choices=["legacy", "jev"])
+    predict_cmd.add_argument("--mode", default="factor", choices=["factor", "legacy"])
 
     batch_cmd = decision_subs.add_parser("batch", help="Batch prediction")
     batch_cmd.add_argument("symbols_file", help="File with symbols")
     batch_cmd.add_argument("output_file", help="Output JSON file")
     batch_cmd.add_argument("--bundle-dir", type=str, help="Bundle directory")
-    batch_cmd.add_argument("--mode", default="legacy", choices=["legacy", "jev"])
+    batch_cmd.add_argument("--mode", default="factor", choices=["factor", "legacy"])
 
     decision_subs.add_parser("info", help="Show decision configuration")
     decision_subs.add_parser("list-models", help="List available models")
 
-    # Training commands integration
-    train = subparsers.add_parser("train-jev", help="Jev model training commands")
-    train_subs = train.add_subparsers(dest="train_command", required=True)
-
-    gen_dataset = train_subs.add_parser("generate-dataset", help="Generate training dataset")
-    gen_dataset.add_argument("--bundle-dir", required=True, help="Bundle directory")
-    gen_dataset.add_argument("--output-dir", required=True, help="Output directory")
-    gen_dataset.add_argument("--start-date", type=str, help="Start date (YYYY-MM-DD)")
-    gen_dataset.add_argument("--end-date", type=str, help="End date (YYYY-MM-DD)")
-
-    train_cmd = train_subs.add_parser("train", help="Train Jev model")
-    train_cmd.add_argument("--dataset-dir", required=True, help="Dataset directory")
-    train_cmd.add_argument("--checkpoint-dir", required=True, help="Checkpoint directory")
-    train_cmd.add_argument("--epochs", type=int, default=100, help="Number of epochs")
-    train_cmd.add_argument("--batch-size", type=int, default=256, help="Batch size")
-
-    eval_cmd = train_subs.add_parser("evaluate", help="Evaluate model")
-    eval_cmd.add_argument("--checkpoint", required=True, help="Checkpoint path")
-    eval_cmd.add_argument("--dataset-dir", required=True, help="Test dataset directory")
-
-    # Backtest comparison commands
-    backtest = subparsers.add_parser("backtest-compare", help="Backtest comparison commands")
-    backtest_subs = backtest.add_subparsers(dest="backtest_command", required=True)
-
-    compare_cmd = backtest_subs.add_parser("compare", help="Compare Legacy vs Jev")
-    compare_cmd.add_argument("--bundle-dir", required=True, help="Bundle directory")
-    compare_cmd.add_argument("--start-date", required=True, help="Start date")
-    compare_cmd.add_argument("--end-date", required=True, help="End date")
-    compare_cmd.add_argument("--output", help="Output report path")
+    # Low-frequency factor-genome evolution.  The job only ever produces
+    # candidates that an administrator must approve.
+    evolution = subparsers.add_parser(
+        "strategy-evolution", help="Factor genome evolution commands"
+    )
+    evolution_subs = evolution.add_subparsers(dest="evolution_command", required=True)
+    evolution_subs.add_parser("run", help="Run one weekly evolution pass now")
+    evolution_subs.add_parser("status", help="Show the active factor genome version")
 
     args = parser.parse_args()
 
@@ -106,10 +86,8 @@ def main() -> None:
             raise SystemExit(1)
     elif args.command == "decision":
         _run_decision_command(args)
-    elif args.command == "train-jev":
-        _run_train_command(args)
-    elif args.command == "backtest-compare":
-        _run_backtest_command(args)
+    elif args.command == "strategy-evolution":
+        _run_evolution_command(args)
 
 
 def _run_decision_command(args: argparse.Namespace) -> None:
@@ -117,7 +95,7 @@ def _run_decision_command(args: argparse.Namespace) -> None:
     import asyncio
     from pathlib import Path
 
-    from ashare_ai.cli import decision_commands
+    from ashare_ai.cli_commands import decision_commands
 
     if args.decision_command == "predict":
         asyncio.run(decision_commands.predict_single(
@@ -138,52 +116,14 @@ def _run_decision_command(args: argparse.Namespace) -> None:
         decision_commands.list_models()
 
 
-def _run_train_command(args: argparse.Namespace) -> None:
-    """Run training commands"""
-    import asyncio
-    from datetime import date
-    from pathlib import Path
+def _run_evolution_command(args: argparse.Namespace) -> None:
+    """Run factor-genome evolution commands"""
+    from ashare_ai.cli_commands import strategy_evolution_commands
 
-    from ashare_ai.cli import train_jev_commands
-
-    if args.train_command == "generate-dataset":
-        start_date = date.fromisoformat(args.start_date) if args.start_date else None
-        end_date = date.fromisoformat(args.end_date) if args.end_date else None
-        asyncio.run(train_jev_commands.generate_dataset(
-            bundle_dir=Path(args.bundle_dir),
-            output_dir=Path(args.output_dir),
-            start_date=start_date,
-            end_date=end_date,
-        ))
-    elif args.train_command == "train":
-        asyncio.run(train_jev_commands.train_model(
-            dataset_dir=Path(args.dataset_dir),
-            checkpoint_dir=Path(args.checkpoint_dir),
-            num_epochs=args.epochs,
-            batch_size=args.batch_size,
-        ))
-    elif args.train_command == "evaluate":
-        asyncio.run(train_jev_commands.evaluate_model(
-            checkpoint_path=Path(args.checkpoint),
-            dataset_dir=Path(args.dataset_dir),
-        ))
-
-
-def _run_backtest_command(args: argparse.Namespace) -> None:
-    """Run backtest comparison commands"""
-    import asyncio
-    from datetime import date
-    from pathlib import Path
-
-    from ashare_ai.cli import backtest_compare_commands
-
-    if args.backtest_command == "compare":
-        asyncio.run(backtest_compare_commands.compare_modes(
-            bundle_dir=Path(args.bundle_dir),
-            start_date=date.fromisoformat(args.start_date),
-            end_date=date.fromisoformat(args.end_date),
-            output_path=Path(args.output) if args.output else None,
-        ))
+    if args.evolution_command == "run":
+        strategy_evolution_commands.run_once()
+    elif args.evolution_command == "status":
+        strategy_evolution_commands.show_status()
 
 
 if __name__ == "__main__":

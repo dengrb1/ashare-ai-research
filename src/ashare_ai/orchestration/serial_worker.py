@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, time as clock_time
 from typing import Any
 
 from ashare_ai.core import energy_saving
@@ -45,7 +45,11 @@ QUEUE_SPECS = (
     QueueSpec("trade-plan", "ashare:trade-plan:pending", "ashare:trade-plan:processing"),
     QueueSpec("backtest", "ashare:backtest:pending", "ashare:backtest:processing"),
     QueueSpec("exit-review", "ashare:exit-advice:pending", "ashare:exit-advice:processing"),
-    QueueSpec("jev-training", "ashare:jev-training:pending", "ashare:jev-training:processing"),
+    QueueSpec(
+        "strategy-evolution",
+        "ashare:strategy-evolution:pending",
+        "ashare:strategy-evolution:processing",
+    ),
     QueueSpec(
         "system2-diagnostic",
         "ashare:system2-diagnostic:pending",
@@ -110,6 +114,18 @@ def _energy_saving_standby(client: Any) -> int:
         return 0
 
 
+def _monitor_cadence_seconds(now: datetime) -> int:
+    """Use fast market cadence while open and a five-minute closed-session poll."""
+
+    local = now.astimezone(SHANGHAI)
+    if local.weekday() < 5 and (
+        clock_time(9, 30) <= local.time() < clock_time(11, 30)
+        or clock_time(13, 0) <= local.time() < clock_time(15, 0)
+    ):
+        return 60
+    return 300
+
+
 def run_loop(*, max_iterations: int | None = None) -> None:
     import redis
 
@@ -127,6 +143,7 @@ def run_loop(*, max_iterations: int | None = None) -> None:
     next_schedule_check = 0.0
     next_maintenance = 0.0
     next_energy_check = 0.0
+    next_monitor = 0.0
     energy_standby = False
     previous_energy_standby = False
     iterations = 0
@@ -149,6 +166,15 @@ def run_loop(*, max_iterations: int | None = None) -> None:
             if return_code:
                 logger.error("isolated maintenance exited with status %s", return_code)
             next_maintenance = now_monotonic + 300
+        # Finite iterations are the deterministic queue-test harness; avoid
+        # launching an independent monitor process while it is being probed.
+        if max_iterations is None and now_monotonic >= next_monitor:
+            return_code = execute_isolated("monitor", "tick")
+            if return_code:
+                logger.error("isolated monitor exited with status %s", return_code)
+            # Keep the cadence bounded; the market service itself supplies
+            # stale-while-revalidate cache semantics for repeated symbols.
+            next_monitor = now_monotonic + _monitor_cadence_seconds(datetime.now(SHANGHAI))
         if now_monotonic >= next_schedule_check:
             return_code = execute_isolated("schedule", "tick")
             if return_code:

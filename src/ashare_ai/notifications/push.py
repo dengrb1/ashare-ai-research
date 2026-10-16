@@ -232,6 +232,10 @@ class MiPushSender:
 def enqueue_notification_deliveries(
     session: Session, notification: NotificationRow, now: datetime
 ) -> None:
+    # Minute-level anomaly alerts are intentionally mobile-push only at high
+    # severity; lower severity remains available in the Web notification center.
+    if notification.notification_type == "LIVE_MONITOR_ANOMALY" and notification.severity not in {"HIGH", "CRITICAL"}:
+        return
     devices = session.scalars(
         select(PushDeviceRow).where(
             PushDeviceRow.user_id == notification.user_id,

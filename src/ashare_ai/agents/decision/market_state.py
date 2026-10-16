@@ -1,11 +1,64 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
+from datetime import date
+from typing import TYPE_CHECKING
 
 from ashare_ai.agents.decision.models import MarketState
 
+if TYPE_CHECKING:
+    from ashare_ai.orchestration.bundle import CanonicalDailyBundle
+
 logger = logging.getLogger(__name__)
+
+
+def build_market_state_from_bundle(
+    bundle: CanonicalDailyBundle,
+    symbol: str,
+    trading_date: date,
+) -> MarketState:
+    """Build a point-in-time :class:`MarketState` from a frozen bundle.
+
+    Only frozen bundle fields are read: the bar for ``symbol`` on
+    ``trading_date``, the frozen benchmark returns, and the frozen industry
+    membership.  Live quotes are never consulted, so a state rebuilt later is
+    identical to the one the decision was made from.
+    """
+
+    if bundle.trading_date != trading_date:
+        raise ValueError("bundle trading_date does not match the requested trading_date")
+
+    bar = next(
+        (
+            item
+            for item in bundle.bars
+            if item.symbol == symbol and item.trading_date == trading_date
+        ),
+        None,
+    )
+    if bar is None:
+        raise ValueError(f"bundle has no bar for {symbol} on {trading_date}")
+
+    industry = next(
+        (item for item in bundle.industries if item.symbol == symbol),
+        None,
+    )
+    benchmark = bundle.benchmark_returns.get("000300.SH") or {}
+
+    return MarketState(
+        symbol=symbol,
+        trading_date=trading_date,
+        available_at=bar.available_at,
+        open=float(bar.open),
+        high=float(bar.high),
+        low=float(bar.low),
+        close=float(bar.close),
+        volume=float(bar.volume),
+        amount=float(bar.amount),
+        industry_code=getattr(industry, "industry_code", None),
+        industry_name=getattr(industry, "industry_name", None),
+        index_return_1d=benchmark.get(trading_date),
+    )
 
 
 class MarketStateBuilder:
@@ -117,6 +170,12 @@ class MarketStateBuilder:
             "bollinger_middle": features.get("bollinger_middle"),
             "bollinger_lower": features.get("bollinger_lower"),
             "turnover_rate": features.get("turnover_rate"),
+            "return_5d": features.get("return_5d"),
+            "return_20d": features.get("return_20d"),
+            "close_to_ma20": features.get("close_to_ma20"),
+            "annualized_volatility_20d": features.get("annualized_volatility_20d"),
+            "volume_ratio_5_to_20": features.get("volume_ratio_5_to_20"),
+            "max_drawdown_60d": features.get("max_drawdown_60d"),
         }
 
     def _extract_sentiment(self, features: dict) -> dict:

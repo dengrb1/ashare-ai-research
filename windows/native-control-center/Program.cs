@@ -175,6 +175,9 @@ namespace AshareAI.NativeControlCenter
         private readonly Timer refresh = new Timer();
         private readonly List<Button> actionButtons = new List<Button>();
         private NotifyIcon trayIcon;
+        private ToolStripMenuItem trayStart;
+        private ToolStripMenuItem trayStop;
+        private ToolStripMenuItem trayOpenWeb;
         private bool exitRequested;
         private Process activeProcess;
         private string activeOperation;
@@ -184,6 +187,7 @@ namespace AshareAI.NativeControlCenter
         private string queuedOperation;
         private bool queuedAsJson;
         private Dictionary<string, object> lastReport;
+        private bool? lastHealthy;
 
         public MainForm(Options options)
         {
@@ -220,9 +224,19 @@ namespace AshareAI.NativeControlCenter
             var menu = new ContextMenuStrip();
             var show = new ToolStripMenuItem("显示控制台");
             show.Click += delegate { RestoreFromTray(); };
+            trayOpenWeb = new ToolStripMenuItem("打开 Web 工作台");
+            trayOpenWeb.Click += delegate { OpenWeb(); };
+            trayStart = new ToolStripMenuItem("启动本机服务");
+            trayStart.Click += delegate { StartCommand("start", false); };
+            trayStop = new ToolStripMenuItem("停止本机服务");
+            trayStop.Click += delegate { StartCommand("stop", false); };
             var exit = new ToolStripMenuItem("退出");
             exit.Click += delegate { ExitFromTray(); };
             menu.Items.Add(show);
+            menu.Items.Add(trayOpenWeb);
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(trayStart);
+            menu.Items.Add(trayStop);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(exit);
             trayIcon = new NotifyIcon
@@ -233,6 +247,7 @@ namespace AshareAI.NativeControlCenter
                 Visible = true
             };
             trayIcon.DoubleClick += delegate { RestoreFromTray(); };
+            UpdateTrayState(false, false);
         }
 
         private static Label Label(string text, int x, int y, int width, int height)
@@ -294,7 +309,7 @@ namespace AshareAI.NativeControlCenter
             actions.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             AddAction(actions, "启动", "start", 12, 74); AddAction(actions, "停止", "stop", 92, 74); AddAction(actions, "重启", "restart", 172, 74); AddAction(actions, "修复", "repair", 252, 74); AddAction(actions, "安装更新", "install", 332, 96); AddAction(actions, "诊断", "doctor", 434, 74);
             var refreshButton = new Button { Text = "刷新", Location = new Point(902, 9), Size = new Size(76, 30), Anchor = AnchorStyles.Top | AnchorStyles.Right }; StyleButton(refreshButton, false); refreshButton.Click += delegate { StartCommand("status", true); }; actions.Controls.Add(refreshButton);
-            openWeb.Text = "打开 Web"; openWeb.Location = new Point(806, 9); openWeb.Size = new Size(86, 30); openWeb.Anchor = AnchorStyles.Top | AnchorStyles.Right; openWeb.Enabled = false; StyleButton(openWeb, true); openWeb.Click += delegate { if (lastReport != null) Process.Start(String.Format("http://127.0.0.1:{0}/", Number(lastReport, "ports", "api"))); }; actions.Controls.Add(openWeb); Controls.Add(actions);
+            openWeb.Text = "打开 Web"; openWeb.Location = new Point(806, 9); openWeb.Size = new Size(86, 30); openWeb.Anchor = AnchorStyles.Top | AnchorStyles.Right; openWeb.Enabled = false; StyleButton(openWeb, true); openWeb.Click += delegate { OpenWeb(); }; actions.Controls.Add(openWeb); Controls.Add(actions);
 
             var summary = Card(14, 254, 996, 76);
             summary.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
@@ -397,13 +412,34 @@ namespace AshareAI.NativeControlCenter
         private void UpdateReport(Dictionary<string, object> report)
         {
             lastReport = report; var desired = TextValue(report, "desired_state", "STOPPED"); var healthy = BoolValue(report, "runtime_healthy"); state.Text = StatusName(desired); state.ForeColor = healthy ? Color.FromArgb(19, 128, 74) : Color.FromArgb(190, 76, 20); health.Text = "健康状态：" + (healthy ? "健康" : "未就绪"); memory.Text = "内存：" + TextValue(report, "total_working_set_mib", "0") + " MiB";
+            if (lastHealthy.HasValue && lastHealthy.Value != healthy && trayIcon != null)
+                trayIcon.ShowBalloonTip(5000, "AshareAI 状态变化", healthy ? "本机服务已恢复健康。" : "本机服务健康检查异常，请打开控制台诊断。", healthy ? ToolTipIcon.Info : ToolTipIcon.Warning);
+            lastHealthy = healthy;
             var watch = report.ContainsKey("watchdog") && report["watchdog"] is Dictionary<string, object> ? TextValue((Dictionary<string, object>)report["watchdog"], "status", "MISSING") : "MISSING"; watchdog.Text = "看门狗：" + StatusName(watch);
             var p = report.ContainsKey("ports") ? report["ports"] as Dictionary<string, object> : null; ports.Text = p == null ? "端口：--" : String.Format("端口：PG {0}  Redis {1}\r\nAPI {2}", TextValue(p, "postgres", "--"), TextValue(p, "redis", "--"), TextValue(p, "api", "--")); openWeb.Enabled = healthy && p != null;
+            UpdateTrayState(healthy, p != null);
             services.Rows.Clear(); var rows = report.ContainsKey("services") ? report["services"] as IEnumerable : null; if (rows != null) foreach (var item in rows) { var row = item as Dictionary<string, object>; if (row != null) services.Rows.Add(TextValue(row, "service", ""), TextValue(row, "role", ""), TextValue(row, "pid", ""), BoolValue(row, "healthy") ? "是" : "否", TextValue(row, "working_set_mib", "0"), TextValue(row, "embedded_in", "")); }
         }
 
+        private void OpenWeb()
+        {
+            if (lastReport == null) return;
+            var api = Number(lastReport, "ports", "api");
+            if (String.IsNullOrWhiteSpace(api)) return;
+            Process.Start(new ProcessStartInfo("http://127.0.0.1:" + api + "/") { UseShellExecute = true });
+        }
+
+        private void UpdateTrayState(bool healthy, bool hasPorts)
+        {
+            if (trayIcon == null) return;
+            trayIcon.Text = healthy ? "AshareAI · 服务健康" : "AshareAI · 控制中心";
+            if (trayStart != null) trayStart.Enabled = !healthy;
+            if (trayStop != null) trayStop.Enabled = healthy;
+            if (trayOpenWeb != null) trayOpenWeb.Enabled = healthy && hasPorts;
+        }
+
         private void LoadWatchdogLog() { var path = Path.Combine(Path.GetFullPath(root.Text.Trim()), "logs", "watchdog.log"); if (!File.Exists(path)) { watchdogLog.Text = "暂无看门狗日志。"; return; } var lines = File.ReadAllLines(path); watchdogLog.Text = String.Join(Environment.NewLine, lines.Skip(Math.Max(0, lines.Length - 500))); watchdogLog.SelectionStart = watchdogLog.TextLength; watchdogLog.ScrollToCaret(); }
-        private void SetBusy(bool busy, string message, bool lockActions) { if (lockActions) foreach (var button in actionButtons) button.Enabled = !busy; footer.Text = message; UseWaitCursor = false; Cursor = Cursors.Default; }
+        private void SetBusy(bool busy, string message, bool lockActions) { if (lockActions) foreach (var button in actionButtons) button.Enabled = !busy; if (trayStart != null) trayStart.Enabled = !busy && !String.Equals(message, "运行中", StringComparison.OrdinalIgnoreCase); if (trayStop != null) trayStop.Enabled = !busy; footer.Text = message; UseWaitCursor = false; Cursor = Cursors.Default; }
         private void PollTick(object sender, EventArgs args) { if (activeProcess == null || !activeProcess.HasExited) return; CompleteCommand(); }
         private void HandleResize(object sender, EventArgs args) { if (WindowState == FormWindowState.Minimized) MinimizeToTray(); }
         private void MinimizeToTray() { if (exitRequested || trayIcon == null) return; WindowState = FormWindowState.Normal; ShowInTaskbar = false; Hide(); trayIcon.Visible = true; }

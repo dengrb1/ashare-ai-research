@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+from importlib import import_module
 from collections.abc import Mapping, Sequence
 from datetime import date
 from decimal import Decimal
@@ -242,6 +244,34 @@ def read_backtest_bundle(
 
 
 class BuiltinBacktestExecutor:
+    def prepare_watchlist_historical(
+        self,
+        *,
+        backtest_id: str,
+        user_id: str,
+        start_date: date,
+        end_date: date,
+        config: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Delegate bounded, user-owned collection to the configured worker adapter."""
+        path = os.environ.get("ASHARE_WATCHLIST_TRAINING_FACTORY", "").strip()
+        if not path or ":" not in path:
+            raise RuntimeError("watchlist historical training collector is not configured")
+        module_name, attribute = path.rsplit(":", 1)
+        factory = getattr(import_module(module_name), attribute)
+        collector = factory()
+        result = collector.collect(
+            backtest_id=backtest_id,
+            user_id=user_id,
+            start_date=start_date,
+            end_date=end_date,
+            symbols=tuple(config.get("symbols", ())),
+            history_sessions=int(config.get("history_sessions", 240)),
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError("watchlist historical collector returned invalid metadata")
+        return result
+
     def execute(
         self,
         *,

@@ -35,8 +35,8 @@ async def generate_decisions_for_scores(
     scores: tuple[CompositeScore, ...],
     bundle: CanonicalDailyBundle,
     *,
-    mode: str = "legacy",
-    model_version: str = "legacy-v1.0.0",
+    mode: str = "factor",
+    model_version: str | None = None,
 ) -> DecisionArtifact:
     """
     从评分结果批量生成决策。
@@ -46,8 +46,8 @@ async def generate_decisions_for_scores(
     Args:
         scores: CompositeScore 元组
         bundle: CanonicalDailyBundle
-        mode: 决策模式
-        model_version: 模型版本
+        mode: 决策模式；``factor`` 与兼容别名 ``legacy`` 都生成因子决策
+        model_version: 模型版本；缺省使用因子公式版本
 
     Returns:
         DecisionArtifact: 决策结果集合

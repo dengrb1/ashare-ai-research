@@ -34,14 +34,18 @@ def load_handler(kind: str) -> Callable[[str], Any]:
         from ashare_ai.orchestration.system2_jobs import run_system2_diagnostic_job
 
         return run_system2_diagnostic_job
-    if kind == "jev-training":
-        from ashare_ai.orchestration.jev_training_jobs import run_jev_training_job
+    if kind == "strategy-evolution":
+        from ashare_ai.orchestration.strategy_evolution_jobs import run_strategy_evolution_job
 
-        return run_jev_training_job
+        return run_strategy_evolution_job
     if kind == "maintenance":
         from ashare_ai.orchestration.maintenance_jobs import run_maintenance_job
 
         return run_maintenance_job
+    if kind == "monitor":
+        from ashare_ai.monitoring.jobs import run_live_monitoring_job
+
+        return run_live_monitoring_job
     raise ValueError(f"unsupported job kind: {kind}")
 
 
@@ -57,8 +61,9 @@ def main() -> None:
             "exit-review",
             "personal-archive",
             "system2-diagnostic",
-            "jev-training",
+            "strategy-evolution",
             "maintenance",
+            "monitor",
         ),
     )
     parser.add_argument("job_id")

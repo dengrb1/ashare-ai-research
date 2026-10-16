@@ -1820,7 +1820,11 @@ class MarketDataService:
                     try:
                         collected = self.clock()
                         bridge_item = self._quote_bridge_client.get_quote(normalized)
-                        if bridge_item is not None:
+                        # A bridge response can contain an incomplete snapshot
+                        # while its realtime price is unavailable. Treat that
+                        # as a miss so the targeted provider chain can supply
+                        # the quote instead of caching a blank price.
+                        if bridge_item is not None and bridge_item.get("price") is not None:
                             cached_at = self.clock()
                             value = {
                                 **self._normalize_quote(bridge_item),
