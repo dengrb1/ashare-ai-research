@@ -456,14 +456,18 @@ class _AKShareInProcessProvider:
         return import_module("akshare")
 
     def quotes(self, symbols: list[str]) -> list[dict[str, Any]]:
+        requested = {normalize_symbol(symbol) for symbol in symbols}
+        if not requested:
+            return []
         frame = self._sdk().stock_zh_a_spot_em()
-        del symbols
         rows: list[dict[str, Any]] = []
         for item in frame.to_dict(orient="records"):
             code = str(item.get("代码", "")).zfill(6)
             if not code.isdigit() or len(code) != 6:
                 continue
             symbol = normalize_symbol(code)
+            if symbol not in requested:
+                continue
             rows.append(
                 {
                     "symbol": symbol,
@@ -477,6 +481,13 @@ class _AKShareInProcessProvider:
                     "previous_close": _number(item.get("昨收")),
                     "volume": _number(item.get("成交量")),
                     "amount": _number(item.get("成交额")),
+                    "turnover_rate": _number(item.get("换手率")),
+                    "volume_ratio": _number(item.get("量比")),
+                    "pe_ttm": _number(item.get("市盈率-动态")),
+                    "pb": _number(item.get("市净率")),
+                    "amplitude": _number(item.get("振幅")),
+                    "market_cap": _number(item.get("总市值")),
+                    "float_market_cap": _number(item.get("流通市值")),
                 }
             )
         return rows
@@ -915,6 +926,10 @@ class SinaMarketProvider:
                     "previous_close": previous_close,
                     "volume": _number(fields[8]),
                     "amount": _number(fields[9]),
+                    "turnover_rate": None,
+                    "volume_ratio": None,
+                    "pe_ttm": None,
+                    "pb": None,
                     "_trading_at": (
                         f"{fields[30]}T{fields[31]}+08:00" if len(fields) > 31 else None
                     ),
@@ -977,6 +992,9 @@ class SinaMarketProvider:
                     "volume": volume,
                     "amount": _number(item.get("amount")),
                     "turnover_rate": _number(item.get("turnover_rate")),
+                    "volume_ratio": _number(item.get("volume_ratio")),
+                    "pe_ttm": _number(item.get("pe_ttm")),
+                    "pb": _number(item.get("pb")),
                 }
             )
         return sorted(bars, key=lambda item: item["timestamp"])[-limit:]
@@ -1109,6 +1127,10 @@ class TushareMarketProvider:
                     "previous_close": _number(item.get("pre_close")),
                     "volume": _number(item.get("vol")),
                     "amount": _number(item.get("amount")),
+                    "turnover_rate": _number(item.get("turnover_rate")),
+                    "volume_ratio": _number(item.get("volume_ratio")),
+                    "pe_ttm": _number(item.get("pe_ttm", item.get("pe"))),
+                    "pb": _number(item.get("pb")),
                 }
             )
         return rows
@@ -1219,6 +1241,8 @@ class MarketDataService:
         self.fallback = self.fallbacks[0] if self.fallbacks else None
         self.clock = clock or (lambda: datetime.now(UTC))
         self._redis_override = redis_client
+        self._redis_client: Any | None = None
+        self._redis_guard = threading.Lock()
         self._cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._cache_guard = threading.Lock()
         self._locks: dict[str, threading.Lock] = {}
@@ -1264,6 +1288,10 @@ class MarketDataService:
             self._background_refreshing.clear()
         with self._guard:
             self._locks.clear()
+        if self._redis_override is ... and self._redis_client is not None:
+            with suppress(Exception):
+                self._redis_client.close()
+            self._redis_client = None
 
     def release_after_close(self) -> None:
         if self.runtime_policy.auto_close_after_close and is_after_close(self.clock()):
@@ -1337,12 +1365,17 @@ class MarketDataService:
     def _redis(self) -> Any | None:
         if self._redis_override is not ...:
             return self._redis_override
+        if self._redis_client is not None:
+            return self._redis_client
         try:
             import redis
 
-            return redis.Redis.from_url(
-                self.settings.redis_url, decode_responses=True, socket_timeout=1
-            )
+            with self._redis_guard:
+                if self._redis_client is None:
+                    self._redis_client = redis.Redis.from_url(
+                        self.settings.redis_url, decode_responses=True, socket_timeout=1
+                    )
+            return self._redis_client
         except Exception:
             return None
 

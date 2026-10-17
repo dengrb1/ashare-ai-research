@@ -3,7 +3,7 @@ from __future__ import annotations
 import decimal
 from collections import defaultdict
 from datetime import date
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from enum import StrEnum
 from math import floor, sqrt
 from typing import Literal
@@ -302,10 +302,35 @@ class DailyExecutionModel:
             adv_amount=adv_amount,
             volatility=volatility,
         )
-        direction = Decimal("1") if order.side == Side.BUY else Decimal("-1")
-        fill_price = execution_open * (
-            Decimal("1") + direction * slippage_bps / Decimal("10000")
-        )
+        if order.limit_price is not None:
+            # A limit order can fill when the session range touches the limit,
+            # but it can never receive a worse price than the submitted limit.
+            # Slippage is only meaningful for a gap-through-open fill.
+            if order.side == Side.BUY:
+                if bar.low > order.limit_price:
+                    return self._reject(order, RejectReason.LIMIT_PRICE_NOT_MARKETABLE)
+                if execution_open < order.limit_price:
+                    raw_fill = execution_open * (
+                        Decimal("1") + slippage_bps / Decimal("10000")
+                    )
+                    fill_price = min(order.limit_price, raw_fill)
+                else:
+                    fill_price = order.limit_price
+            else:
+                if bar.high < order.limit_price:
+                    return self._reject(order, RejectReason.LIMIT_PRICE_NOT_MARKETABLE)
+                if execution_open > order.limit_price:
+                    raw_fill = execution_open * (
+                        Decimal("1") - slippage_bps / Decimal("10000")
+                    )
+                    fill_price = max(order.limit_price, raw_fill)
+                else:
+                    fill_price = order.limit_price
+        else:
+            direction = Decimal("1") if order.side == Side.BUY else Decimal("-1")
+            fill_price = execution_open * (
+                Decimal("1") + direction * slippage_bps / Decimal("10000")
+            )
         if band.upper is not None:
             fill_price = min(fill_price, band.upper)
         if band.lower is not None:
@@ -327,6 +352,27 @@ class DailyExecutionModel:
         except (ValueError, decimal.InvalidOperation):
             return self._reject(order, RejectReason.DATA_QUALITY_BLOCK)
         fill_price = self._round_money(fill_price, tick)
+        if order.side == Side.BUY:
+            try:
+                buy_min = int(rule.details.get("buy_min_qty", rule.lot_size))
+                buy_step = int(rule.details.get("buy_qty_step", rule.lot_size))
+            except (TypeError, ValueError):
+                return self._reject(order, RejectReason.DATA_QUALITY_BLOCK)
+            # Reserve the minimum commission and proportional fees before the
+            # order is committed. This turns an otherwise rejected tail order
+            # into a smaller valid lot whenever cash permits one.
+            cash_after_min_fee = account.cash - rule.minimum_commission
+            unit_cost = fill_price * (Decimal("1") + rule.commission_rate + rule.transfer_fee_rate)
+            affordable = (
+                int((cash_after_min_fee / unit_cost).to_integral_value(rounding=ROUND_FLOOR))
+                if cash_after_min_fee > 0 and unit_cost > 0
+                else 0
+            )
+            if affordable >= buy_min:
+                affordable = buy_min + ((affordable - buy_min) // buy_step) * buy_step
+                fill_quantity = min(fill_quantity, affordable)
+            else:
+                return self._reject(order, RejectReason.INSUFFICIENT_CASH)
         notional = fill_price * fill_quantity
         commission = max(rule.minimum_commission, notional * rule.commission_rate)
         stamp_tax = notional * rule.stamp_tax_rate if order.side == Side.SELL else Decimal("0")

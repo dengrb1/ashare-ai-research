@@ -20,6 +20,59 @@ export interface MarketIndicators {
   ma20: OptionalNumber[]
   macd: MacdPoint[]
   kdj: KdjPoint[]
+  atrTrailingStop: OptionalNumber[]
+  intradayVwap: OptionalNumber[]
+}
+
+export function calculateAtrTrailingStop(bars: KlineBar[], period = 20, multiplier = 2): OptionalNumber[] {
+  if (!bars.length) return []
+  const trueRanges = bars.map((bar, index) => {
+    const previousClose = index > 0 ? bars[index - 1].close : bar.open
+    return Math.max(bar.high - bar.low, Math.abs(bar.high - previousClose), Math.abs(bar.low - previousClose))
+  })
+  let highestClose = bars[0].close
+  return bars.map((bar, index) => {
+    highestClose = Math.max(highestClose, bar.close)
+    if (index < period - 1) return null
+    const atr = trueRanges.slice(index - period + 1, index + 1).reduce((sum, value) => sum + value, 0) / period
+    return Number((highestClose - multiplier * atr).toFixed(2))
+  })
+}
+
+export function calculateIntradayVwap(bars: KlineBar[]): OptionalNumber[] {
+  let volume = 0
+  let amount = 0
+  return bars.map((bar) => {
+    const barVolume = Number(bar.volume) || 0
+    const barAmount = Number(bar.amount) || barVolume * bar.close
+    volume += barVolume
+    amount += barAmount
+    return volume > 0 ? Number((amount / volume).toFixed(3)) : bar.close
+  })
+}
+
+export function aggregateWeeklyBars(bars: KlineBar[]): KlineBar[] {
+  const weeks = new Map<string, KlineBar>()
+  for (const bar of bars) {
+    const raw = bar.timestamp || bar.datetime || bar.time || bar.trading_date
+    const date = raw ? new Date(raw) : null
+    if (!date || Number.isNaN(date.getTime())) continue
+    const day = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()))
+    day.setUTCDate(day.getUTCDate() - ((day.getUTCDay() + 6) % 7))
+    const key = day.toISOString().slice(0, 10)
+    const previous = weeks.get(key)
+    if (!previous) {
+      weeks.set(key, { ...bar, trading_date: key, timestamp: key })
+      continue
+    }
+    previous.high = Math.max(previous.high, bar.high)
+    previous.low = Math.min(previous.low, bar.low)
+    previous.close = bar.close
+    previous.volume += Number(bar.volume) || 0
+    previous.amount = (previous.amount || 0) + (bar.amount || 0)
+    previous.turnover_rate = (previous.turnover_rate || 0) + (bar.turnover_rate || 0)
+  }
+  return [...weeks.values()].sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)))
 }
 
 function movingAverage(values: number[], period: number) {
@@ -84,5 +137,7 @@ export function calculateMarketIndicators(bars: KlineBar[]): MarketIndicators {
     ma20: movingAverage(closes, 20),
     macd: calculateMacd(bars),
     kdj: calculateKdj(bars),
+    atrTrailingStop: calculateAtrTrailingStop(bars),
+    intradayVwap: calculateIntradayVwap(bars),
   }
 }

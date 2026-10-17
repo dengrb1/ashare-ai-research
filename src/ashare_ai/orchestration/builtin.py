@@ -1220,11 +1220,6 @@ class BuiltinDailyBackend:
         bundle: CanonicalDailyBundle,
     ) -> tuple[tuple[BacktestSignal, ...], set[str]]:
         calendar = {item.trading_date for item in bundle.bars}
-        current_gate = run.manifest.get("data_quality_gate")
-        current_gate = current_gate if isinstance(current_gate, dict) else {}
-        current_symbols = set(current_gate.get("formal_eligible_symbols", ())) or {
-            item.symbol for item in bundle.securities
-        }
         rows = session.execute(
             select(CandidateRow, JobRun)
             .join(JobRun, CandidateRow.run_id == JobRun.run_id)
@@ -1244,9 +1239,10 @@ class BuiltinDailyBackend:
             key = (job.run_id, job.trading_date)
             gate = job.manifest.get("data_quality_gate")
             gate = gate if isinstance(gate, dict) else {}
-            if gate and int(gate.get("formal_eligible_count", 0)) < (
-                self.policy.portfolio.target_count
-            ):
+            point_in_time_symbols = set(gate.get("formal_eligible_symbols", ()))
+            if not point_in_time_symbols:
+                point_in_time_symbols = {candidate.symbol}
+            if candidate.symbol not in point_in_time_symbols:
                 dropped_symbols.add(candidate.symbol)
                 continue
             grouped.setdefault(key, []).append(candidate)
@@ -1264,10 +1260,7 @@ class BuiltinDailyBackend:
                 continue
             chosen_dates.add(key[1])
             selected = candidates_for_run[: self.policy.portfolio.target_count]
-            available = [item for item in selected if item.symbol in current_symbols]
-            dropped_symbols.update(
-                item.symbol for item in selected if item.symbol not in current_symbols
-            )
+            available = selected
             if not available:
                 continue
             target = (Decimal("1") - self.policy.portfolio.cash_buffer) / len(available)
@@ -1314,20 +1307,14 @@ class BuiltinDailyBackend:
         research_scope = str(manifest.get("research_scope", "MARKET")).upper()
         portfolio_requested = bool(manifest.get("portfolio_requested", True))
         insufficient_for_portfolio = len(formal_eligible) < self.policy.portfolio.target_count
-        if (
-            control.state != PortfolioRiskState.OBSERVE_ONLY
-            and insufficient_for_portfolio
-            and research_scope == "MARKET"
-        ):
-            control = DrawdownControlState(
-                state=PortfolioRiskState.OBSERVE_ONLY,
-                drawdown=control.drawdown,
-                observation_sessions=max(1, control.observation_sessions),
-            )
-            reason_code = "INSUFFICIENT_COMPLETE_SYMBOLS"
+        # A thin research universe is a portfolio diversification constraint,
+        # not a drawdown event. Keep individually eligible symbols actionable
+        # while reducing portfolio gross exposure in the portfolio stage.
+        if insufficient_for_portfolio and research_scope == "MARKET":
+            reason_code = "INSUFFICIENT_DIVERSIFICATION"
             reason_message = (
                 f"正式可用股票仅 {len(formal_eligible)} 只，少于组合要求的 "
-                f"{self.policy.portfolio.target_count} 只"
+                f"{self.policy.portfolio.target_count} 只；按比例降低组合仓位"
             )
         gate = {
             "minimum_required": self.policy.portfolio.target_count,
@@ -1350,15 +1337,19 @@ class BuiltinDailyBackend:
                 "reason_code": reason_code,
                 "reason_message": reason_message,
             }
-            if insufficient_for_portfolio and research_scope != "MARKET":
+            if insufficient_for_portfolio:
                 updated["portfolio_outcome"] = {
                     "requested": portfolio_requested,
-                    "eligible": False,
+                    "eligible": bool(formal_eligible),
                     "generated": False,
                     "reason_code": "INSUFFICIENT_DIVERSIFICATION",
                     "reason_message": (
                         f"正式合格股票仅 {len(formal_eligible)} 只，少于组合要求的 "
-                        f"{self.policy.portfolio.target_count} 只；不影响个股正式研究"
+                        f"{self.policy.portfolio.target_count} 只；按比例降低组合仓位"
+                    ),
+                    "gross_exposure_multiplier": min(
+                        1.0,
+                        len(formal_eligible) / self.policy.portfolio.target_count,
                     ),
                 }
             else:
@@ -1458,14 +1449,37 @@ class BuiltinDailyBackend:
                 maximum_single_weight,
                 per_symbol_budget / total_budget,
             )
+        available_count = len(quotes)
+        target_count = min(self.policy.portfolio.target_count, available_count)
+        diversification_multiplier = (
+            min(Decimal("1"), Decimal(available_count) / self.policy.portfolio.target_count)
+            if self.policy.portfolio.target_count
+            else Decimal("1")
+        )
+        gross_target = diversification_multiplier * (Decimal("1") - self.policy.portfolio.cash_buffer)
+        base_cash_weight = max(Decimal("0"), Decimal("1") - gross_target)
+        if not quotes:
+            with self.session_factory() as session:
+                run = session.get(JobRun, run_id)
+                if run is not None:
+                    updated = dict(run.manifest)
+                    updated["portfolio_outcome"] = {
+                        "requested": bool(manifest.get("portfolio_requested", True)),
+                        "eligible": False,
+                        "generated": False,
+                        "reason_code": "NO_FORMAL_ELIGIBLE_SYMBOLS",
+                    }
+                    run.manifest = updated
+                    session.commit()
+            return None
         result = PortfolioBuilder(
             PortfolioConfig(
-                target_count=self.policy.portfolio.target_count,
+                target_count=max(1, target_count),
                 maximum_single_weight=maximum_single_weight,
                 maximum_industry_weight=self.policy.portfolio.maximum_industry_weight,
                 maximum_turnover=self.policy.portfolio.maximum_one_way_turnover,
                 style_exposure_limits=self.policy.portfolio.style_exposure_limits,
-                base_cash_weight=self.policy.portfolio.cash_buffer,
+                base_cash_weight=base_cash_weight,
                 minimum_prediction_percentile=Decimal("0"),
                 constraint_version=(
                     f"{self.policy.version}-personal-budget-{stable_hash(budget)[:12]}"
@@ -1536,10 +1550,16 @@ class BuiltinDailyBackend:
             updated = dict(run.manifest)
             updated["portfolio_outcome"] = {
                 "requested": True,
-                "eligible": True,
+                "eligible": (
+                    "DEGRADED_PROPORTIONAL"
+                    if available_count < self.policy.portfolio.target_count
+                    else True
+                ),
                 "generated": True,
                 "position_count": len(portfolio.positions),
                 "nav": str(total_budget),
+                "gross_exposure_multiplier": str(diversification_multiplier),
+                "cash_buffer": str(base_cash_weight),
             }
             run.manifest = updated
             self._persist_cumulative_backtest_snapshot(

@@ -2,6 +2,27 @@ import type { ReactNode } from 'react'
 import { Inbox } from 'lucide-react'
 import { ErrorToast } from '../context/ToastContext'
 
+export function AsharePriceText({ value, digits = 2, className = '' }: { value?: number | null; digits?: number; className?: string }) {
+  return <span className={`tabular-nums metric-number price-flat ${className}`}>{value === undefined || value === null || Number.isNaN(value) ? '—' : formatNumber(value, digits)}</span>
+}
+
+export function AshareDeltaPill({ value, suffix = '%' }: { value?: number | null; suffix?: string }) {
+  if (value === undefined || value === null || Number.isNaN(value)) return <span className="tabular-nums price-flat">—</span>
+  const flat = Math.abs(value) < 1e-6
+  const up = value > 0 && !flat
+  const tone = flat ? 'price-flat' : up ? 'price-up' : 'price-down'
+  return <span className={`tabular-nums delta-pill ${tone}`}>{up ? '+' : ''}{value.toFixed(2)}{suffix}</span>
+}
+
+export function ConnectionCapsule({ state, source, reconnectAttempt = 0, onRetry }: { state: 'CONNECTED' | 'RECONNECTING' | 'DISCONNECTED'; source?: string; reconnectAttempt?: number; onRetry?: () => void }) {
+  const config = {
+    CONNECTED: { dot: 'var(--ashare-up)', label: `行情已连接 · ${source || '实时流'}` },
+    RECONNECTING: { dot: 'var(--accent-amber)', label: `正在重连 (${reconnectAttempt})` },
+    DISCONNECTED: { dot: 'var(--ashare-down)', label: '行情已断开' },
+  }[state]
+  return <div className="connection-capsule tabular-nums" role="status"><i style={{ backgroundColor: config.dot, boxShadow: `0 0 8px ${config.dot}` }} /><span>{config.label}</span>{state === 'DISCONNECTED' && onRetry && <button type="button" className="secondary" onClick={onRetry}>重试</button>}</div>
+}
+
 export function Panel({ title, eyebrow, action, children, className = '' }: { title?: string; eyebrow?: string; action?: ReactNode; children: ReactNode; className?: string }) {
   return <section className={`panel ${className}`}>
     {(title || eyebrow || action) && <header className="panel-header">
@@ -34,7 +55,7 @@ export function ErrorNotice({ message }: { message?: string }) {
   return <ErrorToast message={message} />
 }
 
-export function formatNumber(value?: number, digits = 2) {
+export function formatNumber(value?: number | null, digits = 2) {
   if (value === undefined || value === null || Number.isNaN(value)) return '—'
   return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: digits }).format(value)
 }

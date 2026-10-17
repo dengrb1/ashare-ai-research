@@ -13,6 +13,7 @@ from ashare_ai.core.time import SHANGHAI
 from ashare_ai.market.service import get_market_data_service
 from ashare_ai.notifications.service import NotificationService
 from ashare_ai.portfolio.monitoring import derive_stop_loss_price
+from ashare_ai.orchestration.research_schedule import FreeExchangeCalendar
 from ashare_ai.storage.database import SessionLocal
 from ashare_ai.storage.models import TradeAdviceMonitorRow, UserAssetState
 
@@ -30,14 +31,27 @@ class TradeAdviceService:
     """
 
     def __init__(
-        self, *, market: Any | None = None, session_factory: Callable[[], Session] = SessionLocal
+        self,
+        *,
+        market: Any | None = None,
+        calendar: Any | None = None,
+        session_factory: Callable[[], Session] = SessionLocal,
     ) -> None:
         self.market = market or get_market_data_service()
+        self.calendar = calendar or FreeExchangeCalendar()
         self.session_factory = session_factory
+
+    def _is_trading_day(self, trading_date) -> bool:
+        try:
+            return trading_date in set(self.calendar.sessions(trading_date, trading_date))
+        except Exception:
+            return False
 
     def generate_daily(self, *, now: datetime) -> int:
         current = now.astimezone(SHANGHAI)
         if current.time() < time(9, 30) or current.time() > time(15, 0):
+            return 0
+        if not self._is_trading_day(current.date()):
             return 0
         with self.session_factory() as session:
             rows = list(
@@ -126,6 +140,8 @@ class TradeAdviceService:
     def dispatch(self, *, now: datetime) -> list[str]:
         current = now.astimezone(SHANGHAI)
         if not (time(9, 30) <= current.time() <= time(15, 0)):
+            return []
+        if not self._is_trading_day(current.date()):
             return []
         with self.session_factory() as session:
             rows = list(

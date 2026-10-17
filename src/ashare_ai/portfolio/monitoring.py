@@ -58,18 +58,14 @@ def derive_stop_loss_price(
     if manual not in (None, ""):
         value = Decimal(str(manual))
         if value > 0:
-            # A manual value is constrained to the same 5%--10% loss band as ATR.
-            # This stops an accidental far-below-cost entry from silently weakening
-            # the paper-risk monitor.
-            bounded = _clamp(
-                value,
-                cost * (Decimal("1") - max_loss_pct),
-                cost * (Decimal("1") - min_loss_pct),
-            )
+            # Manual stops are user policy. Validate a sane positive range while
+            # preserving tight stops and profitable trailing stops above cost.
+            if value >= cost * Decimal("2"):
+                raise ValueError("manual stop_loss_price must be below twice the cost")
             return StopLossThreshold(
-                price=_money(bounded),
+                price=_money(value),
                 mode="MANUAL",
-                loss_pct=_clamp(Decimal("1") - bounded / cost, min_loss_pct, max_loss_pct),
+                loss_pct=Decimal("1") - value / cost,
                 atr=None,
             )
     bars = list(daily_bars or [])[-max(atr_sessions + 1, 2) :]

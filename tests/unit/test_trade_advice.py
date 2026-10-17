@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from sqlalchemy import create_engine, select
@@ -16,6 +16,11 @@ from ashare_ai.storage.models import (
 )
 
 TRADING_NOON = datetime(2026, 7, 14, 12, 0, tzinfo=SHANGHAI)
+
+
+class TestCalendar:
+    def sessions(self, start: date, end: date) -> tuple[date, ...]:
+        return (start,) if start == end and start.weekday() < 5 else ()
 
 
 class FakeMarket:
@@ -64,6 +69,7 @@ def test_generate_daily_treats_zero_price_as_unavailable() -> None:
     monitor = _monitor(factory)
     service = TradeAdviceService(
         market=FakeMarket([{"symbol": monitor.symbol, "price": "0", "change_pct": "0"}]),
+        calendar=TestCalendar(),
         session_factory=factory,
     )
 
@@ -82,6 +88,7 @@ def test_dispatch_skips_zero_price_buy_alert() -> None:
     monitor = _monitor(factory, ai_buy_price=Decimal("10"))
     service = TradeAdviceService(
         market=FakeMarket([{"symbol": monitor.symbol, "price": "0", "change_pct": "0"}]),
+        calendar=TestCalendar(),
         session_factory=factory,
     )
 
@@ -98,6 +105,7 @@ def test_dispatch_fires_buy_alert_for_positive_price_below_target() -> None:
     monitor = _monitor(factory, ai_buy_price=Decimal("10"))
     service = TradeAdviceService(
         market=FakeMarket([{"symbol": monitor.symbol, "price": "9.5", "change_pct": "1"}]),
+        calendar=TestCalendar(),
         session_factory=factory,
     )
 
@@ -115,6 +123,7 @@ def test_generate_daily_requires_trading_hours() -> None:
     monitor = _monitor(factory)
     service = TradeAdviceService(
         market=FakeMarket([{"symbol": monitor.symbol, "price": "10", "change_pct": "0"}]),
+        calendar=TestCalendar(),
         session_factory=factory,
     )
     before_open = TRADING_NOON.replace(
@@ -132,6 +141,7 @@ def test_generate_daily_materialises_targets_for_positive_price() -> None:
     monitor = _monitor(factory)
     service = TradeAdviceService(
         market=FakeMarket([{"symbol": monitor.symbol, "price": "12", "change_pct": "2"}]),
+        calendar=TestCalendar(),
         session_factory=factory,
     )
 

@@ -618,8 +618,9 @@ def _simulate_one_entry(
         for current_index in range(buy_index + 1, calendar_length):
             current_date = calendar[current_index]
             bar = bars[current_date]
-            highest = max(highest, bar.high)
             built_path.append((current_date, bar, highest))
+            # The current day's high is only known after today's stop checks.
+            highest = max(highest, bar.high)
         path = tuple(built_path)
         if path_cache is not None:
             path_cache[buy_key] = path

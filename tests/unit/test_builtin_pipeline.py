@@ -565,7 +565,7 @@ def test_builtin_demo_runs_full_daily_flow_and_is_reproducible(tmp_path) -> None
 
 @pytest.mark.parametrize(
     ("complete_count", "expected_status", "expected_portfolio"),
-    [(15, "SUCCEEDED", True), (14, "FUSED", False)],
+    [(15, "SUCCEEDED", True), (14, "SUCCEEDED", True)],
 )
 def test_formal_portfolio_gate_is_per_symbol(
     tmp_path,

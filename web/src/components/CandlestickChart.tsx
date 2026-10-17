@@ -118,7 +118,7 @@ export function CandlestickChart({ bars, period, hasEarlier = false, loadingEarl
 
   const priceValues = visible.flatMap((bar, position) => {
     const index = indexes[position]
-    return [bar.low, bar.high, indicators.ma5[index], indicators.ma10[index], indicators.ma20[index]].filter((value): value is number => value !== null && Number.isFinite(value))
+    return [bar.low, bar.high, indicators.ma5[index], indicators.ma10[index], indicators.ma20[index], indicators.atrTrailingStop[index], indicators.intradayVwap[index]].filter((value): value is number => value !== null && Number.isFinite(value))
   })
   const rawPriceMin = Math.min(...priceValues)
   const rawPriceMax = Math.max(...priceValues)
@@ -156,7 +156,7 @@ export function CandlestickChart({ bars, period, hasEarlier = false, loadingEarl
   }
 
   function indexAt(value: number) {
-    const position = Math.max(0, Math.min(visible.length - 1, Math.floor((value - LEFT) / xStep)))
+    const position = Math.max(0, Math.min(visible.length - 1, Math.round((value - LEFT - xStep * 0.5) / Math.max(1e-6, xStep))))
     return start + position
   }
 
@@ -245,10 +245,11 @@ export function CandlestickChart({ bars, period, hasEarlier = false, loadingEarl
       <polyline points={points(indicators.ma20, indexes, x, priceY)} className="indicator-line ma20-line" fill="none" />
       {visible.map((bar, position) => {
         const candleX = x(position)
-        const up = bar.close >= bar.open
+        const flat = Math.abs(bar.close - bar.open) < 1e-6
+        const up = bar.close > bar.open
         const bodyTop = priceY(Math.max(bar.open, bar.close))
         const bodyHeight = Math.max(1.5, Math.abs(priceY(bar.open) - priceY(bar.close)))
-        return <g key={`${barTimestamp(bar)}-${position}`} className={up ? 'candle-up' : 'candle-down'}>
+        return <g key={`${barTimestamp(bar)}-${position}`} className={flat ? 'candle-flat' : up ? 'candle-up' : 'candle-down'}>
           <line x1={candleX} x2={candleX} y1={priceY(bar.high)} y2={priceY(bar.low)} />
           <rect x={candleX - Math.max(1.2, xStep * .28)} y={bodyTop} width={Math.max(2.4, xStep * .56)} height={bodyHeight} />
         </g>
@@ -258,9 +259,10 @@ export function CandlestickChart({ bars, period, hasEarlier = false, loadingEarl
       <g clipPath={'url(#' + clipId + '-secondary)'}>
       {secondary === 'volume' && visible.map((bar, position) => {
         if (!Number.isFinite(bar.volume)) return null
-        const up = bar.close >= bar.open
+        const flat = Math.abs(bar.close - bar.open) < 1e-6
+        const up = bar.close > bar.open
         const top = secondaryY(bar.volume)
-        return <rect key={`volume-${barTimestamp(bar)}-${position}`} className={up ? 'volume-up' : 'volume-down'} x={x(position) - Math.max(1, xStep * .32)} y={top} width={Math.max(2, xStep * .64)} height={Math.max(1, SUB_BOTTOM - top)} />
+        return <rect key={`volume-${barTimestamp(bar)}-${position}`} className={flat ? 'volume-flat' : up ? 'volume-up' : 'volume-down'} x={x(position) - Math.max(1, xStep * .32)} y={top} width={Math.max(2, xStep * .64)} height={Math.max(1, SUB_BOTTOM - top)} />
       })}
       {secondary === 'macd' && <>
         <line x1={LEFT} y1={secondaryY(0)} x2={WIDTH - RIGHT} y2={secondaryY(0)} className="chart-zero" />

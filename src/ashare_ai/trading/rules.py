@@ -344,6 +344,83 @@ class PriceBand(BaseModel):
     source: str
 
 
+def resolve_ashare_board_rules(symbol: str) -> dict[str, int | Decimal]:
+    """Return deterministic order-unit and price-cage rules for an A-share code."""
+
+    parts = symbol.strip().upper().split(".", 1)
+    code = parts[0]
+    suffix = parts[1] if len(parts) == 2 else ""
+    if code.startswith("688"):
+        return {
+            "min_buy_qty": 200,
+            "buy_qty_step": 1,
+            "sell_qty_step": 1,
+            "price_tick": Decimal("0.01"),
+            "cage_ratio": Decimal("0.02"),
+        }
+    if suffix == "BJ" or code.startswith(("43", "83", "87", "920")):
+        return {
+            "min_buy_qty": 100,
+            "buy_qty_step": 1,
+            "sell_qty_step": 1,
+            "price_tick": Decimal("0.01"),
+            "cage_ratio": Decimal("0.05"),
+        }
+    return {
+        "min_buy_qty": 100,
+        "buy_qty_step": 100,
+        "sell_qty_step": 100,
+        "price_tick": Decimal("0.01"),
+        "cage_ratio": Decimal("0.02"),
+    }
+
+
+def fit_cash_aware_order_quantity(
+    *,
+    symbol: str,
+    budget: Decimal,
+    available_cash: Decimal,
+    reference_price: Decimal,
+    commission_rate: Decimal = Decimal("0.00025"),
+    min_commission: Decimal = Decimal("5.00"),
+    transfer_fee_rate: Decimal = Decimal("0.00001"),
+    slippage_bps: Decimal = Decimal("5.0"),
+    overnight_gap_buffer: Decimal = Decimal("0.015"),
+) -> int:
+    """Fit a buy quantity after fees, slippage and an overnight price buffer."""
+
+    if reference_price <= 0 or budget <= 0 or available_cash <= 0:
+        return 0
+    board = resolve_ashare_board_rules(symbol)
+    min_buy = int(board["min_buy_qty"])
+    step = int(board["buy_qty_step"])
+    effective_cash = min(budget, max(Decimal("0"), available_cash - min_commission))
+    unit_price = reference_price * (
+        Decimal("1")
+        + overnight_gap_buffer
+        + slippage_bps / Decimal("10000")
+        + commission_rate
+        + transfer_fee_rate
+    )
+    raw_qty = int((effective_cash / unit_price).to_integral_value(rounding=ROUND_FLOOR))
+    if raw_qty < min_buy:
+        return 0
+    return min_buy + ((raw_qty - min_buy) // step) * step
+
+
+def within_price_cage(
+    *, symbol: str, reference_price: Decimal, order_price: Decimal
+) -> bool:
+    """Check the board-specific continuous-auction price cage."""
+
+    if reference_price <= 0 or order_price <= 0:
+        return False
+    ratio = Decimal(str(resolve_ashare_board_rules(symbol)["cage_ratio"]))
+    lower = reference_price * (Decimal("1") - ratio)
+    upper = reference_price * (Decimal("1") + ratio)
+    return lower <= order_price <= upper
+
+
 def _round_to_tick(value: Decimal, tick: Decimal) -> Decimal:
     units = (value / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
     return units * tick

@@ -191,8 +191,8 @@ def evaluate_factor_genome(
     """Walk-forward evaluation of one genome over frozen rows.
 
     The position implied by the genome is held for the label window and earns
-    that row's realized ``forward_return``.  Turnover is the mean absolute
-    change in position weight between consecutive rows, expressed in percent.
+    each trading day's cross-sectional portfolio return. Overlapping labels
+    are grouped by date and rebalances incur a deterministic transaction cost.
     """
 
     if not rows:
@@ -207,29 +207,45 @@ def evaluate_factor_genome(
     previous_weights: dict[str, float] = {}
     turnover_total = 0.0
 
+    by_date: dict[date, list[FactorEvaluationRow]] = {}
     for row in rows:
-        score = calculate_factor_score(
-            fundamental_score=row.fundamental_score,
-            technical_score=row.technical_score,
-            sentiment_score=row.sentiment_score,
-            quality_confidence_score=row.quality_confidence_score,
-            genome=genome,
-            dividend_bonus=row.dividend_bonus,
-            event_risk_multiplier=row.event_risk_multiplier,
-            market_score_adjustment=row.market_score_adjustment,
-            market_risk_multiplier=row.market_risk_multiplier,
-            momentum_score=row.momentum_score,
-            volatility_score=row.volatility_score,
-            liquidity_score=row.liquidity_score,
-        )
-        weight = factor_position(score, genome) / 100.0
-        previous_weight = previous_weights.get(row.symbol, 0.0)
-        turnover_total += abs(weight - previous_weight)
-        previous_weights[row.symbol] = weight
-
-        period_return = weight * row.forward_return
-        returns.append(period_return)
-        equity *= 1.0 + period_return
+        by_date.setdefault(row.trading_date, []).append(row)
+    for trading_date in sorted(by_date):
+        daily_rows = by_date[trading_date]
+        raw_weights: dict[str, float] = {}
+        for row in daily_rows:
+            score = calculate_factor_score(
+                fundamental_score=row.fundamental_score,
+                technical_score=row.technical_score,
+                sentiment_score=row.sentiment_score,
+                quality_confidence_score=row.quality_confidence_score,
+                genome=genome,
+                dividend_bonus=row.dividend_bonus,
+                event_risk_multiplier=row.event_risk_multiplier,
+                market_score_adjustment=row.market_score_adjustment,
+                market_risk_multiplier=row.market_risk_multiplier,
+                momentum_score=row.momentum_score,
+                volatility_score=row.volatility_score,
+                liquidity_score=row.liquidity_score,
+            )
+            raw_weights[row.symbol] = factor_position(score, genome) / 100.0
+        raw_total = sum(raw_weights.values())
+        gross = min(1.0, raw_total)
+        daily_return = 0.0
+        daily_turnover = 0.0
+        for row in daily_rows:
+            weight = (raw_weights[row.symbol] / raw_total * gross) if raw_total else 0.0
+            previous_weight = previous_weights.get(row.symbol, 0.0)
+            daily_turnover += abs(weight - previous_weight)
+            previous_weights[row.symbol] = weight
+            daily_return += weight * row.forward_return
+        # Charge a deterministic 10bp one-way trading cost on the day's
+        # rebalance. Grouping by trading date prevents overlapping labels from
+        # being compounded as if each symbol were a sequential full-account bet.
+        turnover_total += daily_turnover
+        daily_return -= daily_turnover * 0.001
+        returns.append(daily_return)
+        equity *= 1.0 + daily_return
         peak = max(peak, equity)
         maximum_drawdown = max(maximum_drawdown, (peak - equity) / peak if peak else 0.0)
 
@@ -243,7 +259,7 @@ def evaluate_factor_genome(
         net_return=round(equity - 1.0, 6),
         sharpe=round(sharpe, 6),
         maximum_drawdown=round(maximum_drawdown, 6),
-        turnover=round(turnover_total / len(rows) * 100.0, 6),
+        turnover=round(turnover_total / len(by_date) * 100.0, 6),
     )
 
 

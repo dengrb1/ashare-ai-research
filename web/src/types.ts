@@ -129,6 +129,13 @@ export interface Quote {
   prev_close?: number
   volume?: number
   amount?: number
+  turnover_rate?: number | null
+  volume_ratio?: number | null
+  pe_ttm?: number | null
+  pb?: number | null
+  amplitude?: number | null
+  market_cap?: number | null
+  float_market_cap?: number | null
   /** Live quotes are provider-native, unadjusted prices. */
   price_basis?: 'raw' | string
   source?: string

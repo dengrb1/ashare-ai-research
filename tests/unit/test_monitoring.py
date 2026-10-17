@@ -55,13 +55,13 @@ class _Market:
         return {"bars": []}
 
 
-def test_derive_stop_loss_clamps_manual_value_and_uses_eight_percent_fallback() -> None:
-    clamped = derive_stop_loss_price({"cost": 100, "stop_loss_price": 80})
+def test_derive_stop_loss_preserves_manual_value_and_uses_eight_percent_fallback() -> None:
+    manual = derive_stop_loss_price({"cost": 100, "stop_loss_price": 80})
     fallback = derive_stop_loss_price({"cost": 100}, [])
 
-    assert clamped.mode == "MANUAL"
-    assert clamped.price == Decimal("90.00")
-    assert clamped.loss_pct == Decimal("0.10")
+    assert manual.mode == "MANUAL"
+    assert manual.price == Decimal("80.0000")
+    assert manual.loss_pct == Decimal("0.20")
     assert fallback.mode == "FALLBACK_8PCT"
     assert fallback.price == Decimal("92.00")
 

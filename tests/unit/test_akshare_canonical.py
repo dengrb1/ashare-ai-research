@@ -142,9 +142,9 @@ def test_akshare_bundle_uses_real_market_history_and_labeled_neutral_placeholder
     assert all(item["market_history_real"] for item in bundle.data_quality.values())
     assert all(item["fundamental_placeholder"] for item in bundle.data_quality.values())
     # The stub provider has no industry_membership method, so every symbol keeps
-    # the deterministic neutral placeholder buckets.
-    assert len({item.industry_code for item in bundle.industries}) == 5
-    assert {item.taxonomy for item in bundle.industries} == {"PLACEHOLDER"}
+    # one explicit unknown industry and cannot be spread across fake buckets.
+    assert {item.industry_code for item in bundle.industries} == {"UNKNOWN"}
+    assert {item.taxonomy for item in bundle.industries} == {"UNKNOWN"}
     assert all(item["industry_placeholder"] for item in bundle.data_quality.values())
     assert set(bundle.benchmark_returns) == {
         "CSI300",
@@ -436,8 +436,8 @@ def test_bundle_falls_back_to_industry_placeholder_when_acquisition_fails() -> N
     bundle = builder.build(trading_date, datetime(2026, 7, 15, 18, tzinfo=SHANGHAI))
 
     failed = next(item for item in bundle.industries if item.symbol == "600000.SH")
-    assert failed.taxonomy == "PLACEHOLDER"
-    assert failed.industry_code.startswith("PLACEHOLDER_")
+    assert failed.taxonomy == "UNKNOWN"
+    assert failed.industry_code == "UNKNOWN"
     assert bundle.data_quality["600000.SH"]["industry_placeholder"] is True
     assert (
         bundle.data_quality["600000.SH"]["industry_acquisition_error"]

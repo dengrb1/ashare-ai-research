@@ -571,6 +571,10 @@ class TushareCanonicalProvider:
             fields="ts_code,name,list_date",
         )
         daily = self.client.daily(trade_date=date.today().strftime("%Y%m%d"))
+        latest = {
+            str(item.get("ts_code")): item
+            for item in vendor_records(daily)
+        }
         amounts = {
             str(item.get("ts_code")): item.get("amount", 0)
             for item in vendor_records(daily)
@@ -579,8 +583,11 @@ class TushareCanonicalProvider:
             {
                 "代码": str(item.get("ts_code", "")).split(".", 1)[0],
                 "名称": item.get("name"),
-                "最新价": 1,
+                # Missing quote data must remain missing so the universe gate
+                # excludes it instead of treating every security as price 1.
+                "最新价": latest.get(str(item.get("ts_code")), {}).get("close"),
                 "成交额": amounts.get(str(item.get("ts_code")), 0),
+                "上市日期": item.get("list_date"),
             }
             for item in vendor_records(master)
         ]
@@ -1006,7 +1013,11 @@ class AKShareCanonicalBundleBuilder:
             history_is_current = history[-1]["trading_date"] == trading_date
             exchange = infer_exchange(symbol.split(".", 1)[0])
             board = _board(symbol)
-            list_date = history[0]["trading_date"] - timedelta(days=365)
+            list_date = _date_value(security.get("上市日期", security.get("list_date")))
+            # A missing listing date is a data-quality limitation, not evidence
+            # that the security existed a year before the first observed bar.
+            if list_date is None or list_date > trading_date:
+                list_date = trading_date
             master_payload = {"security": security, "fetched_at": fetched_at.isoformat()}
             securities.append(
                 SecurityMasterRecord(
@@ -1088,7 +1099,6 @@ class AKShareCanonicalBundleBuilder:
                     )
                 )
             else:
-                industry_bucket = int(stable_hash(symbol)[:8], 16) % 5
                 industries.append(
                     IndustryMembership(
                         **_pit(
@@ -1102,10 +1112,10 @@ class AKShareCanonicalBundleBuilder:
                             {"reason": "AKShare spot/history has no PIT industry taxonomy"},
                             AvailabilityBasis.DERIVED,
                         ),
-                        taxonomy="PLACEHOLDER",
-                        taxonomy_version="neutral-v1",
-                        industry_code=f"PLACEHOLDER_{industry_bucket}",
-                        industry_name=f"未知行业占位桶 {industry_bucket + 1}",
+                        taxonomy="UNKNOWN",
+                        taxonomy_version="neutral-v2",
+                        industry_code="UNKNOWN",
+                        industry_name="未知行业",
                         effective_from=trading_date,
                     )
                 )
@@ -1224,7 +1234,7 @@ class AKShareCanonicalBundleBuilder:
                 "industry_source": _record_sources(industry_rows),
                 "industry_acquisition_error": industry_error,
                 "security_master_placeholder": security["name"] == symbol,
-                "list_date_placeholder": True,
+                "list_date_placeholder": security.get("上市日期", security.get("list_date")) is None,
                 "tracked_only": tracked_only,
                 "history_is_current": history_is_current,
                 "fundamental_reason_codes": fundamental_reasons,

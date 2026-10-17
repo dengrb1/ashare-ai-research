@@ -66,6 +66,18 @@ class FactorGenome(FrozenModel):
     risk_budget: float = Field(default=0.20, gt=0.0, le=1.0)
     mutation_seed: int = Field(default=0, ge=0)
 
+    @property
+    def min_score_for_low_risk(self) -> float:
+        """Semantic alias for the lower score bound of the LOW risk band."""
+
+        return self.risk_low_threshold
+
+    @property
+    def max_score_for_high_risk(self) -> float:
+        """Semantic alias for the upper score bound of the HIGH risk band."""
+
+        return self.risk_high_threshold
+
     @model_validator(mode="after")
     def validate_bands(self) -> FactorGenome:
         if self.schema_version != FACTOR_GENOME_SCHEMA_VERSION:
